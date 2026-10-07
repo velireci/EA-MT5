@@ -1,0 +1,16 @@
+.env
+.env.*
+!.env.example
+*.ex5
+*.log
+*.tmp
+reports/runtime/
+.claude/settings.local.json
+
+# --- TEMPORARY: repository velireci/velo is PUBLIC (checked 2026-10-07) ---
+# The starter package states the project contains client information and must
+# be kept private. Until the repository visibility is changed to private, the
+# original client submission and the full strategy analysis stay untracked.
+# Remove this block once the repository is private, then commit these folders.
+inputs/
+docs/reference/
