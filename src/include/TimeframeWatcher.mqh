@@ -2,9 +2,10 @@
 //| TimeframeWatcher.mqh                                             |
 //|                                                                  |
 //| Read-only access to one symbol/timeframe series:                 |
-//|   - history readiness (never report ready while data is loading) |
-//|   - strict separation of the FORMING bar (index 0, still         |
-//|     changing) and the last CLOSED bar (index 1, final)           |
+//|   - history readiness, with an explicit throttled request for the|
+//|     depth each timeframe needs (no blocking wait, not per tick)  |
+//|   - strict separation of the FORMING bar (position 0, still      |
+//|     changing) and the last CLOSED bar (position 1, final)        |
 //|   - one new-bar event per timeframe per new bar                  |
 //|                                                                  |
 //| Contains no trading calls. T001 scope only.                      |
@@ -67,12 +68,41 @@ private:
    long              m_new_bar_count;
    int               m_skipped_bars;  // bars that closed unobserved before the last event
 
+   //--- History request throttle. Without it the request below would be
+   //--- re-issued on every tick while the download is still running.
+   uint              m_request_interval_ms;
+   uint              m_last_request_ms;
+   bool              m_request_sent;
+   int               m_request_count;
+
+   //--- Ask the terminal to build this series down to m_min_bars.
+   //--- CopyTime at the deepest required position is the documented way to
+   //--- trigger that build; asking for a single element keeps it cheap.
+   //--- It returns immediately - there is no wait loop and no Sleep here,
+   //--- so a slow download never blocks OnTick or OnTimer.
+   void              RequestHistory(void)
+     {
+      uint now = GetTickCount();
+      //--- Unsigned arithmetic makes the GetTickCount wrap-around harmless.
+      if(m_request_sent && (now - m_last_request_ms) < m_request_interval_ms)
+         return;
+
+      m_last_request_ms = now;
+      m_request_sent    = true;
+      m_request_count++;
+
+      datetime probe[];
+      if(CopyTime(m_symbol, m_period, m_min_bars - 1, 1, probe) < 0)
+         ResetLastError();   // expected while the terminal is still loading
+     }
+
 public:
                      CTimeframeWatcher(void)
      {
-      m_symbol   = "";
-      m_period   = PERIOD_CURRENT;
-      m_min_bars = 3;
+      m_symbol              = "";
+      m_period              = PERIOD_CURRENT;
+      m_min_bars            = 3;
+      m_request_interval_ms = 2000;
       Reset();
      }
 
@@ -89,12 +119,15 @@ public:
      {
       m_state         = TF_STATE_UNKNOWN;
       m_detail        = "not polled yet";
-      m_bars          = 0;
-      m_bars_valid    = false;
-      m_baseline_set  = false;
-      m_forming_open  = 0;
-      m_new_bar_count = 0;
-      m_skipped_bars  = 0;
+      m_bars            = 0;
+      m_bars_valid      = false;
+      m_baseline_set    = false;
+      m_forming_open    = 0;
+      m_new_bar_count   = 0;
+      m_skipped_bars    = 0;
+      m_last_request_ms = 0;
+      m_request_sent    = false;
+      m_request_count   = 0;
       ZeroMemory(m_forming);
       ZeroMemory(m_closed);
      }
@@ -106,19 +139,26 @@ public:
       new_bar      = false;
       m_bars_valid = false;
 
-      //--- Bars() also makes the terminal request the missing history.
       m_bars = Bars(m_symbol, m_period);
-      if(m_bars <= 0)
-        {
-         m_state  = TF_STATE_NO_HISTORY;
-         m_detail = "no bars yet, history requested";
-         ResetLastError();
-         return(false);
-        }
+
+      //--- Short of the depth this timeframe needs: ask for it explicitly
+      //--- (throttled) BEFORE reporting that history is missing, so the
+      //--- download is actually under way while this returns false.
       if(m_bars < m_min_bars)
         {
-         m_state  = TF_STATE_LOADING;
-         m_detail = StringFormat("%d/%d bars", m_bars, m_min_bars);
+         RequestHistory();
+         if(m_bars <= 0)
+           {
+            m_state  = TF_STATE_NO_HISTORY;
+            m_detail = StringFormat("no bars yet, %d history request(s) sent", m_request_count);
+            ResetLastError();
+           }
+         else
+           {
+            m_state  = TF_STATE_LOADING;
+            m_detail = StringFormat("%d/%d bars, %d history request(s) sent",
+                                    m_bars, m_min_bars, m_request_count);
+           }
          return(false);
         }
 
@@ -231,7 +271,8 @@ public:
    int               BarsAvailable(void)  const { return(m_bars); }
    int               MinBars(void)        const { return(m_min_bars); }
    long              NewBarCount(void)    const { return(m_new_bar_count); }
-   int               SkippedBars(void)    const { return(m_skipped_bars); }
+   int               SkippedBars(void)     const { return(m_skipped_bars); }
+   int               HistoryRequests(void) const { return(m_request_count); }
    ENUM_TIMEFRAMES   Period(void)         const { return(m_period); }
    string            PeriodName(void)     const { return(TfShortName(m_period)); }
 

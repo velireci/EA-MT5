@@ -23,21 +23,9 @@ done
 [ $FAIL -eq 0 ] && echo "  PASS: no order/trading API in code"
 
 echo "=== CHECK 2: brace / parenthesis balance per file ==="
-for f in $FILES; do
-  python3 - "$f" <<'PY'
-import sys,re
-p=sys.argv[1]; s=open(p).read()
-s=re.sub(r'/\*.*?\*/','',s,flags=re.S)
-s=re.sub(r'//[^\n]*','',s)
-s=re.sub(r'"(\\.|[^"\\])*"','""',s)
-s=re.sub(r"'(\\.|[^'\\])*'","''",s)
-ok=True
-for o,c,n in (('{','}','braces'),('(',')','parens'),('[',']','brackets')):
-    d=s.count(o)-s.count(c)
-    if d: ok=False; print(f"  FAIL {p}: {n} unbalanced by {d}")
-if ok: print(f"  PASS {p}: braces/parens/brackets balanced")
-PY
-done
+# The checker exits non-zero on an imbalance; fold that into FAIL so the
+# final RESULT can never report success while a file is unbalanced.
+python3 tools/t001-check-balance.py $FILES || FAIL=1
 
 echo "=== CHECK 3: every #ifndef guard closed, includes resolve ==="
 for f in src/include/*.mqh; do

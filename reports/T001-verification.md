@@ -3,11 +3,13 @@
 Data: 2026-10-07 · Degë: `claude/amazing-darwin-icpcjd` · Zbatoi: Claude Code (agjenti kryesor)
 Task: [tasks/T001-foundation.md](../tasks/T001-foundation.md)
 
-## 1. Mjedisi i zhvillimit
+## 1. Evidenca e kompilimit
 
-Zhvillimi u krye në një kontejner Linux (`Linux x86_64`). **MetaEditor dhe MetaTrader 5 nuk ekzistojnë në këtë mjedis.**
+Kompilimi dhe testimi në MT5 janë dy evidenca të ndryshme. Këtu ndahen.
 
-Komandat e ekzekutuara dhe rezultati faktik:
+### 1a. Kompilimi
+
+**Mjedisi im i zhvillimit nuk ka MetaEditor.** Komandat dhe rezultati faktik:
 
 ```
 command -v metaeditor64.exe metaeditor64 metaeditor mql5 wine wine64 terminal64.exe
@@ -16,7 +18,22 @@ find / -iname 'metaeditor*' -not -path '/proc/*'
   → bosh
 ```
 
-Pasojë: pika 1 e "Completion evidence" (kompilimi) dhe pikat 2–4 (sjellja në runtime) **NUK u verifikuan nga unë**. Më poshtë janë kontrollet që u kryen vërtet dhe hapat e sakta që duhet të kryejë pronari.
+Pra unë nuk kam kompiluar asgjë, dhe nuk e shkruaj dot kompilimin si të verifikuar nga vetëja.
+
+**Codex e kompiloi**, dhe ky është evidenca e vetme e kompilimit që ka ky projekt:
+
+| Commit | Rezultati | Gjendja |
+|---|---|---|
+| `c810f90` | **0 errors, 1 warning** (warning 68, formati i `#property version`) | warning-u u rregullua në këtë raund |
+| commit-i i tanishëm | **I PAKOMPILUAR** | kodi ndryshoi pas `c810f90`; duhet rikompilim |
+
+Ndryshimet pas `c810f90` prekën `src/XauUsdFoundation.mq5` (blloku i `#property`) dhe `src/include/TimeframeWatcher.mqh` (kërkesa e historikut). **Asnjëra nuk është kompiluar.** Pritet `0 errors, 0 warnings`; njësoj duhet konfirmuar, jo supozuar.
+
+### 1b. Testet në MT5
+
+**Asnjë test në MT5 nuk është kryer, në asnjë commit.** Sjellja në runtime — gatishmëria gjatë ngarkimit, eventet e candle-ve, restart-i, mungesa faktike e urdhrave në një llogari — mbetet tërësisht e paverifikuar. Kontrollet janë në §5B.
+
+Kompilimi i pastër **nuk** thotë asgjë për asnjërën prej tyre.
 
 ## 2. Çfarë u verifikua realisht (kontrolle statike, të ekzekutuara)
 
@@ -32,7 +49,21 @@ Skripti i kontrolleve u ekzekutuar mbi katër skedarët e burimit. Rezultati: **
 | 6 | Specifikuesit e `StringFormat`/`PrintFormat` përputhen me argumentet | parser Python (`tools/t001-check-format-strings.py`) mbi të 24 thirrjet | PASS — 0 mospërputhje |
 | 7 | Burimi vetëm ASCII | `LC_ALL=C grep -c '[^ -~\t]'` | PASS 4/4 — MetaEditor pa BOM nuk mund t'i shtrembërojë string-at |
 
-Kontrollet janë të ri-ekzekutueshme: `bash tools/t001-static-checks.sh` (nga rrënja e repo-s). Dalja e plotë e ekzekutimit të fundit: `ALL STATIC CHECKS PASSED`.
+Kontrollet janë të ri-ekzekutueshme: `bash tools/t001-static-checks.sh` (nga rrënja e repo-s). Ekzekutimi i fundit: `ALL STATIC CHECKS PASSED`, exit code `0`.
+
+**Defekt në vetë kontrollet, gjetur nga Codex dhe i rregulluar.** Kontrolli 2 printonte `FAIL` por Python-i nuk dilte me kod gabimi dhe Bash-i nuk e përfshinte në rezultatin përfundimtar — pra një skedar me kllapa të pabalancuara jepte prapëseprapë `ALL STATIC CHECKS PASSED` dhe exit `0`. Pra kontrolli 2 ishte dekorativ.
+
+E riprodhova përpara se ta rregulloja, me një kopje ku hoqa një kllapë mbyllëse nga `StatusPanel.mqh`:
+
+| | Përpara rregullimit | Pas rregullimit |
+|---|---|---|
+| Rreshti i kontrollit 2 | `FAIL ... braces unbalanced by 1` | `FAIL ... braces unbalanced by +1` dhe `FAIL: 1 file(s) unbalanced` |
+| Rezultati përfundimtar | `ALL STATIC CHECKS PASSED` | `STATIC CHECKS FAILED` |
+| Exit code | `0` | `1` |
+
+Rregullimi: logjika doli te `tools/t001-check-balance.py`, që kthen `1` kur ndonjë skedar është i pabalancuar, dhe Bash-i e përfshin me `|| FAIL=1`. Testi me kllapë të munguar u ri-ekzekutua pas rregullimit dhe jep exit `1`; pema e vërtetë jep exit `0`.
+
+Kontrolli 4 (API i stilit MQL4) mbetet qëllimisht vetëm **WARN** dhe nuk e ndikon exit code-in: modelet e tij (p.sh. `Bid`, `Ask`) mund të japin përputhje të rreme.
 
 Kontrolli 1 është evidenca e drejtpërdrejtë për pikën 5 të "Completion evidence" (asnjë urdhër i dërguar/ndryshuar/mbyllur): në kod nuk ekziston asnjë funksion që do ta bënte këtë. Pas kompilimit, pronari mund ta rikonfirmojë duke e nisur EA-në me **AutoTrading të fikur** — ndërtimi punon normalisht ashtu.
 
@@ -53,21 +84,33 @@ Gjetjet dhe veprimet e marrra: **§6**. Rishikim statik nuk provon sjellje në r
 | Inspektimi i specifikimit të simbolit | `src/include/SymbolSnapshot.mqh` | digits, point, tick size/value, contract size, volume min/max/step, stops/freeze level, spread (+float), trade mode, filling/expiration mask, netting vs hedging, valuta e llogarisë, serveri. `OnInit` dështon qëllimisht (`INIT_FAILED`) nëse digits/point/tick size/volume step mungojnë — hapat e ardhshëm pjesëtojnë me ato |
 | Qasje OHLC H1/H4/M15 + zbulim i candle-s së re | `src/include/TimeframeWatcher.mqh` | tre instanca `CTimeframeWatcher` (H4, H1, M15). Candle e re = ndryshim i kohës së hapjes së candle-s që formohet |
 | Ndarja e candle-s formuese nga ato të mbyllura | `TimeframeWatcher.mqh` | `GetFormingBar()` (indeks 0, "STILL CHANGING") kundrejt `GetClosedBar()` (indeks 1, final). Të dyja kthejnë `false` kur të dhënat nuk janë të gatshme |
-| Kontrolle të gatishmërisë së historikut | `TimeframeWatcher::Refresh()` | `Bars()>0` → `Bars()>=min` → `SERIES_SYNCHRONIZED` → `CopyRates(...,0,2,...)==2` → renditja e dy elementeve përcaktohet nga timestamp-et, **nuk supozohet** → krahasim i pavarur me `SERIES_LASTBAR_DATE` → refuzim nëse candle-a formuese hapet në të ardhmen. Vetëm pas të gjithave `TF_STATE_READY` |
+| Kontrolle të gatishmërisë së historikut | `TimeframeWatcher::Refresh()` + `RequestHistory()` | Kërkesë eksplicite e thellësisë për secilin timeframe (`CopyTime` në pozicionin `m_min_bars - 1`), e kufizuar në 1 për 2000 ms, jo-bllokuese, lëshuar përpara kthimit për mungës historiku. Pastaj: `Bars()>0` → `Bars()>=min` → `SERIES_SYNCHRONIZED` → `CopyRates(...,0,2,...)==2` → renditja e dy elementeve përcaktohet nga timestamp-et, **nuk supozohet** → krahasim i pavarur me `SERIES_LASTBAR_DATE` → refuzim nëse candle-a formuese hapet në të ardhmen. Vetëm pas të gjithave `TF_STATE_READY` |
 | Loge të përmbledhura kur statusi ndryshon | `PollStatus()` | nënshkrim statusi (state + bars + koha e candle-s së mbyllur për 3 TF); logohet vetëm kur ndryshon. Tranzicionet READY/NOT READY dhe lidhja me serverin logohen një herë |
 | Panel i thjeshtë statusi | `src/include/StatusPanel.mqh` | `OBJ_LABEL` me prefiks `velo_t001_`; fshihen në `OnDeinit` dhe edhe në `Init()` (për rastin kur `OnDeinit` nuk u ekzekutua) |
 | Pa `OrderSend`/`CTrade`/modifikim urdhrash | i gjithë `src/` | kontrolli 1 më sipër |
 | README: instalim, kompilim, loge | [README.md](../README.md) | shtegjet e MT5, F7 / `metaeditor64.exe /compile`, `Toolbox → Experts`, `MQL5\Logs\` |
 
-## 5. Kontrolle që duhet t'i kryejë pronari (ende UNVERIFIED)
+## 5. Kontrolle që mbeten (UNVERIFIED)
 
-Këto janë pikat 1–4 të "Completion evidence". **Mos i shëno si kaluar pa i vëzhguar.**
+### 5A. Kompilimi
 
-**C1 — Kompilimi.** Në MetaEditor hap `XauUsdFoundation.mq5` → **F7**.
-Prit: `0 errors`. Shëno numrin e saktë të errors/warnings dhe tekstin e tyre këtu. Nëse ka warning, shkruaj si u zgjidh.
+**C1 — Rikompilimi.** Në MetaEditor hap `XauUsdFoundation.mq5` → **F7**.
+Prit: `0 errors, 0 warnings`. Codex mori `0 errors, 1 warning` në `c810f90`; warning 68 u rregullua në këtë raund duke çuar `#property version` në `"1.00"` dhe duke hequr `#property link ""` bosh. Shëno numrin e saktë të errors/warnings dhe tekstin e tyre këtu. Nëse warning 68 vazhdon, shkaku nuk ishte formati i version-it dhe duhet gjetur nga teksti i plotë i warning-ut.
+
+Nga command line (Windows):
+
+```
+"C:\Program Files\MetaTrader 5\metaeditor64.exe" /compile:"...\Experts\Velo\XauUsdFoundation.mq5" /log:"%TEMP%\mql5_compile.log"
+```
+
+### 5B. Testet në MT5 (asnjë i kryer)
+
+Kompilimi i pastër nuk i mbulon këto. **Mos i shëno si kaluar pa i vëzhguar.**
 
 **C2 — Gatishmëria e vërtetë gjatë ngarkimit.** Pastro historikun (ose nis MT5 të pastër), hap një grafik XAUUSD.r dhe vendos EA-në.
 Prit: në log `STATUS H4 NO_HISTORY/LOADING — …` dhe në panel `data NOT READY` me ngjyrë portokalli, derisa të vijë historiku; pastaj **një** rresht `DATA READY: H4, H1 and M15 all synchronised`. Paneli nuk duhet të shfaqë çmime OHLC përpara se timeframe-i të jetë READY.
+
+Shto këtu edhe kontrollin e kërkesës së historikut: rreshtat `STATUS` duhet të tregojnë `N history request(s) sent` me N që rritet **ngadalë** (një kërkesë për çdo ~2 sekonda për timeframe), jo një për çdo tick. Terminali nuk duhet të ngrijë: kërkesa është jo-bllokuese, pa `Sleep` dhe pa cikle pritjeje.
 
 **C3 — Eventet e candle-ve të reja.** Lëre të punojë ≥ 1 orë në treg të hapur.
 Prit: saktësisht **një** rresht `NEW BAR M15 …` për çdo candle M15 (4 në një orë), **një** `NEW BAR H1 …` në kufirin e orës, `NEW BAR H4 …` vetëm në kufijtë H4. Koha e candle-s "closed bar" në atë rresht duhet të jetë candle-a e mëparshme, dhe "forming bar now" candle-a e re. Krahaso me grafikun: O/H/L/C e candle-s së mbyllur duhet të përputhen me candle-in e parafundit në grafik.
@@ -99,6 +142,17 @@ Gjetjet 9–14 të rishikuesit konfirmuan si korrekte: mungesën e API-t të tre
 
 Pas rregullimeve, të 7 kontrollet statike u ri-ekzekutuar: **ALL STATIC CHECKS PASSED**.
 
+### Raundi 2 — rishikimi i Codex në `c810f90` (me kompilim)
+
+Codex kompiloi (`0 errors, 1 warning`) dhe ngriti 4 pika. Të 4-ta u verifikuan dhe u rregulluan.
+
+| # | Gjetja | Rregullimi | Evidenca |
+|---|---|---|---|
+| 1 | Kërkesa e historikut nuk ishte eksplicite: mbahej vetëm te efekti anësor i `Bars()`, dhe nuk kishte thellësi të kërkuar për secilin timeframe përpara se të kthehej për mungës historiku | `CTimeframeWatcher::RequestHistory()`: `CopyTime(symbol, period, m_min_bars - 1, 1, ...)` — kërkon pikërisht thellësinë që i duhet atij timeframe-i, dhe thirret **përpara** kthimit me `NO_HISTORY`/`LOADING`. Pa `Sleep`, pa cikle pritjeje; i kufizuar në një kërkesë për 2000 ms për timeframe, pra jo për çdo tick. Numri i kërkesave duket në rreshtin `STATUS` | statike: kaluan; runtime: **UNVERIFIED** (C2) |
+| 2 | Kontrolli 2 i `t001-static-checks.sh` nuk ndikonte exit code-in | `tools/t001-check-balance.py` me exit 1 + `\|\| FAIL=1` në Bash | **I TESTUAR**: kopje me kllapë të munguar → exit `1`, `STATIC CHECKS FAILED`; pema e vërtetë → exit `0`. Tabela në §2 |
+| 3 | `#property version "0.01"` shkaktonte warning 68 | `#property version "1.00"`; hoq edhe `#property link ""` bosh, që është vlerë jo e vlefshme për një property; faza T001 kaloi te `#property description` | **UNVERIFIED** — kërkon rikompilim (C1) |
+| 4 | Evidenca nuk dallonte kompilimin nga testet në MT5 | Raporti u rindërtua: §1a kompilimi, §1b testet në MT5, §5A rikompilimi, §5B testet | ky dokument |
+
 ## 7. Kufizime të njohura
 
 - Paneli ofron vetëm kornizat e sipërme (`PANEL_TOP_LEFT` / `PANEL_TOP_RIGHT`); kornizat e poshtme janë hequr qëllimisht sepse paneli rritet nga lart-poshtë.
@@ -115,6 +169,14 @@ Pas rregullimeve, të 7 kontrollet statike u ri-ekzekutuar: **ALL STATIC CHECKS 
 
 ## 9. Konkluzioni
 
-Zbatimi i T001 është i plotë në kod dhe **kontrollet statike kaluan**. **Kompilimi dhe sjellja në MT5 mbeten UNVERIFIED** sepse mjedisi i zhvillimit nuk ka MetaEditor. Veprimi i radhës për pronarin: kryej C1–C6 dhe shkruaj rezultatet faktike në §5, pastaj dorëzo skedarët dhe këtë raport për rishikim nga Codex.
+Zbatimi i T001 është i plotë në kod. Gjendja e evidencës, e ndarë:
+
+| Evidenca | Gjendja |
+|---|---|
+| Kontrolle statike | **KALUAR** mbi kodin e tanishëm (exit `0`), dhe tani kontrolli 2 vërtet dështon kur duhet |
+| Kompilim | **vetëm në `c810f90`**, nga Codex: 0 errors, 1 warning. Kodi i tanishëm është i PAKOMPILUAR |
+| Teste në MT5 | **ASNJË**, në asnjë commit |
+
+Veprimi i radhës për pronarin: C1 (rikompilim, pritet 0 errors / 0 warnings), pastaj C2–C6 në MT5, duke shkruar rezultatet faktike në §5.
 
 Asnjë rregull tregtimi nuk u shpikur. Q01–Q12 mbeten të hapura dhe nuk nevojiten për këtë hap.

@@ -17,10 +17,14 @@
 //|    - no strategy decision: direction, FVG, MSS, risk and exit    |
 //|      rules are still open (docs/OPEN_QUESTIONS.md Q01-Q12)       |
 //+------------------------------------------------------------------+
+//--- MetaEditor parses #property version as "major.minor" and expects a
+//--- major of at least 1, so the T001 stage is recorded in the description
+//--- instead of in the version string. The empty #property link is dropped
+//--- for the same reason: an empty value is not a valid property value.
 #property copyright   "velireci"
-#property link        ""
-#property version     "0.01"
-#property description "T001 foundation: symbol and H4/H1/M15 data readiness only. No trading."
+#property version     "1.00"
+#property description "T001 foundation (stage 1 of the XAUUSD robot): symbol and H4/H1/M15 data readiness only."
+#property description "Contains no order functions and no strategy logic."
 
 #include "include/SymbolSnapshot.mqh"
 #include "include/TimeframeWatcher.mqh"
