@@ -1,0 +1,182 @@
+XAUUSD EA SPECIFICATION (MetaTrader 5 / MQL5)
+Schema version: 5
+Submission ID: XAU-20261006-E27N93
+Photos: 4 (NOT included in this text file; download the full ZIP package for the photos)
+Date: 2026-10-06
+Status: Answers submitted | Ready for programming: NO (23 open items)
+
+Free-text answers are in Albanian. Do not invent rules: anything missing goes back to the client as a question.
+
+== 1. CLIENT ANSWERS ==
+
+-- What is traded --
+- Client review of confirmed facts: Client confirms all facts
+- Signal (entry) timeframe: M15
+- Higher timeframe used for direction: H4
+- Higher-timeframe candle used: Closed candles only
+- Allowed directions: Both BUY and SELL
+
+-- When a trade is opened --
+- Direction filter method: UNKNOWN — to clarify with the client
+- Entry conditions: UNKNOWN — to clarify with the client
+- Signal evaluated on: Forming (unclosed) candle
+- SELL is an exact mirror of BUY (entries and exits): Yes, exact mirror including exits
+- Entry rule in the trader's own words: Fillimisht shoh drejtimin e tregut ne H1 dhe H4 duke caktuat HH dhe LH ose LH dhe LL. Me pas caktoj FVG kryesore ne H4 ku pres qe cmimi te kthehet per te kryer nje likujditet te brendshem (IRL)per te vazhduar serish drejtimin qe kishte duke marr profit tek likujditeti i jashtem (ERL). Por pa shkruar deri aty qendroj tek FVG kryesore H4 qe kisha caktuar dhe kaloj ne M15. Aty pres qe cmimi te thyej strukturen duke krijuar (MSS) dhe duke len nje FVG pas. Me pas vendos  Pending Order ku Entry eshte te fillimi i FVG ne M15 dhe Stop Loss ne piken me te lart te struktures se thyer ne M15 ne rastin e Sell ose ne piken me te ulet te struktures se thyer ne M15 ne rastin e Buy dhe Profit eshte Likujditeti i jashten sic e thash dhe me siper
+- Order execution after signal confirmation: Limit order at a level
+- Pending order reference: E vendos Entry ne fvg, stop los ne piken me te lart te struktures se thyer nese jemi Sell dhe ne piken me te ulet te struktures se thyer nese jemi Buy. Profit tek likuiditeti i rradhes
+- Pending order distance from reference: UNKNOWN — to clarify with the client
+- Pending order expiry: UNKNOWN — to clarify with the client
+- Pending order when direction changes: Cancel the pending order
+- Pending order on opposite signal: Cancel the pending order
+- Pending order at end of trading hours: Cancel the pending order
+- Pending order before an avoided news event: Cancel the pending order
+- Definition of a new signal: Every new candle that meets the conditions
+- Entries allowed per signal: Only one
+- Cooldown after a trade closes: UNKNOWN — to clarify with the client
+- Opposite signal while a trade is open: UNKNOWN — to clarify with the client
+- Skip a valid signal when: Market ranging
+- Skip: ranging market definition: Duket me sy te lir pa perdorur indikator
+- Max spread filter: Yes, developer sets a value for XAUUSD.r
+- When spread blocks entry: UNKNOWN — to clarify with the client
+
+-- When a trade is closed --
+- Stop loss placement: UNKNOWN — to clarify with the client
+- Skip trade if SL is too large: Yes
+- Max SL distance: 50 USD of gold price movement
+- Take profit method: At a price level
+- Take profit level: Profit eshte tek thyerja e struktures se rradhes qe quhet dhe si likujditet i rradhes
+- Break-even: Yes
+- Break-even trigger: When profit reaches X R
+- Break-even trigger (R): 2 R
+- New SL level at break-even: Entry plus costs (spread, commission)
+- Partial close: Yes
+- Partial 1 at (R): 2 R
+- Partial 1 size: 80 % of position
+- Partial % based on: Initial volume
+- Remaining volume after partial: Runs to TP or SL
+- Trailing stop: No (not used)
+- Priority between management rules: Fillimisht mbyllim pjesen e pare tek 80%, me pas vendosim stop loss tek +0.2% dhe ne fund presim qe cmimi te kapi profit ose stop loss
+
+-- Risk and position size --
+- Account currency: USD
+- Planned trading capital: UNKNOWN — to clarify with the client
+- Account kind: UNKNOWN — to clarify with the client
+- Other trading on the same account: Yes, manual trades
+- Position sizing method (only one active): UNKNOWN — to clarify with the client
+- Maximum lot per trade: Yes
+- Max lot per trade: 10 lots
+- When the requested size conflicts with a risk or broker limit: Skip the trade
+- Max trades per day: 2 trades
+- Max positions open at the same time: 2 trades
+- Max combined risk of open positions: 2 % of account
+- Partially closed trade counts as: One trade
+- After a winning trade: Stop for the day after a win
+- Stop after losses: Yes, after consecutive losses
+- Losses before stopping: 2 trades
+- Break-even close counts as: Neither win nor loss
+- Daily loss limit: Yes
+- Daily loss limit: 2 % of account
+- Daily limit base: Balance at start of day
+- Daily limit includes floating losses: No, closed trades only
+- Daily limit scope: This EA only
+- Action when daily limit is hit: Stops entries and cancels pending orders
+- Daily reset time: Midnight, Albania time (Europe/Tirane)
+
+-- Trading hours and news --
+- Trading days: Mon, Tue, Wed, Thu, Fri
+- Trading hours from: 00:00
+- Trading hours to: 20:30
+- Timezone of trading hours: Albania time (Europe/Tirane)
+- DST handling: Hours follow local clock (DST-aware)
+- Open positions at end of trading hours: UNKNOWN — to clarify with the client
+- Close before the weekend: Yes
+- Friday close time: 21:00
+- Friday: pending orders: Cancel them
+- News filter: Yes
+- News events avoided: All high-impact USD news
+- Minutes before news: 30 minutes
+- Minutes after news: 30 minutes
+- Open positions before news: UNKNOWN — to clarify with the client
+- Phone push notifications: Yes
+
+-- Examples, backtest and acceptance --
+- TradingView gold chart: TVC:GOLD
+- TradingView chart timezone: Albania (Europe/Tirane)
+- Candle type in backtest: Standard candlesticks
+- Backtest from: UNKNOWN — to clarify with the client
+- Backtest to: UNKNOWN — to clarify with the client
+- Trades in backtest: Over 60
+- Win rate in backtest: 50–55%
+- SL and TP hit in the same candle (manual backtest): UNKNOWN — to clarify with the client
+- Backtest trades recorded: Not recorded
+- Comparison period: Other period
+- Comparison period (other): Nga dita qe do perfundoj ndertimi i robotit e mbrapa
+- Costs in comparison: UNKNOWN — to clarify with the client
+- Accepted entry price deviation: UNKNOWN — to clarify with the client
+- Accepted entry time deviation: UNKNOWN — to clarify with the client
+- Required trade match: UNKNOWN — to clarify with the client
+
+-- Examples --
+- Example 1 | Type: SELL | Result: Winner | Date: 2026-10-05 | Timeframe: M15 | Explanation: Sepse u plotesuan te gjitha kushtet e mia per te tregtuar | Photo description: Thyerja e struktures me M15 eshte ber me nje vije te vogel te kuqe dhe mbrapa ka len nje FVG. Presim qe cmimi te rikthehet serish ne FVG dhe aty eshte Entry, stop loss ne pjesen e siperme dhe Profit tek likuiditeti i rradhes sic eshte shenur dhe ne foto me 2 pjes | Photo: shembulli-1-sell-win.jpg
+- Example 2 | Type: SELL | Result: Loser | Date: 2026-10-01 | Timeframe: M15 | Explanation: Sepse serish u plotesuan te gjitha kushtet per te tregtuar | Photo description: Edhe ketu njesoj si ne foton e mesiperme, jan krijuar te gjitha kushtet per te hyre ne tregti por gjithsesi cmimi ka prekur Stop Loss me pas trade ka vazhduar sic ishte parashikuar qe te ndodhte | Photo: shembulli-2-sell-loss.jpg
+- Example 3 | Type: Case where the EA must NOT enter | Date: 2026-09-01 | Timeframe: M15 | Explanation: Nuk hyra sepse cmimi nuk erdhi ne piken ku un e prisja | Photo description: Ky eshte rasti kur cmimi ka ardhur ne limit te FVG por nuk e ka prekur ate, dhe tregtia nuk eshte aktivizuar. | Photo: shembulli-3-no-entry.jpg
+
+-- Indicator settings photos --
+- cilesimet-1.jpg: Keto jan indikatoret qe perdor me shpesh
+
+== 2. PREVIOUSLY CONFIRMED FACTS ==
+- Broker: Tauro, on MetaTrader 5
+- Instrument: gold only, symbol XAUUSD.r
+- Fully automatic: the EA opens, manages and closes trades itself
+- One strategy, manually backtested for one month on TradingView
+- Risk: 1% per trade
+- Maximum 3 trades per day
+- Client review: confirmed all facts
+
+== 3. ASSUMPTIONS PENDING CONFIRMATION ==
+- 1R = initial distance from entry to the original SL, in USD of gold price.
+
+== 4. TO CLARIFY WITH THE CLIENT (unresolved issues and contradictions) ==
+- UNRESOLVED: Direction filter method: UNKNOWN — to clarify with the client
+- UNRESOLVED: Entry conditions: UNKNOWN — to clarify with the client
+- UNRESOLVED: Pending order distance from reference: UNKNOWN — to clarify with the client
+- UNRESOLVED: Pending order expiry: UNKNOWN — to clarify with the client
+- UNRESOLVED: Cooldown after a trade closes: UNKNOWN — to clarify with the client
+- UNRESOLVED: Opposite signal while a trade is open: UNKNOWN — to clarify with the client
+- UNRESOLVED: When spread blocks entry: UNKNOWN — to clarify with the client
+- UNRESOLVED: Stop loss placement: UNKNOWN — to clarify with the client
+- UNRESOLVED: Planned trading capital: UNKNOWN — to clarify with the client
+- UNRESOLVED: Account kind: UNKNOWN — to clarify with the client
+- UNRESOLVED: Position sizing method (only one active): UNKNOWN — to clarify with the client
+- UNRESOLVED: Open positions at end of trading hours: UNKNOWN — to clarify with the client
+- UNRESOLVED: Open positions before news: UNKNOWN — to clarify with the client
+- UNRESOLVED: Backtest from: UNKNOWN — to clarify with the client
+- UNRESOLVED: Backtest to: UNKNOWN — to clarify with the client
+- UNRESOLVED: SL and TP hit in the same candle (manual backtest): UNKNOWN — to clarify with the client
+- UNRESOLVED: Costs in comparison: UNKNOWN — to clarify with the client
+- UNRESOLVED: Accepted entry price deviation: UNKNOWN — to clarify with the client
+- UNRESOLVED: Accepted entry time deviation: UNKNOWN — to clarify with the client
+- UNRESOLVED: Required trade match: UNKNOWN — to clarify with the client
+- UNRESOLVED: Examples do not cover both BUY and SELL.
+- CONTRADICTION: Differs from confirmed fact "Maximum 3 trades per day": answer is 2
+- CONTRADICTION: Loss stop (2) never triggers before the daily trade maximum (2).
+
+== 5. DEVELOPER VERIFICATIONS AND REQUIREMENTS ==
+- VERIFY ON THE CLIENT ACCOUNT (not asked to the client): symbol XAUUSD.r specification (digits, point, tick size/value, contract size), volume min/max/step, stops level and freeze level, commission per lot, typical and news-time spread, hedging vs netting, filling modes, broker server timezone and DST behaviour, trading session times.
+- Trade the chart symbol (_Symbol) so the EA runs on XAUUSD.r and on test accounts with other names.
+- POSITION SIZING (exactly one active method; never combine methods): Sizing method UNKNOWN: do not implement sizing until the client confirms it. Max lot per trade: 10 lots. General risk limits apply in every method (daily loss limit, combined risk of open positions, prop firm limits, max trades). When the requested volume conflicts with the lot cap, a risk limit or the broker volume max/step: client choice = SKIP the trade. Always round DOWN to the volume step; never round up and never increase the volume above the allowed risk. If the volume would be below the broker minimum, skip the trade (it cannot be reduced further). Never change the size silently: log every reduction or skip with the requested volume, the final volume and the reason, and include it in the push notification. Account currency: USD; planned capital: unknown (used to validate the settings, not as a sizing base).
+- Restore state after restart or reconnect (daily counters, loss counters, cooldowns, pending orders, partial-close stages) from trade history and open positions, not from memory only.
+- Prevent duplicate orders: one order per signal (respect entries-per-signal), check existing positions/orders by magic number before sending, handle requotes, partial fills and trade server return codes; retry only on retryable codes.
+- Do not modify, close or count trades outside the EA's responsibility (other magic numbers, manual trades) unless the answers explicitly say a limit applies to the whole account.
+- Every rule and limit is an input parameter; plain-English comments; log every decision (entry, skip with reason, modification, exit).
+- Signals evaluated on the forming candle as answered; never use future bars; avoid repainting.
+- Push notifications: send via SendNotification() on open, modify and close.
+- Provide a demo-only build option (refuses to trade on real accounts) for client testing before payment.
+- News filter is part of the strategy: backtest with historical news data (e.g. a stored calendar file). The MQL5 Economic Calendar is not available in the Strategy Tester. Any backtest with the news filter disabled must be labelled as a test with modified rules.
+- Choose a max spread value for XAUUSD.r from measured spreads and document it as an input.
+- Photos (examples and indicator settings) are for checking the written rules only. Do NOT infer or invent parameters from photos; if a photo seems to disagree with an answer, ask the client.
+- Do not start coding while unresolved issues or contradictions exist. Send questions back to the client.
+
+== 6. ACCEPTANCE (rule implementation, not profit) ==
+- Backtest the EA on the comparison period above with the listed costs, then compare its trades with the trader's examples and records within the accepted price and time deviations.
+- Acceptance verifies that the rules are implemented correctly. It does not promise future profit.

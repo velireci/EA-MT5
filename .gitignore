@@ -7,10 +7,6 @@
 reports/runtime/
 .claude/settings.local.json
 
-# --- TEMPORARY: repository velireci/velo is PUBLIC (checked 2026-10-07) ---
-# The starter package states the project contains client information and must
-# be kept private. Until the repository visibility is changed to private, the
-# original client submission and the full strategy analysis stay untracked.
-# Remove this block once the repository is private, then commit these folders.
-inputs/
-docs/reference/
+# Client material (inputs/, docs/reference/) IS tracked, but it belongs only in
+# the private repository velireci/EA-MT5. Never push this branch to a public
+# remote - velireci/velo was still public on 2026-10-07. See docs/STATE.md.

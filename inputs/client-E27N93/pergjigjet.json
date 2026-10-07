@@ -1,0 +1,322 @@
+{
+  "format": "xauusd-pyetesori",
+  "schemaVersion": 5,
+  "id": "XAU-20261006-E27N93",
+  "submissionKey": "0ab61496-a5f6-476a-85c8-a23c599c3ee8",
+  "submittedAt": "2026-10-06T18:37:05.168Z",
+  "mode": "real",
+  "photosIncluded": false,
+  "photosNote": "Fotot nuk përfshihen në këtë skedar. Për fotot përdor paketën e plotë ZIP.",
+  "photos": [
+    {
+      "photoId": "a51197b8-2210-4b70-ac77-3558c7e2e364",
+      "filename": "cilesimet-1.jpg",
+      "type": "image/jpeg",
+      "bytes": 72652,
+      "sha256": "3708236b41cec9c5f1b9c3ba649834292a524548f3a03d1d7e3ec2b1b482a148",
+      "role": "indicator-settings",
+      "settingsIndex": 1,
+      "note": "Keto jan indikatoret qe perdor me shpesh"
+    },
+    {
+      "photoId": "b82e9810-7e52-44c9-8d39-261afdc183a6",
+      "filename": "shembulli-1-sell-win.jpg",
+      "type": "image/jpeg",
+      "bytes": 93258,
+      "sha256": "7578c8808fa73b220f6a6b9c142d0dca6805f5c324f075cda9e6e3b943bd5170",
+      "role": "example",
+      "exampleIndex": 1,
+      "note": "Thyerja e struktures me M15 eshte ber me nje vije te vogel te kuqe dhe mbrapa ka len nje FVG. Presim qe cmimi te rikthehet serish ne FVG dhe aty eshte Entry, stop loss ne pjesen e siperme dhe Profit tek likuiditeti i rradhes sic eshte shenur dhe ne foto me 2 pjes"
+    },
+    {
+      "photoId": "cc5d31f3-61b0-44f7-bda9-44b2d0a7e1eb",
+      "filename": "shembulli-2-sell-loss.jpg",
+      "type": "image/jpeg",
+      "bytes": 92630,
+      "sha256": "ca6cf7cb2c062288e272ec6b5f5b4e356a364ecb8c01cc7cc60fc1219dbe85e2",
+      "role": "example",
+      "exampleIndex": 2,
+      "note": "Edhe ketu njesoj si ne foton e mesiperme, jan krijuar te gjitha kushtet per te hyre ne tregti por gjithsesi cmimi ka prekur Stop Loss me pas trade ka vazhduar sic ishte parashikuar qe te ndodhte"
+    },
+    {
+      "photoId": "5a848ce8-8c24-4c21-ae61-5e33440125a4",
+      "filename": "shembulli-3-no-entry.jpg",
+      "type": "image/jpeg",
+      "bytes": 92107,
+      "sha256": "4a8938e77082f213567f991cbe1c07d2ccca36445242ebe357e3dec9e0edbac1",
+      "role": "example",
+      "exampleIndex": 3,
+      "note": "Ky eshte rasti kur cmimi ka ardhur ne limit te FVG por nuk e ka prekur ate, dhe tregtia nuk eshte aktivizuar."
+    }
+  ],
+  "analysis": {
+    "readyForDevelopment": false,
+    "missingRequired": [],
+    "clarifyWithClient": [
+      {
+        "id": "dir_method",
+        "sq": "Si e vendos nëse kërkon BUY apo SELL",
+        "en": "Direction filter method: UNKNOWN — to clarify with the client"
+      },
+      {
+        "id": "cond",
+        "sq": "Çfarë duhet të ndodhë që të hapësh një trade",
+        "en": "Entry conditions: UNKNOWN — to clarify with the client"
+      },
+      {
+        "id": "pd_dist",
+        "sq": "Sa $ larg asaj pike",
+        "en": "Pending order distance from reference: UNKNOWN — to clarify with the client"
+      },
+      {
+        "id": "pd_expiry",
+        "sq": "Nëse nuk hapet, pas sa candles e fshin",
+        "en": "Pending order expiry: UNKNOWN — to clarify with the client"
+      },
+      {
+        "id": "cooldown",
+        "sq": "Pasi mbyllet një trade, a pret pak para se të hapësh tjetrin",
+        "en": "Cooldown after a trade closes: UNKNOWN — to clarify with the client"
+      },
+      {
+        "id": "opposite",
+        "sq": "Ke një BUY të hapur dhe shfaqet sinjal për SELL. Çfarë bën",
+        "en": "Opposite signal while a trade is open: UNKNOWN — to clarify with the client"
+      },
+      {
+        "id": "spread_block",
+        "sq": "Nëse spread-i është i lartë kur del sinjali",
+        "en": "When spread blocks entry: UNKNOWN — to clarify with the client"
+      },
+      {
+        "id": "sl_method",
+        "sq": "Ku e vendos Stop Loss",
+        "en": "Stop loss placement: UNKNOWN — to clarify with the client"
+      },
+      {
+        "id": "capital",
+        "sq": "Me sa para planifikon ta përdorësh robotin",
+        "en": "Planned trading capital: UNKNOWN — to clarify with the client"
+      },
+      {
+        "id": "account_kind",
+        "sq": "Llogaria është",
+        "en": "Account kind: UNKNOWN — to clarify with the client"
+      },
+      {
+        "id": "size_method",
+        "sq": "Si ta vendosë roboti madhësinë e çdo trade-i",
+        "en": "Position sizing method (only one active): UNKNOWN — to clarify with the client"
+      },
+      {
+        "id": "end_positions",
+        "sq": "Kur mbaron orari, çfarë bën me trade-et e hapura",
+        "en": "Open positions at end of trading hours: UNKNOWN — to clarify with the client"
+      },
+      {
+        "id": "news_open",
+        "sq": "Trade-et e hapura para lajmit",
+        "en": "Open positions before news: UNKNOWN — to clarify with the client"
+      },
+      {
+        "id": "bt_from",
+        "sq": "Testi nga data",
+        "en": "Backtest from: UNKNOWN — to clarify with the client"
+      },
+      {
+        "id": "bt_to",
+        "sq": "deri më",
+        "en": "Backtest to: UNKNOWN — to clarify with the client"
+      },
+      {
+        "id": "bt_same_candle",
+        "sq": "Kur në të njëjtën candle preknin edhe Stop Loss edhe Take Profit, si e numërove",
+        "en": "SL and TP hit in the same candle (manual backtest): UNKNOWN — to clarify with the client"
+      },
+      {
+        "id": "acc_costs",
+        "sq": "A ta bëjmë krahasimin me kostot reale të Tauro",
+        "en": "Costs in comparison: UNKNOWN — to clarify with the client"
+      },
+      {
+        "id": "acc_entry_tol",
+        "sq": "Sa $ mund të ndryshojë çmimi i hyrjes së robotit nga i yti",
+        "en": "Accepted entry price deviation: UNKNOWN — to clarify with the client"
+      },
+      {
+        "id": "acc_time_tol",
+        "sq": "Hyrja e robotit duhet të jetë",
+        "en": "Accepted entry time deviation: UNKNOWN — to clarify with the client"
+      },
+      {
+        "id": "acc_match",
+        "sq": "Sa nga trade-et e tua duhet t'i hapë edhe roboti",
+        "en": "Required trade match: UNKNOWN — to clarify with the client"
+      },
+      {
+        "id": "examples",
+        "sq": "Shto shembuj për të dy drejtimet, BUY dhe SELL.",
+        "en": "Examples do not cover both BUY and SELL."
+      },
+      {
+        "id": "max_trades",
+        "sq": "Ndryshim nga fakti i konfirmuar: Ke përmendur maksimumi 3 trade-e në ditë, ndërsa këtu u zgjodh 2",
+        "en": "Differs from confirmed fact \"Maximum 3 trades per day\": answer is 2"
+      },
+      {
+        "id": "loss_stop_n",
+        "sq": "Ndalimi pas 2 losses nuk ndikon, sepse max është 2 trades në ditë.",
+        "en": "Loss stop (2) never triggers before the daily trade maximum (2)."
+      }
+    ],
+    "developerChecks": []
+  },
+  "state": {
+    "answers": {
+      "facts_review": "ok",
+      "tf_signal": "M15",
+      "tf_higher": "H4",
+      "htf_candle": "closed",
+      "sides": "both",
+      "dir_method": "?",
+      "cond": [
+        "?"
+      ],
+      "sig_candle": "forming",
+      "mirror": "mirror",
+      "own_words": "Fillimisht shoh drejtimin e tregut ne H1 dhe H4 duke caktuat HH dhe LH ose LH dhe LL. Me pas caktoj FVG kryesore ne H4 ku pres qe cmimi te kthehet per te kryer nje likujditet te brendshem (IRL)per te vazhduar serish drejtimin qe kishte duke marr profit tek likujditeti i jashtem (ERL). Por pa shkruar deri aty qendroj tek FVG kryesore H4 qe kisha caktuar dhe kaloj ne M15. Aty pres qe cmimi te thyej strukturen duke krijuar (MSS) dhe duke len nje FVG pas. Me pas vendos  Pending Order ku Entry eshte te fillimi i FVG ne M15 dhe Stop Loss ne piken me te lart te struktures se thyer ne M15 ne rastin e Sell ose ne piken me te ulet te struktures se thyer ne M15 ne rastin e Buy dhe Profit eshte Likujditeti i jashten sic e thash dhe me siper ",
+      "exe": "limit",
+      "pd_level": "E vendos Entry ne fvg, stop los ne piken me te lart te struktures se thyer nese jemi Sell dhe ne piken me te ulet te struktures se thyer nese jemi Buy. Profit tek likuiditeti i rradhes",
+      "?pd_dist": true,
+      "?pd_expiry": true,
+      "pd_dirchange": "cancel",
+      "pd_opposite": "cancel",
+      "pd_session": "cancel",
+      "pd_news": "cancel",
+      "new_signal": "new_candle",
+      "entries_per_signal": "1",
+      "cooldown": "?",
+      "opposite": "?",
+      "skip": [
+        "range"
+      ],
+      "skip_range": "Duket me sy te lir pa perdorur indikator",
+      "spread_filter": "dev",
+      "spread_block": "?",
+      "sl_method": "?",
+      "sl_max": "yes",
+      "tp_method": "level",
+      "tp_level": "Profit eshte tek thyerja e struktures se rradhes qe quhet dhe si likujditet i rradhes",
+      "mg_be": "yes",
+      "be_trigger": "r",
+      "be_trigger_r": "2",
+      "be_level": "entry_costs",
+      "mg_partial": "yes",
+      "pc1_r": "2",
+      "pc1_pct": "80",
+      "pc2_pct": "",
+      "pc_base": "initial",
+      "pc_rest": "tp",
+      "mg_trail": "no",
+      "mg_priority": "Fillimisht mbyllim pjesen e pare tek 80%, me pas vendosim stop loss tek +0.2% dhe ne fund presim qe cmimi te kapi profit ose stop loss",
+      "account_ccy": "USD",
+      "capital": "",
+      "?capital": true,
+      "account_kind": "?",
+      "other_trading": "manual",
+      "size_method": "?",
+      "lot_cap": "yes",
+      "size_conflict": "skip",
+      "max_trades": "2",
+      "max_open": "2",
+      "combined_risk": "2",
+      "count_partial": "one",
+      "after_win": "stop",
+      "loss_stop": "consecutive",
+      "loss_stop_n": "2",
+      "be_counts": "neutral",
+      "daily_loss": "yes",
+      "dl_pct": "2",
+      "dl_base": "balance_start",
+      "dl_floating": "no",
+      "dl_scope": "robot",
+      "dl_action": "stop_cancel",
+      "day_reset": "albania",
+      "days": [
+        "mon",
+        "tue",
+        "wed",
+        "thu",
+        "fri"
+      ],
+      "t_from": "00:00",
+      "t_to": "20:30",
+      "t_tz": "albania",
+      "t_dst": "follow",
+      "end_positions": "?",
+      "friday": "yes",
+      "friday_time": "21:00",
+      "friday_pending": "cancel",
+      "news": "yes",
+      "news_events": [
+        "usd_high"
+      ],
+      "news_before": "30",
+      "news_after": "30",
+      "news_open": "?",
+      "push": "yes",
+      "tv_feed": "tvc",
+      "tv_tz": "albania",
+      "candle_type": "standard",
+      "?bt_from": true,
+      "?bt_to": true,
+      "bt_trades": "gt60",
+      "bt_winrate": "50_55",
+      "bt_same_candle": "?",
+      "bt_records": "none",
+      "acc_period": "other",
+      "acc_period_text": "Nga dita qe do perfundoj ndertimi i robotit e mbrapa",
+      "acc_costs": "?",
+      "?acc_entry_tol": true,
+      "acc_time_tol": "?",
+      "acc_match": "?",
+      "sl_max_usd": "50",
+      "lot_cap_value": "10"
+    },
+    "examples": [
+      {
+        "photoId": "b82e9810-7e52-44c9-8d39-261afdc183a6",
+        "tf": "M15",
+        "photoNote": "Thyerja e struktures me M15 eshte ber me nje vije te vogel te kuqe dhe mbrapa ka len nje FVG. Presim qe cmimi te rikthehet serish ne FVG dhe aty eshte Entry, stop loss ne pjesen e siperme dhe Profit tek likuiditeti i rradhes sic eshte shenur dhe ne foto me 2 pjes",
+        "date": "2026-10-05",
+        "kind": "sell",
+        "result": "win",
+        "why": "Sepse u plotesuan te gjitha kushtet e mia per te tregtuar"
+      },
+      {
+        "photoId": "cc5d31f3-61b0-44f7-bda9-44b2d0a7e1eb",
+        "tf": "M15",
+        "photoNote": "Edhe ketu njesoj si ne foton e mesiperme, jan krijuar te gjitha kushtet per te hyre ne tregti por gjithsesi cmimi ka prekur Stop Loss me pas trade ka vazhduar sic ishte parashikuar qe te ndodhte",
+        "kind": "sell",
+        "date": "2026-10-01",
+        "why": "Sepse serish u plotesuan te gjitha kushtet per te tregtuar",
+        "result": "loss"
+      },
+      {
+        "photoId": "5a848ce8-8c24-4c21-ae61-5e33440125a4",
+        "tf": "M15",
+        "why": "Nuk hyra sepse cmimi nuk erdhi ne piken ku un e prisja ",
+        "photoNote": "Ky eshte rasti kur cmimi ka ardhur ne limit te FVG por nuk e ka prekur ate, dhe tregtia nuk eshte aktivizuar.",
+        "kind": "noentry",
+        "date": "2026-09-01"
+      }
+    ],
+    "settingsPhotos": [
+      {
+        "photoId": "a51197b8-2210-4b70-ac77-3558c7e2e364",
+        "note": "Keto jan indikatoret qe perdor me shpesh"
+      }
+    ],
+    "legacyNotes": []
+  }
+}

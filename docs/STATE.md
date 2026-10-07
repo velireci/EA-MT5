@@ -36,12 +36,19 @@ Foundation EA and three helper modules written, statically checked and independe
 - Broker/account details: unverified. Client wrote Tauro / XAUUSD.r / USD; confirm the exact symbol name, digits, point, tick size/value, contract size, volume min/step, stops level and netting vs hedging from the EA's OnInit log (check C6).
 - Git baseline: branch `claude/amazing-darwin-icpcjd`.
 
-## Client material is deliberately untracked
-The GitHub repository `velireci/velo` is PUBLIC (verified 2026-10-07 via the GitHub API: `"visibility": "public"`). README-START-SQ.md states the package contains client information and the project must stay private, and `inputs/client-E27N93/fotot/` holds screenshots taken on the client's own phone.
+## Repositories: client material belongs in the private one only
+Two remotes exist for this working copy (verified 2026-10-07 via the GitHub API):
 
-Therefore `inputs/` and `docs/reference/` are listed in .gitignore and were NOT pushed. They exist in the working copy and are still the evidence base for the project; nothing was deleted.
+| Remote | Repository | Visibility | Holds client material |
+|---|---|---|---|
+| `ea-mt5` | velireci/EA-MT5 | PRIVATE | yes - this is the project home |
+| `origin` | velireci/velo | PUBLIC | no - never push client material here |
 
-OWNER DECISION NEEDED: make the repository private (GitHub -> Settings -> General -> Danger Zone -> Change repository visibility), then remove that block from .gitignore and commit the two folders. Until then, keep the client submission out of git history - a public commit cannot be taken back.
+`inputs/client-E27N93/` (the original submission, including screenshots from the client's own phone) and `docs/reference/` (the full strategy analysis) are tracked and pushed to `ea-mt5` only.
+
+Branch `claude/amazing-darwin-icpcjd` tracks `ea-mt5`. Before any push, confirm the target remote.
+
+OPEN ITEM for the owner: the T001 code commit was pushed to the public `velireci/velo` before EA-MT5 existed. It carries no client submission and no photos, but `docs/STRATEGY_SPEC.md`, `docs/OPEN_QUESTIONS.md` and `tasks/` do summarise the client's method and are publicly readable there. Decide whether to delete branch `claude/amazing-darwin-icpcjd` from velo, or make velo private as well.
 
 ## Pre-existing files not part of this project
 `MQL5/Experts/MA_Crossover_EA.mq5` and `jessy` were in the repository before this project. `MA_Crossover_EA.mq5` is an unrelated EA that does place real trades (MA crossover). It was not modified and must not be confused with `src/XauUsdFoundation.mq5`.
