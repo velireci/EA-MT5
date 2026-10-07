@@ -11,9 +11,16 @@
 //|  that the MQL5 code agrees with that model on these cases; it    |
 //|  says nothing about whether the rules are what the client wants. |
 //|                                                                  |
-//|  Run: copy the repository src/ folder into MQL5/Experts/ (keep   |
-//|  the relative include path), compile, drag the script on any     |
-//|  chart, read the Experts log for "T002 LOGIC TEST".              |
+//|  This is a SCRIPT (OnStart): it belongs under MQL5/Scripts/, NOT |
+//|  under Experts. Install: copy the whole repository src/ folder   |
+//|  to <terminal data folder>/MQL5/Scripts/velo_src/ so that these  |
+//|  two paths exist side by side:                                   |
+//|    MQL5/Scripts/velo_src/tests/T002_LogicTest.mq5                |
+//|    MQL5/Scripts/velo_src/include/H4Structure.mqh                 |
+//|  (the include "../include/H4Structure.mqh" is relative to this   |
+//|  file, so tests/ and include/ must stay siblings). Compile it,   |
+//|  drag the script on any chart, read the Experts log for          |
+//|  "T002 LOGIC TEST". Install layout NOT tested in MT5.            |
 //+------------------------------------------------------------------+
 #property copyright "velireci"
 #property version   "1.00"
@@ -640,6 +647,55 @@ void TestIds(void)
    Check(H4TimeStamp(T2Base()) == "202601050000", "ID time stamp is built from the raw time value");
   }
 
+//--- 7. pure decisions (mirrored in tests/t002_reference_test.py test_pure_decisions)
+void TestPureDecisions(void)
+  {
+   Print("--- history state, refresh, map transitions, panel wording");
+   Check(H4HistoryState(6, 300, 2, 2) == H4_HIST_INSUFFICIENT, "history 6 of 300 (min 11) -> INSUFFICIENT");
+   Check(H4HistoryState(11, 300, 2, 2) == H4_HIST_PARTIAL, "history 11 of 300 -> PARTIAL");
+   Check(H4HistoryState(299, 300, 2, 2) == H4_HIST_PARTIAL, "history 299 of 300 -> PARTIAL");
+   Check(H4HistoryState(300, 300, 2, 2) == H4_HIST_COMPLETE, "history 300 of 300 -> COMPLETE");
+   Check(H4HistoryText(H4_HIST_INSUFFICIENT, 6, 300, true) == "INSUFFICIENT HISTORY (6 of 300 bars)", "text INSUFFICIENT");
+   Check(H4HistoryText(H4_HIST_PARTIAL, 120, 300, true) == "PARTIAL HISTORY (120 of 300, refreshing)", "text PARTIAL refreshing");
+   Check(H4HistoryText(H4_HIST_PARTIAL, 120, 300, false) == "PARTIAL HISTORY (120 of 300, no more on server)", "text PARTIAL exhausted");
+   Check(H4HistoryText(H4_HIST_COMPLETE, 300, 300, false) == "HISTORY COMPLETE (300 of 300)", "text COMPLETE");
+   datetime t1 = T2Base();
+   datetime t0 = t1 - (datetime)T2_PERIOD;
+   Check(H4HistoryImproved(100, t1, 101, t1), "more bars -> improved");
+   Check(H4HistoryImproved(100, t1, 100, t0), "older first bar -> improved");
+   Check(!H4HistoryImproved(100, t1, 100, t1), "same count and first bar -> not improved");
+   Check(!H4HistoryImproved(100, t1, 99, t1), "fewer bars -> not improved");
+   Check(!H4HistoryImproved(0, 0, 0, 0), "nothing yet -> not improved");
+   Check(H4RefreshDue(H4_HIST_PARTIAL, 0, 20), "partial, no failures yet -> refresh due");
+   Check(H4RefreshDue(H4_HIST_INSUFFICIENT, 19, 20), "insufficient, 19 idle checks -> still due");
+   Check(!H4RefreshDue(H4_HIST_PARTIAL, 20, 20), "cap of idle checks reached -> stop");
+   Check(!H4RefreshDue(H4_HIST_COMPLETE, 0, 20), "complete -> never refresh");
+   Check(H4MapTransition(true, false) == H4_ACT_CLEAR, "map + failed build -> CLEAR");
+   Check(H4MapTransition(false, true) == H4_ACT_REBUILT, "no map + ok build -> REBUILT");
+   Check(H4MapTransition(true, true) == H4_ACT_REFRESHED, "map + ok build -> REFRESHED");
+   Check(H4MapTransition(false, false) == H4_ACT_NONE, "no map + failed build -> NONE");
+   SH4Result r;
+   ZeroMemory(r);
+   r.direction = H4_DIR_BEARISH;
+   r.range_state = H4_RNG_VALID;
+   r.erl_state = H4_ERL_UNTOUCHED;
+   Check(H4SetupActive(r, 1), "bearish, valid, ERL untouched, 1 candidate -> active");
+   Check(!H4SetupActive(r, 0), "no selectable candidate -> inactive");
+   r.erl_state = H4_ERL_TAKEN;
+   Check(!H4SetupActive(r, 1), "ERL TAKEN -> inactive");
+   r.erl_state = H4_ERL_UNTOUCHED;
+   r.range_state = H4_RNG_UNDEFINED;
+   Check(!H4SetupActive(r, 1), "interval not valid -> inactive");
+   r.range_state = H4_RNG_VALID;
+   r.direction = H4_DIR_MIXED;
+   Check(!H4SetupActive(r, 1), "direction not trending -> inactive");
+   string z = "F1 FRESH [10.00 - 12.00]";
+   Check(H4IrlPanelText(true, H4_ERL_UNTOUCHED, z, false) == "nearest IRL: F1 FRESH [10.00 - 12.00] ahead -> ERL", "UNTOUCHED ahead wording");
+   Check(H4IrlPanelText(true, H4_ERL_UNTOUCHED, z, true) == "nearest IRL: F1 FRESH [10.00 - 12.00] INSIDE -> ERL", "UNTOUCHED inside wording");
+   Check(H4IrlPanelText(false, H4_ERL_TAKEN, z, false) == "candidate (inactive: ERL TAKEN): F1 FRESH [10.00 - 12.00] ahead", "TAKEN wording has no -> ERL");
+   Check(StringFind(H4IrlPanelText(false, H4_ERL_TAKEN, z, true), "-> ERL") < 0, "TAKEN inside wording has no -> ERL");
+  }
+
 void OnStart(void)
   {
    Print("T002 LOGIC TEST start - proposed H4 model, MQL5 vs Python-model expectations");
@@ -652,6 +708,7 @@ void OnStart(void)
    TestNoLookahead("bull_invalid_eq");
    TestNoLookahead("bear_touched_inside_two");
    TestIds();
+   TestPureDecisions();
    PrintFormat("T002 LOGIC TEST finished: %d passed, %d failed", g_pass, g_fail);
   }
 //+------------------------------------------------------------------+

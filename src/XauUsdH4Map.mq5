@@ -16,6 +16,16 @@
 //|  Does NOT: send, modify or close orders; use M5/M15; compute     |
 //|  entries, stop loss, take profit or lot size.                    |
 //|                                                                  |
+//|  INSTALL (Expert Advisor, NOT a script): copy the whole          |
+//|  repository src/ folder to                                       |
+//|    <terminal data folder>/MQL5/Experts/velo_src/                 |
+//|  so that MQL5/Experts/velo_src/XauUsdH4Map.mq5 sits next to      |
+//|  MQL5/Experts/velo_src/include/ (the include lines of this file  |
+//|  are relative to this file). Compile in MetaEditor, attach       |
+//|  to an XAUUSD chart. The logic test is a separate SCRIPT and     |
+//|  goes under MQL5/Scripts/ (see src/tests/T002_LogicTest.mq5).    |
+//|  Install layout NOT tested in MT5.                               |
+//|                                                                  |
 //|  Verification status: NOT COMPILED here (no MetaEditor). The     |
 //|  Python tests verify an algorithm MODEL, not this MQL5 source.   |
 //|  src/tests/T002_LogicTest.mq5 has not been run.                  |
@@ -53,6 +63,8 @@ input int              InpPollSeconds   = 1;                   // Timer poll int
 
 #define H4_MIN_READY_BARS 60
 #define REFRESH_MS        1000
+#define RETRY_MS          3000   // throttle for history re-checks and failed rebuilds
+#define HIST_MAX_NOPROG   20     // consecutive re-checks without new history, then stop (~60 s)
 
 string            g_symbol = "";
 SSymbolSnapshot   g_snapshot;
@@ -80,10 +92,24 @@ bool              g_refreshed_once  = false;
 bool              g_timer_active    = false;
 double            g_price    = 0.0;
 
+//--- history / map-lifecycle state
+int               g_hist_state     = H4_HIST_COMPLETE;
+int               g_hist_got       = 0;       // closed bars of the last CopyRates attempt
+datetime          g_hist_oldest    = 0;       // oldest bar of the last CopyRates attempt
+int               g_hist_noprog    = 0;       // consecutive re-checks without more history
+bool              g_hist_exhausted = false;   // server has no more history (until next H4 bar)
+uint              g_last_try       = 0;       // GetTickCount of the last (re)build attempt
+bool              g_tried_once     = false;
+string            g_hist_text      = "";      // shown in the panel, logged once per change
+string            g_cleared_reason = "";      // non-empty after a clear, until rebuilt
+
 void Poll(void);
 bool RecomputeMap(void);
 void RefreshPrice(const bool force);
 void RenderPanel(void);
+void ClearMapState(const string reason);
+void SetHistoryStatus(const int state, const int got);
+bool HistoryProbe(void);
 
 //+------------------------------------------------------------------+
 int OnInit(void)
@@ -94,6 +120,15 @@ int OnInit(void)
    g_n = g_ns = g_nf = g_sel = 0;
    g_map_last_closed = 0;
    g_price = 0.0;
+   g_hist_state = H4_HIST_COMPLETE;
+   g_hist_got = 0;
+   g_hist_oldest = 0;
+   g_hist_noprog = 0;
+   g_hist_exhausted = false;
+   g_last_try = 0;
+   g_tried_once = false;
+   g_hist_text = "";
+   g_cleared_reason = "";
    ZeroMemory(g_res);
 
    g_symbol = _Symbol;
@@ -152,7 +187,9 @@ void OnTick(void)  { Poll(); }
 void OnTimer(void) { Poll(); }
 
 //+------------------------------------------------------------------+
-//| Poll: H4 logic only on init or a new H4 bar; price part <= 1 Hz  |
+//| Poll: H4 logic only on init, a new H4 bar, or a throttled retry; |
+//| price part <= 1 Hz. No Sleep, no loops: every re-check is one    |
+//| CopyRates call at most every RETRY_MS.                           |
 //+------------------------------------------------------------------+
 void Poll(void)
   {
@@ -160,15 +197,108 @@ void Poll(void)
    g_h4.Refresh(new_bar);
    if(!g_h4.IsReady())
      {
+      //--- never leave the old map on the chart looking current
+      ClearMapState("H4 series not ready: " + g_h4.StateName());
+      g_hist_noprog = 0;
+      g_hist_exhausted = false;   // retry after recovery
       RenderPanel();
       return;
      }
+   uint now = GetTickCount();
    bool recomputed = false;
-   if(!g_have_map || new_bar)
+   if(new_bar)
      {
+      //--- a new closed bar starts a fresh history assessment
+      g_hist_noprog = 0;
+      g_hist_exhausted = false;
+      g_last_try = now;
+      g_tried_once = true;
       recomputed = RecomputeMap();
      }
+   else
+      if(!g_tried_once)
+        {
+         g_last_try = now;
+         g_tried_once = true;
+         recomputed = RecomputeMap();
+        }
+      else
+         if((now - g_last_try) >= RETRY_MS)
+           {
+            if(!g_have_map && !g_hist_exhausted)
+              {
+               //--- no map (history catching up / failed copy): throttled retry
+               g_last_try = now;
+               recomputed = RecomputeMap();
+              }
+            else
+               if(g_have_map && H4RefreshDue(g_hist_state, g_hist_noprog, HIST_MAX_NOPROG))
+                 {
+                  //--- map built on partial history: rebuild only when more arrived
+                  g_last_try = now;
+                  recomputed = HistoryProbe();
+                 }
+           }
    RefreshPrice(recomputed);
+  }
+
+//+------------------------------------------------------------------+
+//| ClearMapState: remove every map drawing and disable the dynamic  |
+//| state. Logs once per transition (visible without the panel).     |
+//+------------------------------------------------------------------+
+void ClearMapState(const string reason)
+  {
+   bool had = g_have_map;
+   g_have_map = false;
+   g_sel = 0;
+   g_n = g_ns = g_nf = 0;
+   g_map_last_closed = 0;
+   ArrayResize(g_order, 0);
+   ZeroMemory(g_res);
+   if(H4MapTransition(had, false) == H4_ACT_CLEAR)
+     {
+      g_drawer.Reset();       // swings, FVG, labels, ERL, range lines, link; panel stays
+      g_cleared_reason = reason;
+      PrintFormat("H4 MAP cleared: %s", reason);
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| History status: panel text, logged once per change               |
+//+------------------------------------------------------------------+
+void SetHistoryStatus(const int state, const int got)
+  {
+   bool refreshing = H4RefreshDue(state, g_hist_noprog, HIST_MAX_NOPROG);
+   string t = H4HistoryText(state, got, g_lookback, refreshing);
+   g_hist_state = state;
+   g_hist_got = got;
+   if(t != g_hist_text)
+     {
+      g_hist_text = t;
+      PrintFormat("H4 history: %s", t);
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| HistoryProbe: re-copy and rebuild only if more history arrived   |
+//| (more bars, or an older first bar). Gives up after               |
+//| HIST_MAX_NOPROG consecutive checks without progress: that is the |
+//| "server has no more history" detection.                          |
+//+------------------------------------------------------------------+
+bool HistoryProbe(void)
+  {
+   MqlRates probe[];
+   ArraySetAsSeries(probe, false);
+   int got = CopyRates(g_symbol, PERIOD_H4, 1, g_lookback, probe);
+   if(got > 0 && H4HistoryImproved(g_hist_got, g_hist_oldest, got, probe[0].time))
+     {
+      g_hist_noprog = 0;
+      return(RecomputeMap());
+     }
+   ResetLastError();
+   g_hist_noprog++;
+   SetHistoryStatus(g_hist_state, g_hist_got);   // refreshing -> "no more on server" when capped
+   return(false);
   }
 
 //+------------------------------------------------------------------+
@@ -178,17 +308,34 @@ bool RecomputeMap(void)
   {
    ArraySetAsSeries(g_bars, false);          // index 0 = oldest
    int got = CopyRates(g_symbol, PERIOD_H4, 1, g_lookback, g_bars);
-   if(got < 2 * (g_left + g_right) + 3)
+   if(got <= 0)
      {
-      g_have_map = false;
       ResetLastError();
+      ClearMapState("CopyRates returned no closed H4 bars");
+      return(false);
+     }
+   int hs = H4HistoryState(got, g_lookback, g_left, g_right);
+   if(hs != H4_HIST_COMPLETE)
+     {
+      //--- progress bookkeeping for the throttled re-check
+      if(g_hist_got == 0 || H4HistoryImproved(g_hist_got, g_hist_oldest, got, g_bars[0].time))
+         g_hist_noprog = 0;
+      else
+         g_hist_noprog++;
+      g_hist_exhausted = !H4RefreshDue(hs, g_hist_noprog, HIST_MAX_NOPROG);
+     }
+   g_hist_oldest = g_bars[0].time;
+   SetHistoryStatus(hs, got);
+   if(hs == H4_HIST_INSUFFICIENT)
+     {
+      ClearMapState(g_hist_text);
       return(false);
      }
    //--- the newest copied bar must be the closed bar the watcher reports,
-   //--- otherwise the history is still catching up: retry on the next poll
+   //--- otherwise the history is still catching up: retry (throttled)
    if(g_h4.ClosedOpenTime() != 0 && g_bars[got - 1].time != g_h4.ClosedOpenTime())
      {
-      g_have_map = false;
+      ClearMapState("newest copied bar does not match the watcher (history catching up)");
       return(false);
      }
    g_n = got;
@@ -197,7 +344,13 @@ bool RecomputeMap(void)
    g_map_last_closed = g_bars[g_n - 1].time;
    g_drawer.DrawStatic(g_bars, g_n, PeriodSeconds(PERIOD_H4), g_swings, g_ns,
                        g_fvgs, g_nf, g_res, InpShowInvalid);
+   int act = H4MapTransition(g_have_map, true);
    g_have_map = true;
+   if(act == H4_ACT_REBUILT && g_cleared_reason != "")
+     {
+      PrintFormat("H4 MAP rebuilt (was cleared: %s)", g_cleared_reason);
+      g_cleared_reason = "";
+     }
    PrintFormat("H4 MAP recomputed: closed bar %s | %s | interval %s | ERL %s | swings %d | FVG %d (proposed model)",
                TimeToString(g_map_last_closed, TIME_DATE|TIME_MINUTES),
                H4DirName(g_res.direction), H4RangeName(g_res.range_state),
@@ -241,6 +394,9 @@ void RenderPanel(void)
    if(!g_h4.IsReady() || !g_have_map)
      {
       g_panel.Line(StringFormat("H4 data: %s - %s", g_h4.StateName(), g_h4.Detail()), clrOrange);
+      g_panel.Line(g_have_map ? "map: shown" : "map: CLEARED (no map is drawn)", clrOrange);
+      if(g_hist_text != "")
+         g_panel.Line(g_hist_text, clrOrange);
       g_panel.End();
       return;
      }
@@ -260,17 +416,20 @@ void RenderPanel(void)
       g_panel.Line(StringFormat("ERL %s: %s (closed bars; may lag live price by up to 1 bar)",
                                 DoubleToString(g_res.erl_price, dg), H4ErlName(g_res.erl_state)),
                    g_res.erl_state == H4_ERL_TAKEN ? clrOrange : clrLimeGreen);
+   bool active = H4SetupActive(g_res, g_sel);
    if(g_sel > 0)
      {
       int k = g_order[0];
       bool inside = H4PriceInsideZone(g_fvgs[k], g_price);
-      g_panel.Line(StringFormat("nearest IRL: %s %s [%s - %s] %s -> ERL", g_fvgs[k].id,
-                                H4FvgStateName(g_fvgs[k].state),
-                                DoubleToString(g_fvgs[k].lower, dg), DoubleToString(g_fvgs[k].upper, dg),
-                                inside ? "INSIDE" : "ahead"), clrLimeGreen);
+      string zone = StringFormat("%s %s [%s - %s]", g_fvgs[k].id, H4FvgStateName(g_fvgs[k].state),
+                                 DoubleToString(g_fvgs[k].lower, dg), DoubleToString(g_fvgs[k].upper, dg));
+      g_panel.Line(H4IrlPanelText(active, g_res.erl_state, zone, inside),
+                   active ? clrLimeGreen : clrOrange);
      }
    else
-      g_panel.Line("nearest IRL: none (no active IRL -> ERL setup declared)", clrSilver);
+      g_panel.Line("nearest IRL: none selectable (no active setup)", clrSilver);
+   if(g_hist_text != "")
+      g_panel.Line(g_hist_text, g_hist_state == H4_HIST_COMPLETE ? clrSilver : clrOrange);
 
    int fresh = 0, touched = 0, invalid = 0, irl = 0, outside = 0;
    for(int i = 0; i < g_nf; i++)

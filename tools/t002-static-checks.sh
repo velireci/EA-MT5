@@ -134,12 +134,14 @@ if [ -n "$out" ]; then echo "  FAIL H4Structure.mqh is not pure: $out"; FAIL=1; 
 echo "=== CHECK 11: generated case data in the MQL5 test matches the Python model ==="
 python3 tests/t002_reference_test.py --emit-mql > "$TMPD/emit" 2>/dev/null
 awk '/^\/\/ BEGIN GENERATED CASE DATA/{p=1} p{print} /^\/\/ END GENERATED CASE DATA/{p=0}' $TEST > "$TMPD/have"
-if [ -s "$TMPD/emit" ] && cmp -s "$TMPD/emit" "$TMPD/have"; then
+# Windows Python emits CRLF, the source block is LF: normalise both sides.
+tr -d '\r' < "$TMPD/emit" > "$TMPD/emit.n"; tr -d '\r' < "$TMPD/have" > "$TMPD/have.n"
+if [ -s "$TMPD/emit.n" ] && cmp -s "$TMPD/emit.n" "$TMPD/have.n"; then
   echo "  PASS: generated block in $TEST equals --emit-mql output"
 else
   echo "  FAIL: generated block in $TEST differs from tests/t002_reference_test.py --emit-mql"; FAIL=1
 fi
-rm -f "$TMPD/emit" "$TMPD/have"
+rm -f "$TMPD/emit" "$TMPD/have" "$TMPD/emit.n" "$TMPD/have.n"
 
 echo "=== CHECK 12: Python reference model tests (verify the MODEL only) ==="
 python3 tests/t002_reference_test.py > "$TMPD/py" 2>&1 && echo "  PASS: $(tail -1 "$TMPD/py")" || { tail -5 "$TMPD/py"; echo "  FAIL: reference tests"; FAIL=1; }
@@ -172,8 +174,14 @@ PYEOF
 [ $? -ne 0 ] && echo "  PASS 13e: format-string mismatch detected" || { echo "  FAIL 13e: mismatch not detected"; FAIL=1; }
 # 13f: the case-data comparison must fail when the generated block is altered
 sed 's/DIR=BEARISH/DIR=BULLISH/' $TEST | awk '/^\/\/ BEGIN GENERATED CASE DATA/{p=1} p{print} /^\/\/ END GENERATED CASE DATA/{p=0}' > "$NEG/have.txt"
-python3 tests/t002_reference_test.py --emit-mql > "$NEG/emit.txt"
-cmp -s "$NEG/have.txt" "$NEG/emit.txt" && { echo "  FAIL 13f: altered data block not detected"; FAIL=1; } || echo "  PASS 13f: altered generated data detected"
+python3 tests/t002_reference_test.py --emit-mql | tr -d '\r' > "$NEG/emit.txt"
+tr -d '\r' < "$NEG/have.txt" > "$NEG/have.n"
+cmp -s "$NEG/have.n" "$NEG/emit.txt" && { echo "  FAIL 13f: altered data block not detected"; FAIL=1; } || echo "  PASS 13f: altered generated data detected"
+# 13g: a CRLF-converted copy of the (unaltered) block must compare equal after normalisation
+awk '/^\/\/ BEGIN GENERATED CASE DATA/{p=1} p{print} /^\/\/ END GENERATED CASE DATA/{p=0}' $TEST | sed 's/$/\r/' > "$NEG/crlf.txt"
+cmp -s "$NEG/crlf.txt" "$NEG/emit.txt" && { echo "  FAIL 13g: raw CRLF copy unexpectedly equal (test is vacuous)"; FAIL=1; }
+tr -d '\r' < "$NEG/crlf.txt" > "$NEG/crlf.n"
+cmp -s "$NEG/crlf.n" "$NEG/emit.txt" && echo "  PASS 13g: CRLF copy of the block equals --emit-mql after line-ending normalisation" || { echo "  FAIL 13g: CRLF copy differs after normalisation"; FAIL=1; }
 rm -rf "$NEG"
 
 echo "=== RESULT ==="

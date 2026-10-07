@@ -398,6 +398,56 @@ def build_cases():
     return c
 
 
+# ------------------------------------------------- pure EA decisions ----
+# Mirrors of the pure helpers at the end of src/include/H4Structure.mqh.
+HIST_INSUFFICIENT, HIST_PARTIAL, HIST_COMPLETE = 0, 1, 2
+ACT_NONE, ACT_CLEAR, ACT_REBUILT, ACT_REFRESHED = 0, 1, 2, 3
+
+
+def history_state(got, requested, left, right):
+    if got < 2 * (left + right) + 3:
+        return HIST_INSUFFICIENT
+    if got < requested:
+        return HIST_PARTIAL
+    return HIST_COMPLETE
+
+
+def history_text(state, got, requested, refreshing):
+    if state == HIST_INSUFFICIENT:
+        return 'INSUFFICIENT HISTORY (%d of %d bars)' % (got, requested)
+    if state == HIST_PARTIAL:
+        return 'PARTIAL HISTORY (%d of %d, %s)' % (
+            got, requested, 'refreshing' if refreshing else 'no more on server')
+    return 'HISTORY COMPLETE (%d of %d)' % (got, requested)
+
+
+def history_improved(prev_got, prev_oldest, new_got, new_oldest):
+    if new_got > prev_got:
+        return True
+    return prev_oldest != 0 and new_oldest != 0 and new_oldest < prev_oldest
+
+
+def refresh_due(state, noprogress, max_noprogress):
+    return state != HIST_COMPLETE and noprogress < max_noprogress
+
+
+def map_transition(had_map, build_ok):
+    if had_map:
+        return ACT_REFRESHED if build_ok else ACT_CLEAR
+    return ACT_REBUILT if build_ok else ACT_NONE
+
+
+def setup_active(direction, range_state, erl_state, selectable):
+    return (range_state == 'VALID' and direction in ('BULLISH', 'BEARISH')
+            and erl_state == 'UNTOUCHED' and selectable > 0)
+
+
+def irl_panel_text(active, erl_name, zone, inside):
+    if active:
+        return 'nearest IRL: %s %s -> ERL' % (zone, 'INSIDE' if inside else 'ahead')
+    return 'candidate (inactive: ERL %s): %s %s' % (erl_name, zone, 'inside' if inside else 'ahead')
+
+
 # ----------------------------------------------------------------- tests ----
 FAILS = []
 PASSES = []
@@ -672,6 +722,48 @@ def test_ids_and_selection_ties():
           'distance tie and confirm_time tie -> ID ascending')
 
 
+def test_pure_decisions():
+    print('--- history state, refresh, map transitions, panel wording')
+    check(history_state(6, 300, 2, 2) == HIST_INSUFFICIENT, 'history 6 of 300 (min 11) -> INSUFFICIENT')
+    check(history_state(11, 300, 2, 2) == HIST_PARTIAL, 'history 11 of 300 -> PARTIAL')
+    check(history_state(299, 300, 2, 2) == HIST_PARTIAL, 'history 299 of 300 -> PARTIAL')
+    check(history_state(300, 300, 2, 2) == HIST_COMPLETE, 'history 300 of 300 -> COMPLETE')
+    check(history_text(HIST_INSUFFICIENT, 6, 300, True) == 'INSUFFICIENT HISTORY (6 of 300 bars)', 'text INSUFFICIENT')
+    check(history_text(HIST_PARTIAL, 120, 300, True) == 'PARTIAL HISTORY (120 of 300, refreshing)', 'text PARTIAL refreshing')
+    check(history_text(HIST_PARTIAL, 120, 300, False) == 'PARTIAL HISTORY (120 of 300, no more on server)', 'text PARTIAL exhausted')
+    check(history_text(HIST_COMPLETE, 300, 300, False) == 'HISTORY COMPLETE (300 of 300)', 'text COMPLETE')
+    t1 = T0
+    t0 = T0 - PERIOD
+    check(history_improved(100, t1, 101, t1), 'more bars -> improved')
+    check(history_improved(100, t1, 100, t0), 'older first bar -> improved')
+    check(not history_improved(100, t1, 100, t1), 'same count and first bar -> not improved')
+    check(not history_improved(100, t1, 99, t1), 'fewer bars -> not improved')
+    check(not history_improved(0, 0, 0, 0), 'nothing yet -> not improved')
+    check(refresh_due(HIST_PARTIAL, 0, 20), 'partial, no failures yet -> refresh due')
+    check(refresh_due(HIST_INSUFFICIENT, 19, 20), 'insufficient, 19 idle checks -> still due')
+    check(not refresh_due(HIST_PARTIAL, 20, 20), 'cap of idle checks reached -> stop')
+    check(not refresh_due(HIST_COMPLETE, 0, 20), 'complete -> never refresh')
+    check(map_transition(True, False) == ACT_CLEAR, 'map + failed build -> CLEAR')
+    check(map_transition(False, True) == ACT_REBUILT, 'no map + ok build -> REBUILT')
+    check(map_transition(True, True) == ACT_REFRESHED, 'map + ok build -> REFRESHED')
+    check(map_transition(False, False) == ACT_NONE, 'no map + failed build -> NONE')
+    check(setup_active('BEARISH', 'VALID', 'UNTOUCHED', 1), 'bearish, valid, ERL untouched, 1 candidate -> active')
+    check(not setup_active('BEARISH', 'VALID', 'UNTOUCHED', 0), 'no selectable candidate -> inactive')
+    check(not setup_active('BEARISH', 'VALID', 'TAKEN', 1), 'ERL TAKEN -> inactive')
+    check(not setup_active('BEARISH', 'UNDEFINED', 'UNTOUCHED', 1), 'interval not valid -> inactive')
+    check(not setup_active('MIXED', 'VALID', 'UNTOUCHED', 1), 'direction not trending -> inactive')
+    z = 'F1 FRESH [10.00 - 12.00]'
+    check(irl_panel_text(True, 'UNTOUCHED', z, False) == 'nearest IRL: F1 FRESH [10.00 - 12.00] ahead -> ERL', 'UNTOUCHED ahead wording')
+    check(irl_panel_text(True, 'UNTOUCHED', z, True) == 'nearest IRL: F1 FRESH [10.00 - 12.00] INSIDE -> ERL', 'UNTOUCHED inside wording')
+    check(irl_panel_text(False, 'TAKEN', z, False) == 'candidate (inactive: ERL TAKEN): F1 FRESH [10.00 - 12.00] ahead', 'TAKEN wording has no -> ERL')
+    check('-> ERL' not in irl_panel_text(False, 'TAKEN', z, True), 'TAKEN inside wording has no -> ERL')
+    # end to end on a model case: ERL TAKEN scenario yields candidates but an inactive setup
+    a, _, price = run('bear_erl_taken_eq')
+    sel = select_irl(a.fvgs, a.res, price)
+    act = setup_active(a.res.direction, a.res.range_state, a.res.erl_state, len(sel))
+    check(a.res.erl_state == 'TAKEN' and not act, 'model case with ERL TAKEN is never an active setup')
+
+
 def emit_mql():
     out = ['// BEGIN GENERATED CASE DATA (tests/t002_reference_test.py --emit-mql)']
     cases = build_cases()
@@ -714,6 +806,7 @@ def main():
     test_erl()
     test_no_lookahead()
     test_ids_and_selection_ties()
+    test_pure_decisions()
     print('')
     print('%d passed, %d failed' % (len(PASSES), len(FAILS)))
     if FAILS:

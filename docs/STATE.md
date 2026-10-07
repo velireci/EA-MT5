@@ -1,6 +1,6 @@
 # Current project state
 
-> T002 (branch `claude/t002-h4-map`, based on the T001 head `56c9570`, draft PR against the T001 branch): H4 map implemented as a visual prototype. Compilation UNVERIFIED; Python model tests 65/65 and static checks PASS; MQL5 test script not run; nothing observed in MT5. All H4 rules are PROPOSED, awaiting client validation. See reports/T002-verification.md and tasks/T002-h4-map.md. Awaiting Codex review. T001 section below is unchanged. PR #1 not merged.
+> T002 (branch `claude/t002-h4-map`, draft PR velireci/EA-MT5#2 against the T001 branch, base head `56c9570`): H4 map visual prototype. Evidence by source: Codex compiled `44fddaa` with 0 errors, 0 warnings (both files) and ran Python 65/65; MQL5 script and drawings NOT run in MT5. Review-round-1 fixes (history refresh, stale-map clearing, ERL TAKEN wording, check 11 line endings, install paths) are UNCOMPILED: the 0/0 does not cover them; my Python model tests 96/96 and static checks PASS. All H4 rules are PROPOSED, awaiting client validation. See reports/T002-verification.md section 8. Awaiting Codex recompile and review. PR #1 not merged.
 
 Updated: 2026-10-07 (Europe/Tirane)
 

@@ -136,6 +136,16 @@ public:
         }
      }
 
+   //--- Remove every map object (swings, FVG rectangles and labels, range lines,
+   //--- ERL line and label, IRL->ERL link; INSIDE highlighting lives on the FVG
+   //--- rectangles and goes with them). Panel labels (velo_t002_pnl_) stay.
+   void              Reset(void)
+     {
+      ClearMap();
+      m_x_end = 0;
+      ChartRedraw(m_chart);
+     }
+
    //--- Redraw everything that depends on H4 logic only (new H4 bar / init).
    void              DrawStatic(const MqlRates &bars[], const int n, const int period_seconds,
                                 const SH4Swing &swings[], const int ns,
@@ -194,6 +204,7 @@ public:
                                  const double price, const int &order[], const int cnt,
                                  const bool show_invalid)
      {
+      bool active = H4SetupActive(res, cnt);
       for(int k = 0; k < nf; k++)
         {
          if(fvgs[k].state == H4_FVG_INVALID && !show_invalid)
@@ -209,8 +220,9 @@ public:
                break;
               }
          bool inside = (rank > 0 && H4PriceInsideZone(fvgs[k], price));
+         //--- inactive candidates (ERL TAKEN) are listed but never highlighted
          bool irl    = (fvgs[k].cls == H4_CLS_IRL && fvgs[k].state != H4_FVG_INVALID);
-         ObjectSetInteger(m_chart, rn, OBJPROP_COLOR, ZoneColor(fvgs[k], inside));
+         ObjectSetInteger(m_chart, rn, OBJPROP_COLOR, ZoneColor(fvgs[k], inside && active));
          ObjectSetInteger(m_chart, rn, OBJPROP_FILL, irl && rank > 0);
          ObjectSetInteger(m_chart, rn, OBJPROP_WIDTH, rank == 1 ? 2 : 1);
          ObjectSetInteger(m_chart, rn, OBJPROP_STYLE,
@@ -220,17 +232,17 @@ public:
                                      H4FvgStateName(fvgs[k].state), H4ClassName(fvgs[k].cls));
          if(rank > 0)
             label += StringFormat(" #%d%s", rank, inside ? " INSIDE" : "");
+         if(rank > 0 && !active)
+            label += StringFormat(" (inactive: ERL %s)", H4ErlName(res.erl_state));
          Note(m_prefix + "fvgt_" + fvgs[k].id, fvgs[k].time_a, fvgs[k].upper, label,
-              ZoneColor(fvgs[k], inside), ANCHOR_LEFT_LOWER);
+              ZoneColor(fvgs[k], inside && active), ANCHOR_LEFT_LOWER);
         }
 
-      //--- IRL -> ERL link: only for a trending direction, a valid interval,
-      //--- an untouched ERL and at least one selectable candidate.
+      //--- IRL -> ERL link: only for an ACTIVE setup (H4SetupActive): trending
+      //--- direction, valid interval, UNTOUCHED ERL, a selectable candidate.
+      //--- With ERL TAKEN the link is deleted below and never drawn.
       string ln = m_prefix + "link";
-      bool link_ok = (res.range_state == H4_RNG_VALID &&
-                      (res.direction == H4_DIR_BULLISH || res.direction == H4_DIR_BEARISH) &&
-                      res.erl_state == H4_ERL_UNTOUCHED && cnt > 0);
-      if(link_ok)
+      if(active)
         {
          int k0 = order[0];
          Segment(ln, fvgs[k0].confirm_time, (fvgs[k0].lower + fvgs[k0].upper) / 2.0,

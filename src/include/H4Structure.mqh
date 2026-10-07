@@ -494,4 +494,77 @@ string H4Summary(const SH4Swing &swings[], const int ns, const SH4Fvg &fvgs[], c
                        res.ambiguous, sw, fv, sel));
   }
 
+//+------------------------------------------------------------------+
+//| 9. pure decisions used by the EA (history state, refresh, map    |
+//|    transitions, panel wording). No chart or series access, so    |
+//|    they are mirrored 1:1 in tests/t002_reference_test.py.        |
+//+------------------------------------------------------------------+
+#define H4_HIST_INSUFFICIENT 0   // too few bars to find swings at all
+#define H4_HIST_PARTIAL      1   // enough to analyse, fewer than requested
+#define H4_HIST_COMPLETE     2   // requested lookback satisfied
+
+#define H4_ACT_NONE      0
+#define H4_ACT_CLEAR     1   // a map existed and the rebuild failed
+#define H4_ACT_REBUILT   2   // no map existed and a build succeeded
+#define H4_ACT_REFRESHED 3   // a map existed and a build succeeded
+
+int H4HistoryState(const int got, const int requested, const int left, const int right)
+  {
+   if(got < 2 * (left + right) + 3)
+      return(H4_HIST_INSUFFICIENT);
+   if(got < requested)
+      return(H4_HIST_PARTIAL);
+   return(H4_HIST_COMPLETE);
+  }
+
+string H4HistoryText(const int state, const int got, const int requested, const bool refreshing)
+  {
+   if(state == H4_HIST_INSUFFICIENT)
+      return(StringFormat("INSUFFICIENT HISTORY (%d of %d bars)", got, requested));
+   if(state == H4_HIST_PARTIAL)
+      return(StringFormat("PARTIAL HISTORY (%d of %d, %s)", got, requested,
+                          refreshing ? "refreshing" : "no more on server"));
+   return(StringFormat("HISTORY COMPLETE (%d of %d)", got, requested));
+  }
+
+//--- more history than the current map used: more bars, or an older first bar
+bool H4HistoryImproved(const int prev_got, const datetime prev_oldest,
+                       const int new_got, const datetime new_oldest)
+  {
+   if(new_got > prev_got)
+      return(true);
+   return(prev_oldest != 0 && new_oldest != 0 && new_oldest < prev_oldest);
+  }
+
+//--- keep re-checking only while history is incomplete and attempts still
+//--- bring progress (noprogress = consecutive checks without improvement)
+bool H4RefreshDue(const int state, const int noprogress, const int max_noprogress)
+  {
+   return(state != H4_HIST_COMPLETE && noprogress < max_noprogress);
+  }
+
+int H4MapTransition(const bool had_map, const bool build_ok)
+  {
+   if(had_map)
+      return(build_ok ? H4_ACT_REFRESHED : H4_ACT_CLEAR);
+   return(build_ok ? H4_ACT_REBUILT : H4_ACT_NONE);
+  }
+
+//--- an IRL -> ERL setup is active only for a trending direction, a valid
+//--- interval, an UNTOUCHED ERL and at least one selectable candidate
+bool H4SetupActive(const SH4Result &res, const int selectable)
+  {
+   return(res.range_state == H4_RNG_VALID &&
+          (res.direction == H4_DIR_BULLISH || res.direction == H4_DIR_BEARISH) &&
+          res.erl_state == H4_ERL_UNTOUCHED && selectable > 0);
+  }
+
+string H4IrlPanelText(const bool active, const int erl_state, const string zone, const bool inside)
+  {
+   if(active)
+      return(StringFormat("nearest IRL: %s %s -> ERL", zone, inside ? "INSIDE" : "ahead"));
+   return(StringFormat("candidate (inactive: ERL %s): %s %s", H4ErlName(erl_state), zone,
+                       inside ? "inside" : "ahead"));
+  }
+
 #endif // VELO_H4_STRUCTURE_MQH

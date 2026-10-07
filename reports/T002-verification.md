@@ -5,13 +5,13 @@ Branch `claude/t002-h4-map`, based on the T001 head `56c9570` (PR velireci/EA-MT
 ## 1. Evidence, by kind
 | Evidence | Status | Who/what |
 |---|---|---|
-| MQL5 compilation of `XauUsdH4Map.mq5` and `T002_LogicTest.mq5` | **UNVERIFIED** | No MetaEditor here. The T001 compile (0/0 on `763227d`) says nothing about this code. |
+| MQL5 compilation of `XauUsdH4Map.mq5` and `T002_LogicTest.mq5` | `44fddaa`: **0 errors, 0 warnings** (Codex, MetaEditor). After review round 1 (section 8): **UNVERIFIED** | No MetaEditor in my environment. The 0/0 covers `44fddaa` only; the T001 compile says nothing about this code. |
 | Python reference model tests (`tests/t002_reference_test.py`) | PASS, 65 passed / 0 failed | Run by the implementing agent and again by me. They verify the ALGORITHM MODEL, not the MQL5 source. |
 | Static checks (`tools/t002-static-checks.sh`) | PASS, exit 0 | Run by the agent and by me; includes negative controls (injected `OrderSend`/`MqlTradeRequest`/`CTrade`/`PositionClose`, unbalanced parentheses, format-string mismatch, altered generated data) all detected. Not a compilation. |
 | T001 static checks and T001 files | unchanged / PASS | `git diff 56c9570 -- <T001 files>` is empty; `tools/t001-static-checks.sh` still passes. |
 | MQL5 logic test script `src/tests/T002_LogicTest.mq5` | WRITTEN, NOT RUN | Compares the MQL5 logic with strings produced by the Python model on the same 31 cases. Only a run in MT5 shows that the two agree. |
 | Drawing, panel, reload without duplicates | NOT OBSERVED | Owner check in MT5 (section 4). |
-| Codex review | pending | |
+| Codex review | round 1 done on `44fddaa` (5 findings, section 8); round 2 pending | |
 
 ## 2. What the Python tests cover (65 checks)
 Unconfirmed swing; equal highs/lows; ambiguous outside bar; MIXED (equal and expanding) and UNKNOWN; missing interval (no preceding high, H<=L, bullish mirror); bullish and bearish FVG, including Low(C)==High(A) forming none; touch without invalidation; invalidation by close, equality not invalidating (both types); ERL taken (equality, touch before it was knowable, never restored); SELL ordering, price inside a zone, overlap/newer-first, ID tie-break, BUY mirror; no look-ahead (3 series, every prefix from 8 bars, compared with the full analysis restricted to what was knowable at T, plus a poison test with garbage bars after the prefix); ID uniqueness and determinism.
@@ -49,3 +49,18 @@ Swing definition 2/2; the direction test; which swing pair is the interval; whet
 
 ## 7. Limits
 Nothing here shows the EA is verified end to end, correct against the client's charts, live-ready or profitable. Compilation, MT5 behaviour, and agreement with the client's marked examples are all still unproven.
+
+## 8. Review round 1 (Codex on `44fddaa`) and the fixes
+Codex reported on `44fddaa`: compile 0/0 for both files, Python 65/65, MQL5 script and drawings NOT run in MT5. Five findings, fixed by the implementing agent (mql5-builder) without changing any strategy proposal:
+1. History shorter than LookbackBars was accepted and never refreshed. Now: states INSUFFICIENT / PARTIAL (refreshing) / PARTIAL (no more on server) / COMPLETE, shown in the panel and logged once per change. A map built on partial history is re-checked with one `CopyRates` at most every 3 s and rebuilt only if more bars or an older first bar arrived; after 20 checks without progress it stops until the next H4 bar. No `Sleep`, no loop.
+2. Stale map. When the H4 series is not ready, the copy fails, history is insufficient or the newest bar does not match the watcher, the map state is disabled and every `velo_t002_` object except the panel labels is deleted (swings, FVG, labels, ERL, range, link, INSIDE highlight). One log line on each clear and on rebuild, so it is visible with the panel off.
+3. ERL TAKEN: the panel and zone labels no longer say "-> ERL" for an inactive setup; candidates show as "candidate (inactive: ERL TAKEN)" and the link stays absent. The same condition (`H4SetupActive`) drives the link and the panel.
+4. Check 11 normalises CRLF/LF on both sides; negative control for altered data kept; a CRLF-copy equivalence control added.
+5. Install paths: the EA goes under `MQL5/Experts/velo_src/`, the test script `T002_LogicTest.mq5` is a script (has `OnStart`) and goes under `MQL5/Scripts/velo_src/tests/` with `include/` next to it as a sibling (the relative include is kept). Section 4 step 1 above is superseded by this. Layout NOT tested in MT5.
+
+Evidence for the fixes (my environment, after the change):
+- `python3 tests/t002_reference_test.py`: 96 passed, 0 failed (31 new checks for history states, refresh decision, map transitions, `H4SetupActive`, panel wording for TAKEN versus UNTOUCHED). Model only.
+- `bash tools/t002-static-checks.sh`: exit 0, negative controls 13a-13g detected; `bash tools/t001-static-checks.sh`: exit 0.
+- **The changed MQL5 is UNCOMPILED. Codex's 0/0 on `44fddaa` is not inherited.** Constructs Codex's earlier compile did not exercise: a local `MqlRates` array with `ArraySetAsSeries`+`CopyRates` in `HistoryProbe`, `ArrayResize(g_order,0)`, `const SH4Result &` parameter, `datetime` parameters in the new helpers, `StringFind` in the test script, the new `#define H4_HIST_*`/`H4_ACT_*`, a `GetTickCount` subtraction for retry gating.
+- Not observed in MT5: the throttle, clear/rebuild, panel wording, and the install layout. These are the owner's steps.
+- Decisions beyond the findings: retries of a failed rebuild have only the 3 s throttle (no attempt cap); the 20-check cap applies to incomplete-history re-checks only; an inactive candidate keeps its fill and rank label without the gold INSIDE colour.
