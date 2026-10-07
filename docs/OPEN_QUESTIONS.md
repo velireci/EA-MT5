@@ -1,0 +1,20 @@
+# Open questions
+
+All entries below are OPEN as of 2026-10-07. Ask only the questions needed for the active stage. Full Albanian conversation worksheet: docs/reference/client-clarifications-SQ.md.
+
+| ID | Stage | Decision needed |
+|---|---|---|
+| Q01 | Direction | Swing selection, H1/H4 roles, disagreement and bias change |
+| Q02 | H4 FVG | Gap definition, choice among zones, eligibility, revisit and invalidation |
+| Q03 | H4 return | Required touch/penetration/sweep and allowed time for M15 setup |
+| Q04 | M15 | MSS swing, wick/close confirmation, associated FVG and formation timing |
+| Q05 | Entry/exit levels | FVG entry boundary/offset, stop swing/buffer, target selection and updates |
+| Q06 | Filter | Objective range classification demonstrated by accepted/rejected examples |
+| Q07 | Management | 80% at 2R versus chart levels, exact meaning of +0.2%, target nearer than 2R |
+| Q08 | Sizing | 1% method/base/costs, capital/account kind, max 2 or 3 trades, stop-distance units |
+| Q09 | Orders | Expiry, repeated setup/re-entry, cooldown, opposite open-position signal, spread rejection |
+| Q10 | Daily state | Stop-after-win event, total-trade result, loss-streak reset, realized loss accounting |
+| Q11 | Exposure/hours | Pending risk reservation/manual exposure, end-of-hours action, news-position action |
+| Q12 | Evidence | Filled BUY+SELL sequences, timestamps, indicator links/settings, test dates and acceptance |
+
+Technical verification list: actual symbol/volume constraints, hedging/netting, broker candle alignment, server time/DST, news dataset/provider, allowed partial-volume fallback. Record findings; ask client only where a choice changes behavior.
