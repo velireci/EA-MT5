@@ -1,5 +1,7 @@
 # Current project state
 
+> T002 (branch `claude/t002-h4-map`, based on the T001 head `56c9570`, draft PR against the T001 branch): H4 map implemented as a visual prototype. Compilation UNVERIFIED; Python model tests 65/65 and static checks PASS; MQL5 test script not run; nothing observed in MT5. All H4 rules are PROPOSED, awaiting client validation. See reports/T002-verification.md and tasks/T002-h4-map.md. Awaiting Codex review. T001 section below is unchanged. PR #1 not merged.
+
 Updated: 2026-10-07 (Europe/Tirane)
 
 - Phase: T001 foundation implemented; compiled by Codex; MT5 runtime partially observed by the owner. Awaiting the owner's closure decision.
