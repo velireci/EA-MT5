@@ -7,6 +7,6 @@
 reports/runtime/
 .claude/settings.local.json
 
-# Client material (inputs/, docs/reference/) IS tracked, but it belongs only in
-# the private repository velireci/EA-MT5. Never push this branch to a public
-# remote - velireci/velo was still public on 2026-10-07. See docs/STATE.md.
+# Client material (inputs/, docs/reference/) IS tracked. It belongs only in the
+# private repository velireci/EA-MT5. Never add a public remote to this working
+# copy and never push this branch to one. See docs/STATE.md.

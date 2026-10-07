@@ -36,19 +36,14 @@ Foundation EA and three helper modules written, statically checked and independe
 - Broker/account details: unverified. Client wrote Tauro / XAUUSD.r / USD; confirm the exact symbol name, digits, point, tick size/value, contract size, volume min/step, stops level and netting vs hedging from the EA's OnInit log (check C6).
 - Git baseline: branch `claude/amazing-darwin-icpcjd`.
 
-## Repositories: client material belongs in the private one only
-Two remotes exist for this working copy (verified 2026-10-07 via the GitHub API):
+## Repository
+The project lives in `velireci/EA-MT5` (PRIVATE, verified 2026-10-07 via the GitHub API). It is the only remote of this working copy, and branch `claude/amazing-darwin-icpcjd` tracks it.
 
-| Remote | Repository | Visibility | Holds client material |
-|---|---|---|---|
-| `ea-mt5` | velireci/EA-MT5 | PRIVATE | yes - this is the project home |
-| `origin` | velireci/velo | PUBLIC | no - never push client material here |
+`inputs/client-E27N93/` holds the original client submission including four screenshots taken on the client's own phone; `docs/reference/` holds the full strategy analysis. Both are tracked. The repository must stay private, and no public remote may be added to this working copy.
 
-`inputs/client-E27N93/` (the original submission, including screenshots from the client's own phone) and `docs/reference/` (the full strategy analysis) are tracked and pushed to `ea-mt5` only.
+History note: the project started in `velireci/velo`, which was public. The T001 code commit was pushed there before EA-MT5 existed; no client submission and no photos ever reached it. The owner deleted that repository on 2026-10-07. Its earlier commits (`c8038fd` to `235993a`, including the unrelated `MQL5/Experts/MA_Crossover_EA.mq5` and `jessy`) survive as ancestors of this branch in EA-MT5, so nothing was lost.
 
-Branch `claude/amazing-darwin-icpcjd` tracks `ea-mt5`. Before any push, confirm the target remote.
-
-OPEN ITEM for the owner: the T001 code commit was pushed to the public `velireci/velo` before EA-MT5 existed. It carries no client submission and no photos, but `docs/STRATEGY_SPEC.md`, `docs/OPEN_QUESTIONS.md` and `tasks/` do summarise the client's method and are publicly readable there. Decide whether to delete branch `claude/amazing-darwin-icpcjd` from velo, or make velo private as well.
+Repository setting to confirm: EA-MT5's default branch is currently `claude/amazing-darwin-icpcjd`, because that was the first branch pushed to an empty repository. Decide whether to make `main` the default before opening pull requests.
 
 ## Pre-existing files not part of this project
 `MQL5/Experts/MA_Crossover_EA.mq5` and `jessy` were in the repository before this project. `MA_Crossover_EA.mq5` is an unrelated EA that does place real trades (MA crossover). It was not modified and must not be confused with `src/XauUsdFoundation.mq5`.
