@@ -412,12 +412,13 @@ def history_state(got, requested, left, right):
     return HIST_COMPLETE
 
 
-def history_text(state, got, requested, refreshing):
+def history_text(state, got, requested, stalled):
     if state == HIST_INSUFFICIENT:
-        return 'INSUFFICIENT HISTORY (%d of %d bars)' % (got, requested)
+        return 'INSUFFICIENT HISTORY (%d of %d bars%s)' % (
+            got, requested, ', loading stalled; retrying' if stalled else '')
     if state == HIST_PARTIAL:
         return 'PARTIAL HISTORY (%d of %d, %s)' % (
-            got, requested, 'refreshing' if refreshing else 'no more on server')
+            got, requested, 'loading stalled; retrying' if stalled else 'refreshing')
     return 'HISTORY COMPLETE (%d of %d)' % (got, requested)
 
 
@@ -427,14 +428,284 @@ def history_improved(prev_got, prev_oldest, new_got, new_oldest):
     return prev_oldest != 0 and new_oldest != 0 and new_oldest < prev_oldest
 
 
-def refresh_due(state, noprogress, max_noprogress):
-    return state != HIST_COMPLETE and noprogress < max_noprogress
+def hist_stalled(state, noprogress, max_noprogress):
+    return state != HIST_COMPLETE and noprogress >= max_noprogress
+
+
+U32 = 0xFFFFFFFF
+
+
+def elapsed_ms(now_ms, last_ms):
+    """uint subtraction of H4ElapsedMs (wraps like GetTickCount)."""
+    return (now_ms - last_ms) & U32
 
 
 def map_transition(had_map, build_ok):
     if had_map:
         return ACT_REFRESHED if build_ok else ACT_CLEAR
     return ACT_REBUILT if build_ok else ACT_NONE
+
+
+# ---- map lifecycle step functions: mirror of SH4Life / H4LifeDecide /
+# ---- H4LifeOnCopy in src/include/H4Structure.mqh (same order of statements).
+RETRY_MS = 3000
+SLOW_RETRY_MS = 30000
+MAX_NOPROG = 20
+ATT_NONE, ATT_BUILD, ATT_PROBE = 0, 1, 2
+
+
+class Life(object):
+    def __init__(self):
+        self.have_map = False
+        self.tried_once = False
+        self.last_try = 0
+        self.hist_state = HIST_COMPLETE
+        self.hist_got = 0
+        self.hist_oldest = 0
+        self.noprog = 0
+        self.hist_text = ''
+        self.cleared_reason = ''
+
+
+class LifeOut(object):
+    def __init__(self):
+        self.attempt = ATT_NONE
+        self.do_clear = False
+        self.clear_reason = ''
+        self.rebuilt = False
+        self.log_rebuilt = ''
+        self.log_hist = False
+
+
+def life_clear(st, reason, out):
+    had = st.have_map
+    st.have_map = False
+    if map_transition(had, False) == ACT_CLEAR:
+        out.do_clear = True
+        out.clear_reason = reason
+        st.cleared_reason = reason
+
+
+def life_set_status(st, state, got, lookback, out):
+    t = history_text(state, got, lookback, hist_stalled(state, st.noprog, MAX_NOPROG))
+    st.hist_state = state
+    st.hist_got = got
+    if t != st.hist_text:
+        st.hist_text = t
+        out.log_hist = True
+
+
+def life_decide(st, series_ready, not_ready_reason, new_bar, now_ms, lookback):
+    out = LifeOut()
+    if not series_ready:
+        life_clear(st, not_ready_reason, out)
+        st.noprog = 0
+        if st.hist_text != '':
+            life_set_status(st, st.hist_state, st.hist_got, lookback, out)
+        return out
+    if new_bar or not st.tried_once:
+        if new_bar:
+            st.noprog = 0
+        st.last_try = now_ms
+        st.tried_once = True
+        out.attempt = ATT_BUILD
+        return out
+    interval = RETRY_MS
+    if hist_stalled(st.hist_state, st.noprog, MAX_NOPROG):
+        interval = SLOW_RETRY_MS
+    if elapsed_ms(now_ms, st.last_try) < interval:
+        return out
+    if not st.have_map:
+        st.last_try = now_ms
+        out.attempt = ATT_BUILD
+    elif st.hist_state != HIST_COMPLETE:
+        st.last_try = now_ms
+        out.attempt = ATT_PROBE
+    return out
+
+
+def life_on_copy(st, kind, got, oldest, newest_ok, lookback, left, right):
+    out = LifeOut()
+    if got <= 0:
+        life_clear(st, 'history probe: CopyRates returned no closed H4 bars' if kind == ATT_PROBE
+                   else 'CopyRates returned no closed H4 bars', out)
+        return out
+    if kind == ATT_PROBE:
+        if history_improved(st.hist_got, st.hist_oldest, got, oldest):
+            st.noprog = 0
+            out.attempt = ATT_BUILD
+            return out
+        st.noprog += 1
+        life_set_status(st, st.hist_state, st.hist_got, lookback, out)
+        return out
+    hs = history_state(got, lookback, left, right)
+    if hs != HIST_COMPLETE:
+        if st.hist_got == 0 or history_improved(st.hist_got, st.hist_oldest, got, oldest):
+            st.noprog = 0
+        else:
+            st.noprog += 1
+    else:
+        st.noprog = 0
+    st.hist_oldest = oldest
+    life_set_status(st, hs, got, lookback, out)
+    if hs == HIST_INSUFFICIENT:
+        life_clear(st, st.hist_text, out)
+        return out
+    if not newest_ok:
+        life_clear(st, 'newest copied bar does not match the watcher (history catching up)', out)
+        return out
+    act = map_transition(st.have_map, True)
+    st.have_map = True
+    out.rebuilt = True
+    if act == ACT_REBUILT and st.cleared_reason != '':
+        out.log_rebuilt = st.cleared_reason
+    st.cleared_reason = ''
+    return out
+
+
+# ---- scripted fake data source + thin wrapper = Python twin of Poll /
+# ---- HistoryProbe / RecomputeMap in src/XauUsdH4Map.mq5 (the real CopyRates,
+# ---- drawing and logging are replaced by this fake; the decisions are the
+# ---- step functions above).
+OP_FIRST, OP_LAST, OP_READY, OP_FAIL, OP_MISMATCH, OP_NOP = 0, 1, 2, 3, 4, 9
+BASE_IDX = 1000
+LOOKBACK = 300
+SIM_LEFT = SIM_RIGHT = 2
+
+
+def sim_time(k):
+    return T0 + (BASE_IDX + k) * PERIOD
+
+
+class Sim(object):
+    def __init__(self, first, last, start_ms):
+        self.first, self.last = first, last
+        self.start_ms = start_ms
+        self.ready, self.fail, self.mismatch = True, False, False
+        self.seen_last = -1
+        self.drawn = False
+        self.life = Life()
+        self.t = 0
+        self.ev = []            # (t, kind, text)
+        self.snap = {}          # t -> (have_map, noprog, drawn)
+
+    def add(self, kind, text):
+        self.ev.append((self.t, kind, text))
+
+    def copy(self, kind_char):
+        self.add(kind_char, '')
+        if self.fail:
+            return -1, 0, False
+        got = min(LOOKBACK, self.last - self.first + 1)
+        return got, sim_time(self.last - got + 1), not self.mismatch
+
+    def apply(self, o):
+        if o.log_hist:
+            self.add('HIST', self.life.hist_text)
+        if o.do_clear:
+            self.add('CLEAR', o.clear_reason)
+            self.drawn = False
+
+    def build(self):
+        got, oldest, ok = self.copy('B')
+        o = life_on_copy(self.life, ATT_BUILD, got, oldest, ok, LOOKBACK, SIM_LEFT, SIM_RIGHT)
+        self.apply(o)
+        if not o.rebuilt:
+            return False
+        if o.log_rebuilt != '':
+            self.add('REBUILT', o.log_rebuilt)
+        self.add('MAP', '%d' % got)
+        self.drawn = True
+        return True
+
+    def probe(self):
+        got, oldest, ok = self.copy('P')
+        o = life_on_copy(self.life, ATT_PROBE, got, oldest, True, LOOKBACK, SIM_LEFT, SIM_RIGHT)
+        self.apply(o)
+        if o.attempt == ATT_BUILD:
+            return self.build()
+        return False
+
+    def poll(self, t):
+        self.t = t
+        new_bar = False
+        if self.ready:
+            new_bar = self.seen_last >= 0 and self.last > self.seen_last
+            self.seen_last = self.last
+        now = (self.start_ms + t * 1000) & U32
+        o = life_decide(self.life, self.ready, 'H4 series not ready: SIM', new_bar, now, LOOKBACK)
+        self.apply(o)
+        if self.ready:
+            if o.attempt == ATT_PROBE:
+                self.probe()
+            elif o.attempt == ATT_BUILD:
+                self.build()
+        self.snap[t] = (self.life.have_map, self.life.noprog, self.drawn)
+
+    def act(self, op, val):
+        if op == OP_FIRST:
+            self.first = val
+        elif op == OP_LAST:
+            self.last = val
+        elif op == OP_READY:
+            self.ready = val != 0
+        elif op == OP_FAIL:
+            self.fail = val != 0
+        elif op == OP_MISMATCH:
+            self.mismatch = val != 0
+
+    def transcript(self):
+        parts = ['t=%d %s' % (t, k if tx == '' else '%s:%s' % (k, tx)) for (t, k, tx) in self.ev]
+        parts.append('END map=%d drawn=%d noprog=%d text=%s' % (
+            1 if self.life.have_map else 0, 1 if self.drawn else 0, self.life.noprog, self.life.hist_text))
+        return ' | '.join(parts)
+
+
+def run_scenario(scn):
+    name, start_ms, first, last, duration, acts = scn
+    sim = Sim(first, last, start_ms)
+    for t in range(0, duration + 1):
+        for (at, op, val) in acts:
+            if at == t:
+                sim.act(op, val)
+        sim.poll(t)
+    return sim
+
+
+def times(sim, kind):
+    return [t for (t, k, _) in sim.ev if k == kind]
+
+
+def texts(sim, kind):
+    return [(t, tx) for (t, k, tx) in sim.ev if k == kind]
+
+
+def build_scenarios():
+    s = []
+    P = (880, 999)          # 120 closed bars (PARTIAL for lookback 300)
+    FULL = (700, 999)       # 300 closed bars (COMPLETE)
+    nop = (0, OP_NOP, 0)
+    s.append(('a_complete_after_20th', 100000, P[0], P[1], 200, [nop, (100, OP_FIRST, 700)]))
+    s.append(('a2_stalled_then_partial_progress', 100000, P[0], P[1], 130, [nop, (70, OP_FIRST, 780)]))
+    s.append(('b_complete_before_20th', 100000, P[0], P[1], 100, [nop, (25, OP_FIRST, 700)]))
+    s.append(('c_probe_failure_recovers', 100000, P[0], P[1], 120, [(16, OP_FAIL, 1), (40, OP_FAIL, 0)]))
+    s.append(('c2_probe_failure_long', 100000, P[0], P[1], 130, [(16, OP_FAIL, 1), (100, OP_FAIL, 0)]))
+    s.append(('c3_build_failure_complete', 100000, FULL[0], FULL[1], 100,
+              [(50, OP_FAIL, 1), (50, OP_LAST, 1000), (70, OP_FAIL, 0)]))
+    s.append(('d_series_not_ready', 100000, P[0], P[1], 60, [(16, OP_READY, 0), (30, OP_READY, 1)]))
+    s.append(('e1_insufficient_then_sufficient', 100000, 994, 999, 40, [nop, (10, OP_FIRST, 700)]))
+    s.append(('e2_map_then_insufficient', 100000, P[0], P[1], 100,
+              [(50, OP_FIRST, 995), (50, OP_LAST, 1000), (79, OP_FIRST, 700)]))
+    s.append(('e3_insufficient_stalled', 100000, 994, 999, 130, [nop, (100, OP_FIRST, 700)]))
+    s.append(('f_newest_mismatch', 100000, FULL[0], FULL[1], 60,
+              [(30, OP_LAST, 1000), (30, OP_MISMATCH, 1), (45, OP_MISMATCH, 0)]))
+    s.append(('g_complete_no_rechecks', 100000, FULL[0], FULL[1], 600, [nop]))
+    s.append(('h_new_bar_resets_stall', 100000, P[0], P[1], 140, [(70, OP_LAST, 1000)]))
+    ref_acts = [nop, (100, OP_FIRST, 700)]
+    s.append(('i_ref_unwrapped', 100000, P[0], P[1], 130, ref_acts))
+    s.append(('i_wrap_early', 4294959296, P[0], P[1], 130, ref_acts))     # wraps at t=8
+    s.append(('i_wrap_while_slow', 4294892296, P[0], P[1], 130, ref_acts))  # wraps at t=75
+    return s
 
 
 def setup_active(direction, range_state, erl_state, selectable):
@@ -723,15 +994,21 @@ def test_ids_and_selection_ties():
 
 
 def test_pure_decisions():
-    print('--- history state, refresh, map transitions, panel wording')
+    print('--- history state, stall, tick arithmetic, map transitions, panel wording')
     check(history_state(6, 300, 2, 2) == HIST_INSUFFICIENT, 'history 6 of 300 (min 11) -> INSUFFICIENT')
     check(history_state(11, 300, 2, 2) == HIST_PARTIAL, 'history 11 of 300 -> PARTIAL')
     check(history_state(299, 300, 2, 2) == HIST_PARTIAL, 'history 299 of 300 -> PARTIAL')
     check(history_state(300, 300, 2, 2) == HIST_COMPLETE, 'history 300 of 300 -> COMPLETE')
-    check(history_text(HIST_INSUFFICIENT, 6, 300, True) == 'INSUFFICIENT HISTORY (6 of 300 bars)', 'text INSUFFICIENT')
-    check(history_text(HIST_PARTIAL, 120, 300, True) == 'PARTIAL HISTORY (120 of 300, refreshing)', 'text PARTIAL refreshing')
-    check(history_text(HIST_PARTIAL, 120, 300, False) == 'PARTIAL HISTORY (120 of 300, no more on server)', 'text PARTIAL exhausted')
+    check(history_text(HIST_INSUFFICIENT, 6, 300, False) == 'INSUFFICIENT HISTORY (6 of 300 bars)', 'text INSUFFICIENT')
+    check(history_text(HIST_INSUFFICIENT, 6, 300, True) == 'INSUFFICIENT HISTORY (6 of 300 bars, loading stalled; retrying)',
+          'text INSUFFICIENT stalled')
+    check(history_text(HIST_PARTIAL, 120, 300, False) == 'PARTIAL HISTORY (120 of 300, refreshing)', 'text PARTIAL refreshing')
+    check(history_text(HIST_PARTIAL, 120, 300, True) == 'PARTIAL HISTORY (120 of 300, loading stalled; retrying)',
+          'text PARTIAL stalled')
     check(history_text(HIST_COMPLETE, 300, 300, False) == 'HISTORY COMPLETE (300 of 300)', 'text COMPLETE')
+    check(all('no more on server' not in history_text(st, 100, 300, sl)
+              for st in (HIST_INSUFFICIENT, HIST_PARTIAL, HIST_COMPLETE) for sl in (False, True)),
+          'no history text claims "no more on server"')
     t1 = T0
     t0 = T0 - PERIOD
     check(history_improved(100, t1, 101, t1), 'more bars -> improved')
@@ -739,10 +1016,13 @@ def test_pure_decisions():
     check(not history_improved(100, t1, 100, t1), 'same count and first bar -> not improved')
     check(not history_improved(100, t1, 99, t1), 'fewer bars -> not improved')
     check(not history_improved(0, 0, 0, 0), 'nothing yet -> not improved')
-    check(refresh_due(HIST_PARTIAL, 0, 20), 'partial, no failures yet -> refresh due')
-    check(refresh_due(HIST_INSUFFICIENT, 19, 20), 'insufficient, 19 idle checks -> still due')
-    check(not refresh_due(HIST_PARTIAL, 20, 20), 'cap of idle checks reached -> stop')
-    check(not refresh_due(HIST_COMPLETE, 0, 20), 'complete -> never refresh')
+    check(not hist_stalled(HIST_PARTIAL, 19, 20), 'partial, 19 idle checks -> not stalled yet')
+    check(hist_stalled(HIST_PARTIAL, 20, 20), 'partial, 20 idle checks -> stalled (slower cadence, NOT stopped)')
+    check(hist_stalled(HIST_INSUFFICIENT, 25, 20), 'insufficient, 25 idle checks -> stalled')
+    check(not hist_stalled(HIST_COMPLETE, 99, 20), 'complete -> never stalled')
+    check(elapsed_ms(5000, 2000) == 3000, 'elapsed ms without wrap')
+    check(elapsed_ms(5, U32 - 5) == 11, 'elapsed ms across the GetTickCount wrap (unsigned subtraction)')
+    check(elapsed_ms(0x200, 0xFFFFFF00) == 0x300, 'elapsed ms across the wrap, second sample')
     check(map_transition(True, False) == ACT_CLEAR, 'map + failed build -> CLEAR')
     check(map_transition(False, True) == ACT_REBUILT, 'no map + ok build -> REBUILT')
     check(map_transition(True, True) == ACT_REFRESHED, 'map + ok build -> REFRESHED')
@@ -764,6 +1044,123 @@ def test_pure_decisions():
     check(a.res.erl_state == 'TAKEN' and not act, 'model case with ERL TAKEN is never an active setup')
 
 
+def test_lifecycle_scenarios():
+    print('--- map lifecycle: scripted fake data source over simulated time (model of the step functions)')
+    S = dict((scn[0], run_scenario(scn)) for scn in build_scenarios())
+    check(len(S) == len(build_scenarios()) and all(len(v.transcript()) < 1800 for v in S.values()),
+          'every scenario has a unique name and a transcript short enough for an MQL5 string literal')
+    check(all('no more on server' not in v.transcript() for v in S.values()),
+          'no scenario ever claims "no more on server"')
+
+    # (a) partial history completing AFTER the 20th no-progress check
+    a = S['a_complete_after_20th']
+    check(times(a, 'P') == list(range(3, 61, 3)) + [90, 120],
+          '(a) 20 probes at 3 s, then slower cadence 30 s (probes at 90 and 120 only)')
+    check(texts(a, 'HIST') == [(0, 'PARTIAL HISTORY (120 of 300, refreshing)'),
+                               (60, 'PARTIAL HISTORY (120 of 300, loading stalled; retrying)'),
+                               (120, 'HISTORY COMPLETE (300 of 300)')],
+          '(a) status: refreshing -> "loading stalled; retrying" at the 20th idle check -> cleared (COMPLETE)')
+    check(a.snap[60][1] == 20 and a.snap[59][1] == 19, '(a) stall begins exactly at the 20th idle check')
+    check(texts(a, 'MAP') == [(0, '120'), (120, '300')] and times(a, 'B') == [0, 120],
+          '(a) map rebuilt from the complete history at the poll that sees it (t=120)')
+    check(a.last == 999 and a.seen_last == 999, '(a) no new H4 bar was involved')
+    check(max(t for (t, k, _) in a.ev if k in ('P', 'B')) == 120 and a.snap[200] == (True, 0, True),
+          '(a) after completion no further re-checks (t=121..200)')
+    check(not times(a, 'CLEAR'), '(a) the map was never cleared while stalled')
+
+    # (a2) stalled, then progress that is still partial -> back to the normal cadence
+    a2 = S['a2_stalled_then_partial_progress']
+    check(texts(a2, 'HIST')[-1] == (90, 'PARTIAL HISTORY (220 of 300, refreshing)') and 93 in times(a2, 'P')
+          and 96 in times(a2, 'P'), '(a2) partial progress while stalled -> rebuilt, "refreshing", 3 s cadence again')
+
+    # (b) history arrives before the 20th check
+    b = S['b_complete_before_20th']
+    check(times(b, 'P') == list(range(3, 28, 3)) and texts(b, 'MAP') == [(0, '120'), (27, '300')]
+          and not any('stalled' in tx for (_, tx) in texts(b, 'HIST')),
+          '(b) history before the 20th check: rebuilt at the next probe, never stalled, no later re-checks')
+
+    # (c) probe failure with an existing map
+    c = S['c_probe_failure_recovers']
+    check(texts(c, 'CLEAR') == [(18, 'history probe: CopyRates returned no closed H4 bars')],
+          '(c) failed probe copy with a map -> map cleared once, with its reason')
+    check(c.snap[15] == (True, 5, True) and c.snap[18] == (False, 5, False) and c.snap[39] == (False, 5, False),
+          '(c) map off, drawings removed, dynamic state off, stall counter NOT incremented (5 stays 5)')
+    check(times(c, 'B')[1:] == list(range(21, 43, 3)) and texts(c, 'REBUILT')
+          == [(42, 'history probe: CopyRates returned no closed H4 bars')] and texts(c, 'MAP')[-1] == (42, '120'),
+          '(c) normal no-map retry picks it up once the copy works; rebuild logged with the clear reason')
+    check(c.snap[41][2] is False and c.snap[42] == (True, 6, True),
+          '(c) recovery build with identical data counts as ONE idle copy (5 -> 6), not as exhaustion')
+
+    c2 = S['c2_probe_failure_long']
+    bs = times(c2, 'B')
+    check(all(c2.snap[t][1] == 5 for t in range(18, 102)) and not any('stalled' in tx for (_, tx) in texts(c2, 'HIST'))
+          and all(y - x == 3 for x, y in zip(bs[1:], bs[2:])) and len(texts(c2, 'CLEAR')) == 1,
+          '(c2) 80 s of failed copies: counter stays 5, no stall status, retries stay at 3 s, one clear logged')
+    check(texts(c2, 'REBUILT') != [] and c2.snap[102][0] is True, '(c2) recovery after the long failure')
+
+    c3 = S['c3_build_failure_complete']
+    check(texts(c3, 'CLEAR') == [(50, 'CopyRates returned no closed H4 bars')] and not times(c3, 'P')
+          and times(c3, 'B') == [0] + list(range(50, 72, 3)) and texts(c3, 'MAP')[-1] == (71, '300')
+          and all(v[1] == 0 for v in c3.snap.values()),
+          '(c3) failed rebuild on a new bar with complete history: cleared, retried every 3 s, rebuilt, counter 0')
+
+    # (d) series not ready -> clear -> ready -> rebuild
+    d = S['d_series_not_ready']
+    check([t for t in times(d, 'P') if t < 16] == [3, 6, 9, 12, 15] and texts(d, 'CLEAR') == [(16, 'H4 series not ready: SIM')]
+          and d.snap[16] == (False, 0, False), '(d) not ready: map cleared at once, counter reset to 0')
+    check(not [e for e in d.ev if 16 < e[0] < 30] and texts(d, 'REBUILT') == [(30, 'H4 series not ready: SIM')]
+          and d.snap[30] == (True, 1, True), '(d) no copy while not ready; rebuilt when ready again (rebuild logged)')
+
+    # (e) insufficient history
+    e1 = S['e1_insufficient_then_sufficient']
+    check(texts(e1, 'HIST')[0] == (0, 'INSUFFICIENT HISTORY (6 of 300 bars)') and not times(e1, 'CLEAR')
+          and times(e1, 'B') == [0, 3, 6, 9, 12] and texts(e1, 'MAP') == [(12, '300')],
+          '(e1) insufficient at start (nothing to clear), retried every 3 s, built when sufficient')
+    e2 = S['e2_map_then_insufficient']
+    check(texts(e2, 'CLEAR') == [(50, 'INSUFFICIENT HISTORY (6 of 300 bars)')] and e2.snap[50] == (False, 1, False)
+          and texts(e2, 'REBUILT') == [(80, 'INSUFFICIENT HISTORY (6 of 300 bars)')]
+          and texts(e2, 'MAP')[-1] == (80, '300'),
+          '(e2) existing map + insufficient history -> cleared -> becomes sufficient -> rebuilt')
+    e3 = S['e3_insufficient_stalled']
+    check(texts(e3, 'HIST')[1] == (60, 'INSUFFICIENT HISTORY (6 of 300 bars, loading stalled; retrying)')
+          and times(e3, 'B') == list(range(0, 61, 3)) + [90, 120] and texts(e3, 'MAP') == [(120, '300')],
+          '(e3) insufficient + stalled: 30 s cadence (no stop), built at the first check after history arrives')
+
+    # (f) newest-bar mismatch
+    f = S['f_newest_mismatch']
+    check(texts(f, 'CLEAR') == [(30, 'newest copied bar does not match the watcher (history catching up)')]
+          and times(f, 'B') == [0, 30, 33, 36, 39, 42, 45] and texts(f, 'REBUILT')[0][0] == 45
+          and not times(f, 'P'), '(f) newest-bar mismatch -> cleared -> retried every 3 s -> rebuilt')
+
+    # (g) complete history: no re-checks
+    g = S['g_complete_no_rechecks']
+    check([(t, k) for (t, k, _) in g.ev if k in ('P', 'B')] == [(0, 'B')] and g.snap[600] == (True, 0, True),
+          '(g) complete history: exactly one copy in 600 s, no re-checks')
+
+    # (h) new H4 bar resets stall state
+    h = S['h_new_bar_resets_stall']
+    check(h.snap[69][1] == 20 and h.snap[70][1] == 0 and not [t for t in times(h, 'P') if 60 < t < 73]
+          and times(h, 'B') == [0, 70] and 73 in times(h, 'P') and texts(h, 'HIST')[2] ==
+          (70, 'PARTIAL HISTORY (121 of 300, refreshing)'),
+          '(h) a new H4 bar rebuilds at once, resets the stall counter and returns to the 3 s cadence')
+    check(texts(h, 'HIST')[3] == (130, 'PARTIAL HISTORY (121 of 300, loading stalled; retrying)'),
+          '(h) stalling is possible again after the reset (20 new idle checks)')
+
+    # (i) tick counter wrap-around
+    ref = S['i_ref_unwrapped'].transcript()
+    check('MAP:300' in ref and 'stalled' in ref, '(i) reference run is non-trivial')
+    check(S['i_wrap_early'].transcript() == ref, '(i) GetTickCount wrap at t=8 (fast cadence): identical transcript')
+    check(S['i_wrap_while_slow'].transcript() == ref, '(i) wrap at t=75 (inside the 30 s slow interval): identical transcript')
+
+    # a failed copy never moves the stall counter, in any scenario
+    ok = True
+    for v in S.values():
+        for (t, k, tx) in v.ev:
+            if k == 'CLEAR' and 'CopyRates' in tx:
+                ok = ok and v.snap[t][1] == v.snap[t - 1][1]
+    check(ok, 'in every scenario a CopyRates failure leaves the stall counter unchanged')
+
+
 def emit_mql():
     out = ['// BEGIN GENERATED CASE DATA (tests/t002_reference_test.py --emit-mql)']
     cases = build_cases()
@@ -782,6 +1179,29 @@ def emit_mql():
         out.append('         expected = "%s";' % summary(a, price))
         out.append('         T2FillBars(d, %d, bars);' % len(bars))
         out.append('         n = %d;' % len(bars))
+        out.append('         break;')
+        out.append('        }')
+    out.append('     }')
+    out.append('  }')
+    scns = build_scenarios()
+    out.append('#define T2_SCN_COUNT %d' % len(scns))
+    out.append('void T2LoadScenario(const int id, string &name, ulong &start_ms, int &first, int &last, int &duration, int &acts[], string &expected)')
+    out.append('  {')
+    out.append('   switch(id)')
+    out.append('     {')
+    for i, scn in enumerate(scns):
+        nm, start_ms, first, last, duration, acts = scn
+        tr = run_scenario(scn).transcript()
+        assert len(tr) < 1800 and '"' not in tr and '\\' not in tr
+        flat = ','.join('%d,%d,%d' % a for a in acts)
+        out.append('      case %d:' % i)
+        out.append('        {')
+        out.append('         int a[] = {%s};' % flat)
+        out.append('         name = "%s"; start_ms = %d; first = %d; last = %d; duration = %d;' % (nm, start_ms, first, last, duration))
+        out.append('         expected = "%s";' % tr)
+        out.append('         ArrayResize(acts, ArraySize(a));')
+        out.append('         for(int k = 0; k < ArraySize(a); k++)')
+        out.append('            acts[k] = a[k];')
         out.append('         break;')
         out.append('        }')
     out.append('     }')
@@ -807,6 +1227,7 @@ def main():
     test_no_lookahead()
     test_ids_and_selection_ties()
     test_pure_decisions()
+    test_lifecycle_scenarios()
     print('')
     print('%d passed, %d failed' % (len(PASSES), len(FAILS)))
     if FAILS:

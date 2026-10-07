@@ -184,6 +184,36 @@ tr -d '\r' < "$NEG/crlf.txt" > "$NEG/crlf.n"
 cmp -s "$NEG/crlf.n" "$NEG/emit.txt" && echo "  PASS 13g: CRLF copy of the block equals --emit-mql after line-ending normalisation" || { echo "  FAIL 13g: CRLF copy differs after normalisation"; FAIL=1; }
 rm -rf "$NEG"
 
+echo "=== CHECK 14: EA is a thin wrapper over the shared lifecycle step; no stale 'stop' logic ==="
+bad14=0
+EAS=$(strip_comments $EA)
+# 14a: the EA calls the same pure step functions the tests drive
+for fn in H4LifeInit H4LifeDecide H4LifeOnCopy; do
+  echo "$EAS" | grep -q "$fn(" && echo "  PASS EA calls $fn" || { echo "  FAIL EA does not call $fn"; bad14=1; FAIL=1; }
+done
+# 14b: the LifeOnCopy kinds are both wired (probe and build)
+for k in H4_ATT_PROBE H4_ATT_BUILD; do
+  echo "$EAS" | grep -q "$k" && echo "  PASS EA uses $k" || { echo "  FAIL EA never uses $k"; bad14=1; FAIL=1; }
+done
+# 14c: removed constructs and the unsupported claim must not come back in production code
+for f in $EA_CODE; do
+  out=$(strip_comments "$f" | grep -nE 'no more on server|H4RefreshDue|g_hist_exhausted|g_hist_noprog|HIST_MAX_NOPROG[^_]|[^_]HIST_MAX_NOPROG')
+  if [ -n "$out" ]; then
+    # the shared constant H4_HIST_MAX_NOPROG is allowed; anything else is stale
+    out2=$(echo "$out" | grep -vE 'H4_HIST_MAX_NOPROG')
+    [ -n "$out2" ] && { echo "  FAIL $f: stale stop/exhausted logic or claim: $out2"; bad14=1; FAIL=1; }
+  fi
+done
+# 14d: no mutable lifecycle flag is kept outside g_life in the EA
+out=$(echo "$EAS" | grep -nE '\bg_have_map\b|\bg_tried_once\b|\bg_last_try\b|\bg_hist_(state|got|oldest|text)\b')
+[ -n "$out" ] && { echo "  FAIL EA keeps lifecycle state outside g_life: $out"; bad14=1; FAIL=1; }
+# 14e: the cadence is unsigned arithmetic via H4ElapsedMs (no signed GetTickCount compare in the step)
+strip_comments src/include/H4Structure.mqh | grep -q 'now_ms - last_ms' && echo "  PASS step uses unsigned now_ms - last_ms" || { echo "  FAIL H4ElapsedMs unsigned subtraction missing"; bad14=1; FAIL=1; }
+[ $bad14 -eq 0 ] && echo "  PASS: EA wiring and stale-logic checks"
+# 14f: negative control: the stale-logic grep must detect the old claim and old call
+printf 'string t = "no more on server"; bool b = H4RefreshDue(1, 2, 3);\n' > "$TMPD/stale.mqh"
+strip_comments "$TMPD/stale.mqh" | grep -qE 'no more on server|H4RefreshDue' && echo "  PASS 14f: stale claim / H4RefreshDue detected" || { echo "  FAIL 14f: stale logic not detected"; FAIL=1; }
+
 echo "=== RESULT ==="
 [ $FAIL -eq 0 ] && echo "ALL STATIC CHECKS PASSED (not a compilation, not a runtime test)" || echo "STATIC CHECKS FAILED"
 exit $FAIL

@@ -495,9 +495,11 @@ string H4Summary(const SH4Swing &swings[], const int ns, const SH4Fvg &fvgs[], c
   }
 
 //+------------------------------------------------------------------+
-//| 9. pure decisions used by the EA (history state, refresh, map    |
-//|    transitions, panel wording). No chart or series access, so    |
-//|    they are mirrored 1:1 in tests/t002_reference_test.py.        |
+//| 9. pure decisions used by the EA (history state, map lifecycle,  |
+//|    panel wording). No chart or series access, no clock: time and |
+//|    CopyRates results come in as arguments, so every decision is  |
+//|    mirrored 1:1 in tests/t002_reference_test.py and driven there |
+//|    by scripted scenarios.                                        |
 //+------------------------------------------------------------------+
 #define H4_HIST_INSUFFICIENT 0   // too few bars to find swings at all
 #define H4_HIST_PARTIAL      1   // enough to analyse, fewer than requested
@@ -508,6 +510,14 @@ string H4Summary(const SH4Swing &swings[], const int ns, const SH4Fvg &fvgs[], c
 #define H4_ACT_REBUILT   2   // no map existed and a build succeeded
 #define H4_ACT_REFRESHED 3   // a map existed and a build succeeded
 
+#define H4_RETRY_MS        3000    // normal cadence of history re-checks / failed-build retries
+#define H4_SLOW_RETRY_MS   30000   // cadence once loading has stalled (never stops)
+#define H4_HIST_MAX_NOPROG 20      // successful copies without new history before "stalled"
+
+#define H4_ATT_NONE   0   // wrapper does not copy
+#define H4_ATT_BUILD  1   // wrapper copies and calls H4LifeOnCopy(kind = H4_ATT_BUILD)
+#define H4_ATT_PROBE  2   // wrapper copies and calls H4LifeOnCopy(kind = H4_ATT_PROBE)
+
 int H4HistoryState(const int got, const int requested, const int left, const int right)
   {
    if(got < 2 * (left + right) + 3)
@@ -517,13 +527,14 @@ int H4HistoryState(const int got, const int requested, const int left, const int
    return(H4_HIST_COMPLETE);
   }
 
-string H4HistoryText(const int state, const int got, const int requested, const bool refreshing)
+string H4HistoryText(const int state, const int got, const int requested, const bool stalled)
   {
    if(state == H4_HIST_INSUFFICIENT)
-      return(StringFormat("INSUFFICIENT HISTORY (%d of %d bars)", got, requested));
+      return(StringFormat("INSUFFICIENT HISTORY (%d of %d bars%s)", got, requested,
+                          stalled ? ", loading stalled; retrying" : ""));
    if(state == H4_HIST_PARTIAL)
       return(StringFormat("PARTIAL HISTORY (%d of %d, %s)", got, requested,
-                          refreshing ? "refreshing" : "no more on server"));
+                          stalled ? "loading stalled; retrying" : "refreshing"));
    return(StringFormat("HISTORY COMPLETE (%d of %d)", got, requested));
   }
 
@@ -536,11 +547,19 @@ bool H4HistoryImproved(const int prev_got, const datetime prev_oldest,
    return(prev_oldest != 0 && new_oldest != 0 && new_oldest < prev_oldest);
   }
 
-//--- keep re-checking only while history is incomplete and attempts still
-//--- bring progress (noprogress = consecutive checks without improvement)
-bool H4RefreshDue(const int state, const int noprogress, const int max_noprogress)
+//--- loading is "stalled" (slower cadence, NOT stopped) when history is
+//--- incomplete and max_noprogress successful copies brought nothing new.
+//--- It is not evidence that the server has no more history.
+bool H4HistStalled(const int state, const int noprogress, const int max_noprogress)
   {
-   return(state != H4_HIST_COMPLETE && noprogress < max_noprogress);
+   return(state != H4_HIST_COMPLETE && noprogress >= max_noprogress);
+  }
+
+//--- milliseconds since last; unsigned subtraction is correct across the
+//--- GetTickCount() wrap-around (about every 49.7 days)
+uint H4ElapsedMs(const uint now_ms, const uint last_ms)
+  {
+   return(now_ms - last_ms);
   }
 
 int H4MapTransition(const bool had_map, const bool build_ok)
@@ -548,6 +567,185 @@ int H4MapTransition(const bool had_map, const bool build_ok)
    if(had_map)
       return(build_ok ? H4_ACT_REFRESHED : H4_ACT_CLEAR);
    return(build_ok ? H4_ACT_REBUILT : H4_ACT_NONE);
+  }
+
+//--- map lifecycle state (owned by the EA, mutated only by the functions below)
+struct SH4Life
+  {
+   bool              have_map;
+   bool              tried_once;
+   uint              last_try;       // GetTickCount of the last attempt
+   int               hist_state;     // H4_HIST_* of the last build
+   int               hist_got;       // closed bars of the last build
+   datetime          hist_oldest;    // oldest bar of the last build
+   int               noprog;         // successful copies without new history in a row
+   string            hist_text;
+   string            cleared_reason; // non-empty after a clear, until rebuilt
+  };
+
+//--- what the wrapper must do after a step
+struct SH4LifeOut
+  {
+   int               attempt;        // H4_ATT_*: which copy to attempt
+   bool              do_clear;       // a map existed: remove drawings, dynamic state off, log clear_reason
+   string            clear_reason;
+   bool              rebuilt;        // copy accepted: analyse + draw the map from the last build copy
+   string            log_rebuilt;    // non-empty: log "rebuilt (was cleared: ...)"
+   bool              log_hist;       // hist_text changed: log it
+  };
+
+void H4LifeInit(SH4Life &st)
+  {
+   st.have_map = false;
+   st.tried_once = false;
+   st.last_try = 0;
+   st.hist_state = H4_HIST_COMPLETE;
+   st.hist_got = 0;
+   st.hist_oldest = 0;
+   st.noprog = 0;
+   st.hist_text = "";
+   st.cleared_reason = "";
+  }
+
+void H4LifeOutReset(SH4LifeOut &out)
+  {
+   out.attempt = H4_ATT_NONE;
+   out.do_clear = false;
+   out.clear_reason = "";
+   out.rebuilt = false;
+   out.log_rebuilt = "";
+   out.log_hist = false;
+  }
+
+void H4LifeClear(SH4Life &st, const string reason, SH4LifeOut &out)
+  {
+   bool had = st.have_map;
+   st.have_map = false;
+   if(H4MapTransition(had, false) == H4_ACT_CLEAR)
+     {
+      out.do_clear = true;
+      out.clear_reason = reason;
+      st.cleared_reason = reason;
+     }
+  }
+
+void H4LifeSetStatus(SH4Life &st, const int state, const int got, const int lookback, SH4LifeOut &out)
+  {
+   string t = H4HistoryText(state, got, lookback, H4HistStalled(state, st.noprog, H4_HIST_MAX_NOPROG));
+   st.hist_state = state;
+   st.hist_got = got;
+   if(t != st.hist_text)
+     {
+      st.hist_text = t;
+      out.log_hist = true;
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| H4LifeDecide: step 1 of a poll (before any copy).                |
+//| Decides: clear (series not ready), which copy to attempt, or     |
+//| nothing. A complete-history map is never re-checked.             |
+//+------------------------------------------------------------------+
+void H4LifeDecide(SH4Life &st, const bool series_ready, const string not_ready_reason,
+                  const bool new_bar, const uint now_ms, const int lookback, SH4LifeOut &out)
+  {
+   H4LifeOutReset(out);
+   if(!series_ready)
+     {
+      H4LifeClear(st, not_ready_reason, out);
+      st.noprog = 0;
+      if(st.hist_text != "")
+         H4LifeSetStatus(st, st.hist_state, st.hist_got, lookback, out);
+      return;
+     }
+   if(new_bar || !st.tried_once)
+     {
+      //--- a new closed bar (or the first poll) starts a fresh history assessment
+      if(new_bar)
+         st.noprog = 0;
+      st.last_try = now_ms;
+      st.tried_once = true;
+      out.attempt = H4_ATT_BUILD;
+      return;
+     }
+   uint interval = H4_RETRY_MS;
+   if(H4HistStalled(st.hist_state, st.noprog, H4_HIST_MAX_NOPROG))
+      interval = H4_SLOW_RETRY_MS;
+   if(H4ElapsedMs(now_ms, st.last_try) < interval)
+      return;
+   if(!st.have_map)
+     {
+      //--- no map (history catching up / failed copy / series was not ready): retry
+      st.last_try = now_ms;
+      out.attempt = H4_ATT_BUILD;
+     }
+   else
+      if(st.hist_state != H4_HIST_COMPLETE)
+        {
+         //--- map built on partial history: probe for more
+         st.last_try = now_ms;
+         out.attempt = H4_ATT_PROBE;
+        }
+  }
+
+//+------------------------------------------------------------------+
+//| H4LifeOnCopy: step 2, after the wrapper attempted the copy named |
+//| by out.attempt. got <= 0 is a FAILED copy: it clears the map and |
+//| is never counted as "no progress". A probe that finds more       |
+//| history asks for a BUILD (out.attempt = H4_ATT_BUILD), the       |
+//| wrapper then copies again and calls this with kind = BUILD.      |
+//+------------------------------------------------------------------+
+void H4LifeOnCopy(SH4Life &st, const int kind, const int got, const datetime oldest,
+                  const bool newest_ok, const int lookback, const int left, const int right,
+                  SH4LifeOut &out)
+  {
+   H4LifeOutReset(out);
+   if(got <= 0)
+     {
+      H4LifeClear(st, kind == H4_ATT_PROBE ? "history probe: CopyRates returned no closed H4 bars"
+                                           : "CopyRates returned no closed H4 bars", out);
+      return;
+     }
+   if(kind == H4_ATT_PROBE)
+     {
+      if(H4HistoryImproved(st.hist_got, st.hist_oldest, got, oldest))
+        {
+         st.noprog = 0;
+         out.attempt = H4_ATT_BUILD;
+         return;
+        }
+      st.noprog++;
+      H4LifeSetStatus(st, st.hist_state, st.hist_got, lookback, out);
+      return;
+     }
+   int hs = H4HistoryState(got, lookback, left, right);
+   if(hs != H4_HIST_COMPLETE)
+     {
+      if(st.hist_got == 0 || H4HistoryImproved(st.hist_got, st.hist_oldest, got, oldest))
+         st.noprog = 0;
+      else
+         st.noprog++;
+     }
+   else
+      st.noprog = 0;
+   st.hist_oldest = oldest;
+   H4LifeSetStatus(st, hs, got, lookback, out);
+   if(hs == H4_HIST_INSUFFICIENT)
+     {
+      H4LifeClear(st, st.hist_text, out);
+      return;
+     }
+   if(!newest_ok)
+     {
+      H4LifeClear(st, "newest copied bar does not match the watcher (history catching up)", out);
+      return;
+     }
+   int act = H4MapTransition(st.have_map, true);
+   st.have_map = true;
+   out.rebuilt = true;
+   if(act == H4_ACT_REBUILT && st.cleared_reason != "")
+      out.log_rebuilt = st.cleared_reason;
+   st.cleared_reason = "";
   }
 
 //--- an IRL -> ERL setup is active only for a trending direction, a valid

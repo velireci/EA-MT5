@@ -350,6 +350,173 @@ void T2LoadCase(const int id, MqlRates &bars[], int &n, int &left, int &right, d
         }
      }
   }
+#define T2_SCN_COUNT 16
+void T2LoadScenario(const int id, string &name, ulong &start_ms, int &first, int &last, int &duration, int &acts[], string &expected)
+  {
+   switch(id)
+     {
+      case 0:
+        {
+         int a[] = {0,9,0,100,0,700};
+         name = "a_complete_after_20th"; start_ms = 100000; first = 880; last = 999; duration = 200;
+         expected = "t=0 B | t=0 HIST:PARTIAL HISTORY (120 of 300, refreshing) | t=0 MAP:120 | t=3 P | t=6 P | t=9 P | t=12 P | t=15 P | t=18 P | t=21 P | t=24 P | t=27 P | t=30 P | t=33 P | t=36 P | t=39 P | t=42 P | t=45 P | t=48 P | t=51 P | t=54 P | t=57 P | t=60 P | t=60 HIST:PARTIAL HISTORY (120 of 300, loading stalled; retrying) | t=90 P | t=120 P | t=120 B | t=120 HIST:HISTORY COMPLETE (300 of 300) | t=120 MAP:300 | END map=1 drawn=1 noprog=0 text=HISTORY COMPLETE (300 of 300)";
+         ArrayResize(acts, ArraySize(a));
+         for(int k = 0; k < ArraySize(a); k++)
+            acts[k] = a[k];
+         break;
+        }
+      case 1:
+        {
+         int a[] = {0,9,0,70,0,780};
+         name = "a2_stalled_then_partial_progress"; start_ms = 100000; first = 880; last = 999; duration = 130;
+         expected = "t=0 B | t=0 HIST:PARTIAL HISTORY (120 of 300, refreshing) | t=0 MAP:120 | t=3 P | t=6 P | t=9 P | t=12 P | t=15 P | t=18 P | t=21 P | t=24 P | t=27 P | t=30 P | t=33 P | t=36 P | t=39 P | t=42 P | t=45 P | t=48 P | t=51 P | t=54 P | t=57 P | t=60 P | t=60 HIST:PARTIAL HISTORY (120 of 300, loading stalled; retrying) | t=90 P | t=90 B | t=90 HIST:PARTIAL HISTORY (220 of 300, refreshing) | t=90 MAP:220 | t=93 P | t=96 P | t=99 P | t=102 P | t=105 P | t=108 P | t=111 P | t=114 P | t=117 P | t=120 P | t=123 P | t=126 P | t=129 P | END map=1 drawn=1 noprog=13 text=PARTIAL HISTORY (220 of 300, refreshing)";
+         ArrayResize(acts, ArraySize(a));
+         for(int k = 0; k < ArraySize(a); k++)
+            acts[k] = a[k];
+         break;
+        }
+      case 2:
+        {
+         int a[] = {0,9,0,25,0,700};
+         name = "b_complete_before_20th"; start_ms = 100000; first = 880; last = 999; duration = 100;
+         expected = "t=0 B | t=0 HIST:PARTIAL HISTORY (120 of 300, refreshing) | t=0 MAP:120 | t=3 P | t=6 P | t=9 P | t=12 P | t=15 P | t=18 P | t=21 P | t=24 P | t=27 P | t=27 B | t=27 HIST:HISTORY COMPLETE (300 of 300) | t=27 MAP:300 | END map=1 drawn=1 noprog=0 text=HISTORY COMPLETE (300 of 300)";
+         ArrayResize(acts, ArraySize(a));
+         for(int k = 0; k < ArraySize(a); k++)
+            acts[k] = a[k];
+         break;
+        }
+      case 3:
+        {
+         int a[] = {16,3,1,40,3,0};
+         name = "c_probe_failure_recovers"; start_ms = 100000; first = 880; last = 999; duration = 120;
+         expected = "t=0 B | t=0 HIST:PARTIAL HISTORY (120 of 300, refreshing) | t=0 MAP:120 | t=3 P | t=6 P | t=9 P | t=12 P | t=15 P | t=18 P | t=18 CLEAR:history probe: CopyRates returned no closed H4 bars | t=21 B | t=24 B | t=27 B | t=30 B | t=33 B | t=36 B | t=39 B | t=42 B | t=42 REBUILT:history probe: CopyRates returned no closed H4 bars | t=42 MAP:120 | t=45 P | t=48 P | t=51 P | t=54 P | t=57 P | t=60 P | t=63 P | t=66 P | t=69 P | t=72 P | t=75 P | t=78 P | t=81 P | t=84 P | t=84 HIST:PARTIAL HISTORY (120 of 300, loading stalled; retrying) | t=114 P | END map=1 drawn=1 noprog=21 text=PARTIAL HISTORY (120 of 300, loading stalled; retrying)";
+         ArrayResize(acts, ArraySize(a));
+         for(int k = 0; k < ArraySize(a); k++)
+            acts[k] = a[k];
+         break;
+        }
+      case 4:
+        {
+         int a[] = {16,3,1,100,3,0};
+         name = "c2_probe_failure_long"; start_ms = 100000; first = 880; last = 999; duration = 130;
+         expected = "t=0 B | t=0 HIST:PARTIAL HISTORY (120 of 300, refreshing) | t=0 MAP:120 | t=3 P | t=6 P | t=9 P | t=12 P | t=15 P | t=18 P | t=18 CLEAR:history probe: CopyRates returned no closed H4 bars | t=21 B | t=24 B | t=27 B | t=30 B | t=33 B | t=36 B | t=39 B | t=42 B | t=45 B | t=48 B | t=51 B | t=54 B | t=57 B | t=60 B | t=63 B | t=66 B | t=69 B | t=72 B | t=75 B | t=78 B | t=81 B | t=84 B | t=87 B | t=90 B | t=93 B | t=96 B | t=99 B | t=102 B | t=102 REBUILT:history probe: CopyRates returned no closed H4 bars | t=102 MAP:120 | t=105 P | t=108 P | t=111 P | t=114 P | t=117 P | t=120 P | t=123 P | t=126 P | t=129 P | END map=1 drawn=1 noprog=15 text=PARTIAL HISTORY (120 of 300, refreshing)";
+         ArrayResize(acts, ArraySize(a));
+         for(int k = 0; k < ArraySize(a); k++)
+            acts[k] = a[k];
+         break;
+        }
+      case 5:
+        {
+         int a[] = {50,3,1,50,1,1000,70,3,0};
+         name = "c3_build_failure_complete"; start_ms = 100000; first = 700; last = 999; duration = 100;
+         expected = "t=0 B | t=0 HIST:HISTORY COMPLETE (300 of 300) | t=0 MAP:300 | t=50 B | t=50 CLEAR:CopyRates returned no closed H4 bars | t=53 B | t=56 B | t=59 B | t=62 B | t=65 B | t=68 B | t=71 B | t=71 REBUILT:CopyRates returned no closed H4 bars | t=71 MAP:300 | END map=1 drawn=1 noprog=0 text=HISTORY COMPLETE (300 of 300)";
+         ArrayResize(acts, ArraySize(a));
+         for(int k = 0; k < ArraySize(a); k++)
+            acts[k] = a[k];
+         break;
+        }
+      case 6:
+        {
+         int a[] = {16,2,0,30,2,1};
+         name = "d_series_not_ready"; start_ms = 100000; first = 880; last = 999; duration = 60;
+         expected = "t=0 B | t=0 HIST:PARTIAL HISTORY (120 of 300, refreshing) | t=0 MAP:120 | t=3 P | t=6 P | t=9 P | t=12 P | t=15 P | t=16 CLEAR:H4 series not ready: SIM | t=30 B | t=30 REBUILT:H4 series not ready: SIM | t=30 MAP:120 | t=33 P | t=36 P | t=39 P | t=42 P | t=45 P | t=48 P | t=51 P | t=54 P | t=57 P | t=60 P | END map=1 drawn=1 noprog=11 text=PARTIAL HISTORY (120 of 300, refreshing)";
+         ArrayResize(acts, ArraySize(a));
+         for(int k = 0; k < ArraySize(a); k++)
+            acts[k] = a[k];
+         break;
+        }
+      case 7:
+        {
+         int a[] = {0,9,0,10,0,700};
+         name = "e1_insufficient_then_sufficient"; start_ms = 100000; first = 994; last = 999; duration = 40;
+         expected = "t=0 B | t=0 HIST:INSUFFICIENT HISTORY (6 of 300 bars) | t=3 B | t=6 B | t=9 B | t=12 B | t=12 HIST:HISTORY COMPLETE (300 of 300) | t=12 MAP:300 | END map=1 drawn=1 noprog=0 text=HISTORY COMPLETE (300 of 300)";
+         ArrayResize(acts, ArraySize(a));
+         for(int k = 0; k < ArraySize(a); k++)
+            acts[k] = a[k];
+         break;
+        }
+      case 8:
+        {
+         int a[] = {50,0,995,50,1,1000,79,0,700};
+         name = "e2_map_then_insufficient"; start_ms = 100000; first = 880; last = 999; duration = 100;
+         expected = "t=0 B | t=0 HIST:PARTIAL HISTORY (120 of 300, refreshing) | t=0 MAP:120 | t=3 P | t=6 P | t=9 P | t=12 P | t=15 P | t=18 P | t=21 P | t=24 P | t=27 P | t=30 P | t=33 P | t=36 P | t=39 P | t=42 P | t=45 P | t=48 P | t=50 B | t=50 HIST:INSUFFICIENT HISTORY (6 of 300 bars) | t=50 CLEAR:INSUFFICIENT HISTORY (6 of 300 bars) | t=53 B | t=56 B | t=59 B | t=62 B | t=65 B | t=68 B | t=71 B | t=74 B | t=77 B | t=80 B | t=80 HIST:HISTORY COMPLETE (300 of 300) | t=80 REBUILT:INSUFFICIENT HISTORY (6 of 300 bars) | t=80 MAP:300 | END map=1 drawn=1 noprog=0 text=HISTORY COMPLETE (300 of 300)";
+         ArrayResize(acts, ArraySize(a));
+         for(int k = 0; k < ArraySize(a); k++)
+            acts[k] = a[k];
+         break;
+        }
+      case 9:
+        {
+         int a[] = {0,9,0,100,0,700};
+         name = "e3_insufficient_stalled"; start_ms = 100000; first = 994; last = 999; duration = 130;
+         expected = "t=0 B | t=0 HIST:INSUFFICIENT HISTORY (6 of 300 bars) | t=3 B | t=6 B | t=9 B | t=12 B | t=15 B | t=18 B | t=21 B | t=24 B | t=27 B | t=30 B | t=33 B | t=36 B | t=39 B | t=42 B | t=45 B | t=48 B | t=51 B | t=54 B | t=57 B | t=60 B | t=60 HIST:INSUFFICIENT HISTORY (6 of 300 bars, loading stalled; retrying) | t=90 B | t=120 B | t=120 HIST:HISTORY COMPLETE (300 of 300) | t=120 MAP:300 | END map=1 drawn=1 noprog=0 text=HISTORY COMPLETE (300 of 300)";
+         ArrayResize(acts, ArraySize(a));
+         for(int k = 0; k < ArraySize(a); k++)
+            acts[k] = a[k];
+         break;
+        }
+      case 10:
+        {
+         int a[] = {30,1,1000,30,4,1,45,4,0};
+         name = "f_newest_mismatch"; start_ms = 100000; first = 700; last = 999; duration = 60;
+         expected = "t=0 B | t=0 HIST:HISTORY COMPLETE (300 of 300) | t=0 MAP:300 | t=30 B | t=30 CLEAR:newest copied bar does not match the watcher (history catching up) | t=33 B | t=36 B | t=39 B | t=42 B | t=45 B | t=45 REBUILT:newest copied bar does not match the watcher (history catching up) | t=45 MAP:300 | END map=1 drawn=1 noprog=0 text=HISTORY COMPLETE (300 of 300)";
+         ArrayResize(acts, ArraySize(a));
+         for(int k = 0; k < ArraySize(a); k++)
+            acts[k] = a[k];
+         break;
+        }
+      case 11:
+        {
+         int a[] = {0,9,0};
+         name = "g_complete_no_rechecks"; start_ms = 100000; first = 700; last = 999; duration = 600;
+         expected = "t=0 B | t=0 HIST:HISTORY COMPLETE (300 of 300) | t=0 MAP:300 | END map=1 drawn=1 noprog=0 text=HISTORY COMPLETE (300 of 300)";
+         ArrayResize(acts, ArraySize(a));
+         for(int k = 0; k < ArraySize(a); k++)
+            acts[k] = a[k];
+         break;
+        }
+      case 12:
+        {
+         int a[] = {70,1,1000};
+         name = "h_new_bar_resets_stall"; start_ms = 100000; first = 880; last = 999; duration = 140;
+         expected = "t=0 B | t=0 HIST:PARTIAL HISTORY (120 of 300, refreshing) | t=0 MAP:120 | t=3 P | t=6 P | t=9 P | t=12 P | t=15 P | t=18 P | t=21 P | t=24 P | t=27 P | t=30 P | t=33 P | t=36 P | t=39 P | t=42 P | t=45 P | t=48 P | t=51 P | t=54 P | t=57 P | t=60 P | t=60 HIST:PARTIAL HISTORY (120 of 300, loading stalled; retrying) | t=70 B | t=70 HIST:PARTIAL HISTORY (121 of 300, refreshing) | t=70 MAP:121 | t=73 P | t=76 P | t=79 P | t=82 P | t=85 P | t=88 P | t=91 P | t=94 P | t=97 P | t=100 P | t=103 P | t=106 P | t=109 P | t=112 P | t=115 P | t=118 P | t=121 P | t=124 P | t=127 P | t=130 P | t=130 HIST:PARTIAL HISTORY (121 of 300, loading stalled; retrying) | END map=1 drawn=1 noprog=20 text=PARTIAL HISTORY (121 of 300, loading stalled; retrying)";
+         ArrayResize(acts, ArraySize(a));
+         for(int k = 0; k < ArraySize(a); k++)
+            acts[k] = a[k];
+         break;
+        }
+      case 13:
+        {
+         int a[] = {0,9,0,100,0,700};
+         name = "i_ref_unwrapped"; start_ms = 100000; first = 880; last = 999; duration = 130;
+         expected = "t=0 B | t=0 HIST:PARTIAL HISTORY (120 of 300, refreshing) | t=0 MAP:120 | t=3 P | t=6 P | t=9 P | t=12 P | t=15 P | t=18 P | t=21 P | t=24 P | t=27 P | t=30 P | t=33 P | t=36 P | t=39 P | t=42 P | t=45 P | t=48 P | t=51 P | t=54 P | t=57 P | t=60 P | t=60 HIST:PARTIAL HISTORY (120 of 300, loading stalled; retrying) | t=90 P | t=120 P | t=120 B | t=120 HIST:HISTORY COMPLETE (300 of 300) | t=120 MAP:300 | END map=1 drawn=1 noprog=0 text=HISTORY COMPLETE (300 of 300)";
+         ArrayResize(acts, ArraySize(a));
+         for(int k = 0; k < ArraySize(a); k++)
+            acts[k] = a[k];
+         break;
+        }
+      case 14:
+        {
+         int a[] = {0,9,0,100,0,700};
+         name = "i_wrap_early"; start_ms = 4294959296; first = 880; last = 999; duration = 130;
+         expected = "t=0 B | t=0 HIST:PARTIAL HISTORY (120 of 300, refreshing) | t=0 MAP:120 | t=3 P | t=6 P | t=9 P | t=12 P | t=15 P | t=18 P | t=21 P | t=24 P | t=27 P | t=30 P | t=33 P | t=36 P | t=39 P | t=42 P | t=45 P | t=48 P | t=51 P | t=54 P | t=57 P | t=60 P | t=60 HIST:PARTIAL HISTORY (120 of 300, loading stalled; retrying) | t=90 P | t=120 P | t=120 B | t=120 HIST:HISTORY COMPLETE (300 of 300) | t=120 MAP:300 | END map=1 drawn=1 noprog=0 text=HISTORY COMPLETE (300 of 300)";
+         ArrayResize(acts, ArraySize(a));
+         for(int k = 0; k < ArraySize(a); k++)
+            acts[k] = a[k];
+         break;
+        }
+      case 15:
+        {
+         int a[] = {0,9,0,100,0,700};
+         name = "i_wrap_while_slow"; start_ms = 4294892296; first = 880; last = 999; duration = 130;
+         expected = "t=0 B | t=0 HIST:PARTIAL HISTORY (120 of 300, refreshing) | t=0 MAP:120 | t=3 P | t=6 P | t=9 P | t=12 P | t=15 P | t=18 P | t=21 P | t=24 P | t=27 P | t=30 P | t=33 P | t=36 P | t=39 P | t=42 P | t=45 P | t=48 P | t=51 P | t=54 P | t=57 P | t=60 P | t=60 HIST:PARTIAL HISTORY (120 of 300, loading stalled; retrying) | t=90 P | t=120 P | t=120 B | t=120 HIST:HISTORY COMPLETE (300 of 300) | t=120 MAP:300 | END map=1 drawn=1 noprog=0 text=HISTORY COMPLETE (300 of 300)";
+         ArrayResize(acts, ArraySize(a));
+         for(int k = 0; k < ArraySize(a); k++)
+            acts[k] = a[k];
+         break;
+        }
+     }
+  }
 // END GENERATED CASE DATA
 
 int T2FindCase(const string name)
@@ -650,15 +817,22 @@ void TestIds(void)
 //--- 7. pure decisions (mirrored in tests/t002_reference_test.py test_pure_decisions)
 void TestPureDecisions(void)
   {
-   Print("--- history state, refresh, map transitions, panel wording");
+   Print("--- history state, stall, tick arithmetic, map transitions, panel wording");
    Check(H4HistoryState(6, 300, 2, 2) == H4_HIST_INSUFFICIENT, "history 6 of 300 (min 11) -> INSUFFICIENT");
    Check(H4HistoryState(11, 300, 2, 2) == H4_HIST_PARTIAL, "history 11 of 300 -> PARTIAL");
    Check(H4HistoryState(299, 300, 2, 2) == H4_HIST_PARTIAL, "history 299 of 300 -> PARTIAL");
    Check(H4HistoryState(300, 300, 2, 2) == H4_HIST_COMPLETE, "history 300 of 300 -> COMPLETE");
-   Check(H4HistoryText(H4_HIST_INSUFFICIENT, 6, 300, true) == "INSUFFICIENT HISTORY (6 of 300 bars)", "text INSUFFICIENT");
-   Check(H4HistoryText(H4_HIST_PARTIAL, 120, 300, true) == "PARTIAL HISTORY (120 of 300, refreshing)", "text PARTIAL refreshing");
-   Check(H4HistoryText(H4_HIST_PARTIAL, 120, 300, false) == "PARTIAL HISTORY (120 of 300, no more on server)", "text PARTIAL exhausted");
+   Check(H4HistoryText(H4_HIST_INSUFFICIENT, 6, 300, false) == "INSUFFICIENT HISTORY (6 of 300 bars)", "text INSUFFICIENT");
+   Check(H4HistoryText(H4_HIST_INSUFFICIENT, 6, 300, true) == "INSUFFICIENT HISTORY (6 of 300 bars, loading stalled; retrying)", "text INSUFFICIENT stalled");
+   Check(H4HistoryText(H4_HIST_PARTIAL, 120, 300, false) == "PARTIAL HISTORY (120 of 300, refreshing)", "text PARTIAL refreshing");
+   Check(H4HistoryText(H4_HIST_PARTIAL, 120, 300, true) == "PARTIAL HISTORY (120 of 300, loading stalled; retrying)", "text PARTIAL stalled");
    Check(H4HistoryText(H4_HIST_COMPLETE, 300, 300, false) == "HISTORY COMPLETE (300 of 300)", "text COMPLETE");
+   bool no_claim = true;
+   for(int st = 0; st <= 2; st++)
+      for(int sl = 0; sl <= 1; sl++)
+         if(StringFind(H4HistoryText(st, 100, 300, sl == 1), "no more on server") >= 0)
+            no_claim = false;
+   Check(no_claim, "no history text claims \"no more on server\"");
    datetime t1 = T2Base();
    datetime t0 = t1 - (datetime)T2_PERIOD;
    Check(H4HistoryImproved(100, t1, 101, t1), "more bars -> improved");
@@ -666,10 +840,13 @@ void TestPureDecisions(void)
    Check(!H4HistoryImproved(100, t1, 100, t1), "same count and first bar -> not improved");
    Check(!H4HistoryImproved(100, t1, 99, t1), "fewer bars -> not improved");
    Check(!H4HistoryImproved(0, 0, 0, 0), "nothing yet -> not improved");
-   Check(H4RefreshDue(H4_HIST_PARTIAL, 0, 20), "partial, no failures yet -> refresh due");
-   Check(H4RefreshDue(H4_HIST_INSUFFICIENT, 19, 20), "insufficient, 19 idle checks -> still due");
-   Check(!H4RefreshDue(H4_HIST_PARTIAL, 20, 20), "cap of idle checks reached -> stop");
-   Check(!H4RefreshDue(H4_HIST_COMPLETE, 0, 20), "complete -> never refresh");
+   Check(!H4HistStalled(H4_HIST_PARTIAL, 19, 20), "partial, 19 idle checks -> not stalled yet");
+   Check(H4HistStalled(H4_HIST_PARTIAL, 20, 20), "partial, 20 idle checks -> stalled (slower cadence, NOT stopped)");
+   Check(H4HistStalled(H4_HIST_INSUFFICIENT, 25, 20), "insufficient, 25 idle checks -> stalled");
+   Check(!H4HistStalled(H4_HIST_COMPLETE, 99, 20), "complete -> never stalled");
+   Check(H4ElapsedMs((uint)5000, (uint)2000) == 3000, "elapsed ms without wrap");
+   Check(H4ElapsedMs(5, (uint)4294967290) == 11, "elapsed ms across the GetTickCount wrap (unsigned subtraction)");
+   Check(H4ElapsedMs(512, (uint)4294967040) == 768, "elapsed ms across the wrap, second sample");
    Check(H4MapTransition(true, false) == H4_ACT_CLEAR, "map + failed build -> CLEAR");
    Check(H4MapTransition(false, true) == H4_ACT_REBUILT, "no map + ok build -> REBUILT");
    Check(H4MapTransition(true, true) == H4_ACT_REFRESHED, "map + ok build -> REFRESHED");
@@ -696,6 +873,191 @@ void TestPureDecisions(void)
    Check(StringFind(H4IrlPanelText(false, H4_ERL_TAKEN, z, true), "-> ERL") < 0, "TAKEN inside wording has no -> ERL");
   }
 
+//--- 8. map lifecycle scenarios. Twin of Sim / run_scenario in
+//--- tests/t002_reference_test.py: a scripted fake data source driven over
+//--- simulated seconds through the SAME step functions the EA calls
+//--- (H4LifeDecide / H4LifeOnCopy). The transcript of every scenario must equal
+//--- the one generated from the Python model. This still is not MT5 CopyRates.
+#define T2_LOOKBACK 300
+#define T2_BASE_IDX 1000
+
+SH4Life g_lf;
+int     s_first = 0, s_last = 0, s_seen = -1, s_t = 0;
+bool    s_ready = true, s_fail = false, s_mismatch = false, s_drawn = false;
+ulong   s_start = 0;
+string  s_ev = "";
+
+datetime T2SimTime(const int k) { return(T2Base() + (datetime)((T2_BASE_IDX + k) * T2_PERIOD)); }
+
+void T2Ev(const string kind, const string text)
+  {
+   if(s_ev != "")
+      s_ev += " | ";
+   s_ev += StringFormat("t=%d %s", s_t, kind);
+   if(text != "")
+      s_ev += ":" + text;
+  }
+
+void T2SimCopy(const string kind_char, int &got, datetime &oldest, bool &newest_ok)
+  {
+   T2Ev(kind_char, "");
+   if(s_fail)
+     {
+      got = -1;
+      oldest = 0;
+      newest_ok = false;
+      return;
+     }
+   got = MathMin(T2_LOOKBACK, s_last - s_first + 1);
+   oldest = T2SimTime(s_last - got + 1);
+   newest_ok = !s_mismatch;
+  }
+
+void T2Apply(const SH4LifeOut &o)
+  {
+   if(o.log_hist)
+      T2Ev("HIST", g_lf.hist_text);
+   if(o.do_clear)
+     {
+      T2Ev("CLEAR", o.clear_reason);
+      s_drawn = false;
+     }
+  }
+
+bool T2SimBuild(void)
+  {
+   int got;
+   datetime oldest;
+   bool ok;
+   T2SimCopy("B", got, oldest, ok);
+   SH4LifeOut o;
+   H4LifeOnCopy(g_lf, H4_ATT_BUILD, got, oldest, ok, T2_LOOKBACK, 2, 2, o);
+   T2Apply(o);
+   if(!o.rebuilt)
+      return(false);
+   if(o.log_rebuilt != "")
+      T2Ev("REBUILT", o.log_rebuilt);
+   T2Ev("MAP", IntegerToString(got));
+   s_drawn = true;
+   return(true);
+  }
+
+bool T2SimProbe(void)
+  {
+   int got;
+   datetime oldest;
+   bool ok;
+   T2SimCopy("P", got, oldest, ok);
+   SH4LifeOut o;
+   H4LifeOnCopy(g_lf, H4_ATT_PROBE, got, oldest, true, T2_LOOKBACK, 2, 2, o);
+   T2Apply(o);
+   if(o.attempt == H4_ATT_BUILD)
+      return(T2SimBuild());
+   return(false);
+  }
+
+void T2SimPoll(const int t)
+  {
+   s_t = t;
+   bool new_bar = false;
+   if(s_ready)
+     {
+      new_bar = (s_seen >= 0 && s_last > s_seen);
+      s_seen = s_last;
+     }
+   ulong full = s_start + (ulong)t * 1000;
+   uint now_ms = (uint)(full % (ulong)4294967296);
+   SH4LifeOut o;
+   H4LifeDecide(g_lf, s_ready, "H4 series not ready: SIM", new_bar, now_ms, T2_LOOKBACK, o);
+   T2Apply(o);
+   if(s_ready)
+     {
+      if(o.attempt == H4_ATT_PROBE)
+         T2SimProbe();
+      else
+         if(o.attempt == H4_ATT_BUILD)
+            T2SimBuild();
+     }
+  }
+
+//--- ops: 0 first, 1 last, 2 ready, 3 fail, 4 mismatch, 9 nop
+string T2RunScenario(const int id, string &name, string &expected)
+  {
+   ulong start_ms;
+   int first, last, duration;
+   int acts[];
+   T2LoadScenario(id, name, start_ms, first, last, duration, acts, expected);
+   H4LifeInit(g_lf);
+   s_first = first;
+   s_last = last;
+   s_seen = -1;
+   s_ready = true;
+   s_fail = false;
+   s_mismatch = false;
+   s_drawn = false;
+   s_start = start_ms;
+   s_ev = "";
+   for(int t = 0; t <= duration; t++)
+     {
+      for(int i = 0; i + 2 < ArraySize(acts); i += 3)
+         if(acts[i] == t)
+           {
+            int op = acts[i + 1];
+            int val = acts[i + 2];
+            if(op == 0)
+               s_first = val;
+            else
+               if(op == 1)
+                  s_last = val;
+               else
+                  if(op == 2)
+                     s_ready = (val != 0);
+                  else
+                     if(op == 3)
+                        s_fail = (val != 0);
+                     else
+                        if(op == 4)
+                           s_mismatch = (val != 0);
+           }
+      T2SimPoll(t);
+     }
+   s_ev += StringFormat(" | END map=%d drawn=%d noprog=%d text=%s", g_lf.have_map ? 1 : 0,
+                        s_drawn ? 1 : 0, g_lf.noprog, g_lf.hist_text);
+   return(s_ev);
+  }
+
+void TestLifecycle(void)
+  {
+   Print("--- map lifecycle scenarios (scripted fake source; transcript must equal the Python model's)");
+   string trs[];
+   string names[];
+   ArrayResize(trs, T2_SCN_COUNT);
+   ArrayResize(names, T2_SCN_COUNT);
+   bool no_claim = true;
+   for(int id = 0; id < T2_SCN_COUNT; id++)
+     {
+      string nm, ex;
+      trs[id] = T2RunScenario(id, nm, ex);
+      names[id] = nm;
+      bool same = (trs[id] == ex);
+      Check(same, "lifecycle scenario " + nm + ": transcript equals the Python model");
+      if(!same)
+         PrintFormat("    got:      %s\n    expected: %s", trs[id], ex);
+      if(StringFind(trs[id], "no more on server") >= 0)
+         no_claim = false;
+     }
+   Check(no_claim, "no lifecycle scenario claims \"no more on server\"");
+   //--- a few explicit expectations (not only transcript equality)
+   Check(StringFind(trs[0], "t=60 HIST:PARTIAL HISTORY (120 of 300, loading stalled; retrying)") >= 0, "(a) stalled status at the 20th idle check");
+   Check(StringFind(trs[0], "t=90 P | t=120 P | t=120 B | t=120 HIST:HISTORY COMPLETE (300 of 300) | t=120 MAP:300") >= 0, "(a) 30 s cadence, rebuilt at t=120 without a new bar");
+   Check(StringFind(trs[3], "t=18 CLEAR:history probe: CopyRates returned no closed H4 bars") >= 0, "(c) failed probe clears the map");
+   Check(StringFind(trs[3], "t=42 REBUILT:history probe: CopyRates returned no closed H4 bars | t=42 MAP:120") >= 0, "(c) recovery rebuilds and logs the reason");
+   Check(StringFind(trs[6], "t=16 CLEAR:H4 series not ready: SIM") >= 0, "(d) series not ready clears the map");
+   Check(StringFind(trs[10], "t=30 CLEAR:newest copied bar does not match the watcher") >= 0, "(f) mismatch clears the map");
+   Check(StringFind(trs[11], "t=0 B | t=0 HIST:HISTORY COMPLETE (300 of 300) | t=0 MAP:300 | END") >= 0, "(g) complete history: a single copy in 600 s");
+   Check(trs[13] == trs[14] && trs[13] == trs[15], "(i) unsigned tick arithmetic: wrapped runs equal the unwrapped run");
+  }
+
 void OnStart(void)
   {
    Print("T002 LOGIC TEST start - proposed H4 model, MQL5 vs Python-model expectations");
@@ -709,6 +1071,7 @@ void OnStart(void)
    TestNoLookahead("bear_touched_inside_two");
    TestIds();
    TestPureDecisions();
+   TestLifecycle();
    PrintFormat("T002 LOGIC TEST finished: %d passed, %d failed", g_pass, g_fail);
   }
 //+------------------------------------------------------------------+
