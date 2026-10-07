@@ -65,7 +65,7 @@ Pastaj hap `%TEMP%\mql5_compile.log` dhe kopjo përmbajtjen në raportin e verif
 
 ## Verifikimi
 
-Evidenca reale e këtij hapi është në [reports/T001-verification.md](reports/T001-verification.md). Kompilimi dhe sjellja në MT5 janë shënuar **UNVERIFIED** derisa t'i kryejë pronari — kontejneri i zhvillimit nuk ka MetaEditor.
+Evidenca reale e këtij hapi është në [reports/T001-verification.md](reports/T001-verification.md). Versioni i testuar është `763227d`. Codex e kompiloi në MetaEditor: 0 errors, 0 warnings. Pronari e vëzhgoi në MT5 në një llogari MetaQuotes-Demo, por **pjesërisht**: secili kontroll C2–C6 ka pjesën e vëzhguar dhe pjesën e paprovuar të shënuar në raport. Specifikimet e Tauro nuk janë konfirmuar. Kontejneri i zhvillimit nuk ka MetaEditor, prandaj unë nuk kam kompiluar vetë.
 
 Kontrollet statike (pa API tregtimi, balanca sintaksore, include-et, pa API MQL4, handler-at, specifikuesit e formatit, vetëm-ASCII) ri-ekzekutohen me:
 
@@ -73,7 +73,7 @@ Kontrollet statike (pa API tregtimi, balanca sintaksore, include-et, pa API MQL4
 bash tools/t001-static-checks.sh
 ```
 
-Këto **nuk** janë kompilator dhe **nuk** zëvendësojnë testimin në MT5 — lista e kontrolleve që duhet t'i bëjë pronari është në §5 të raportit.
+Këto **nuk** janë kompilator dhe **nuk** zëvendësojnë testimin në MT5 — gjendja e kontrolleve C1–C6, me të vëzhguarën dhe të paprovuarën, është në §5 të raportit.
 
 ## Shënim për skedarët e vjetër në repo
 
