@@ -1,6 +1,6 @@
 # Current project state
 
-> T002 (branch `claude/t002-h4-map`, draft PR velireci/EA-MT5#2 against the T001 branch, base head `56c9570`): H4 map visual prototype. Evidence by source: Codex compiled `44fddaa` and `9aeb8f7` with 0 errors, 0 warnings (both files), static checks PASS and Python 96/96 on `9aeb8f7`; MQL5 script and drawings NOT run in MT5. Review-round-2 fixes (stalled-history cadence, probe failure clears the map, lifecycle moved into pure step functions) are UNCOMPILED: the 0/0 does not cover them; my Python model tests 132/132 (16 lifecycle scenarios) and static checks PASS. All H4 rules are PROPOSED, awaiting client validation. See reports/T002-verification.md sections 8-9. Awaiting Codex recompile. PR #1 not merged.
+> T002 (branch `claude/t002-h4-map`, draft PR velireci/EA-MT5#2 against the T001 branch, base head `56c9570`): H4 map visual prototype. Evidence by source: Codex compiled `44fddaa` and `9aeb8f7` with 0 errors, 0 warnings, static checks PASS and Python 96/96 on `9aeb8f7`; MQL5 script and drawings NOT run in MT5. Added since: stalled-history cadence and probe-failure clearing (round 2, `056aa30`), and the historical review mode `InpAsOfTime` with direction evidence (report section 10). All of these are UNCOMPILED: the 0/0 does not cover them. My Python model tests 197/197 and static checks PASS. AsOfTime is broker/server time, not TradingView time; do not assume they match. All H4 rules are PROPOSED, awaiting client validation. Awaiting Codex recompile. PR #1 not merged.
 
 Updated: 2026-10-07 (Europe/Tirane)
 

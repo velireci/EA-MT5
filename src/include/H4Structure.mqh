@@ -12,6 +12,11 @@
 //| No look-ahead: H4Analyze() reads only bars[0..n-1]. Analysing a  |
 //| prefix (smaller n) gives what was knowable at that time.         |
 //|                                                                  |
+//| Historical review (sections 10 and 11): pure as-of filter, price,|
+//| lifecycle-mode helpers and the direction evidence. The EA copies |
+//| bars in ONE helper (CopyClosedSet); these functions hold the     |
+//| decisions so they can be tested without a terminal.              |
+//|                                                                  |
 //| Verification status: mirrored by tests/t002_reference_test.py    |
 //| (a Python MODEL) and src/tests/T002_LogicTest.mq5. Neither the   |
 //| MQL5 compilation nor the MQL5 test has been run.                 |
@@ -746,6 +751,260 @@ void H4LifeOnCopy(SH4Life &st, const int kind, const int got, const datetime old
    if(act == H4_ACT_REBUILT && st.cleared_reason != "")
       out.log_rebuilt = st.cleared_reason;
    st.cleared_reason = "";
+  }
+
+//+------------------------------------------------------------------+
+//| 10. historical review (as-of) - pure helpers. No clock, no       |
+//|     series access: the EA passes time values in. Used by the EA  |
+//|     (single copy helper CopyClosedSet) and mirrored 1:1 in       |
+//|     tests/t002_reference_test.py.                                |
+//+------------------------------------------------------------------+
+//--- How many LEADING bars of the chronological array (index 0 = oldest)
+//--- were CLOSED at asof, i.e. open time + period <= asof. A bar closing
+//--- exactly at asof is included; a bar still forming at asof is not.
+//--- Stops at the first bar that does not qualify (chronological input).
+int H4ClosedCountAsOf(const MqlRates &bars[], const int n, const datetime asof,
+                      const int period_seconds)
+  {
+   int c = 0;
+   for(int i = 0; i < n; i++)
+     {
+      if((long)bars[i].time + (long)period_seconds > (long)asof)
+         break;
+      c++;
+     }
+   return(c);
+  }
+
+//--- AsOfTime in the future (or later than the forming bar's open) must not
+//--- count the live forming bar as closed: cap it at the forming bar's open
+//--- time (a bar closed at that instant is final). forming_open = 0: no cap.
+datetime H4EffectiveAsOf(const datetime asof, const datetime forming_open)
+  {
+   if(forming_open > 0 && forming_open < asof)
+      return(forming_open);
+   return(asof);
+  }
+
+//--- index of the first bar kept when the as-of set (closed bars) is clipped
+//--- to the newest `lookback` bars
+int H4AsOfSetStart(const int closed, const int lookback)
+  {
+   if(lookback > 0 && closed > lookback)
+      return(closed - lookback);
+   return(0);
+  }
+
+//--- the lifecycle check "newest copied bar matches the watcher's closed bar".
+//--- Live: must be the same bar. Historical: the as-of set ends BEFORE the
+//--- watcher's bar by design, so it must only not be newer than the watcher.
+bool H4NewestOk(const bool historical, const datetime newest_time, const datetime watcher_closed_open)
+  {
+   if(watcher_closed_open == 0)
+      return(true);
+   if(historical)
+      return(newest_time <= watcher_closed_open);
+   return(newest_time == watcher_closed_open);
+  }
+
+//--- historical mode: new H4 bars never start a recompute (static map)
+bool H4NewBarForLife(const bool historical, const bool new_bar)
+  {
+   return(!historical && new_bar);
+  }
+
+//--- price used for the IRL selection. Historical: close of the last closed
+//--- bar of the as-of set; the live bid is ignored. Live: the bid when valid,
+//--- otherwise the previous price.
+double H4SelectionPrice(const bool historical, const double last_closed_close,
+                        const double bid, const double prev_price)
+  {
+   if(historical)
+      return(last_closed_close);
+   if(bid > 0.0)
+      return(bid);
+   return(prev_price);
+  }
+
+//+------------------------------------------------------------------+
+//| 11. direction evidence: the two latest confirmed non-ambiguous   |
+//|     swing highs and lows that H4DeriveDirection compares.        |
+//+------------------------------------------------------------------+
+#define H4_CMP_NONE   0
+#define H4_CMP_HIGHER 1   // newer swing is higher than the older one (HH / HL)
+#define H4_CMP_LOWER  2   // newer swing is lower (LH / LL)
+#define H4_CMP_EQUAL  3   // equal price (EQ): not a trend
+
+struct SH4DirEvidence
+  {
+   int               nh;              // confirmed swing highs available
+   int               nl;
+   int               h_old;           // positions in swings[] (-1 = missing); old = older, new = newer
+   int               h_new;
+   int               l_old;
+   int               l_new;
+   double            h_old_price;
+   datetime          h_old_pivot;
+   datetime          h_old_confirm;
+   double            h_new_price;
+   datetime          h_new_pivot;
+   datetime          h_new_confirm;
+   double            l_old_price;
+   datetime          l_old_pivot;
+   datetime          l_old_confirm;
+   double            l_new_price;
+   datetime          l_new_pivot;
+   datetime          l_new_confirm;
+   int               h_cmp;           // H4_CMP_*
+   int               l_cmp;
+   int               direction;       // H4_DIR_*, derived independently of H4DeriveDirection
+   string            h_text;          // "highs 2345.10@2026.10.06 08:00 -> ... = LH"
+   string            l_text;
+   string            tail;            // "=> BEARISH" / "=> MIXED (...)" / "only 1 swing high => UNKNOWN"
+   string            verdict;         // full one-line explanation
+  };
+
+string H4CmpName(const bool highs, const int cmp)
+  {
+   if(cmp == H4_CMP_EQUAL)
+      return("EQ");
+   if(cmp == H4_CMP_HIGHER)
+      return(highs ? "HH" : "HL");
+   if(cmp == H4_CMP_LOWER)
+      return(highs ? "LH" : "LL");
+   return("n/a");
+  }
+
+int H4Compare(const double older, const double newer)
+  {
+   if(newer > older)
+      return(H4_CMP_HIGHER);
+   if(newer < older)
+      return(H4_CMP_LOWER);
+   return(H4_CMP_EQUAL);
+  }
+
+string H4TimeText(const datetime t)
+  {
+   return(TimeToString(t, TIME_DATE|TIME_MINUTES));
+  }
+
+string H4PairText(const bool highs, const int cnt, const double po, const datetime to,
+                  const double pn, const datetime tn, const int cmp, const int digits)
+  {
+   if(cnt >= 2)
+      return(StringFormat("%s %s@%s -> %s@%s = %s", highs ? "highs" : "lows",
+                          DoubleToString(po, digits), H4TimeText(to),
+                          DoubleToString(pn, digits), H4TimeText(tn), H4CmpName(highs, cmp)));
+   return(StringFormat("%s: %s (need 2)", highs ? "highs" : "lows",
+                       cnt == 1 ? (highs ? "only 1 swing high" : "only 1 swing low")
+                                : (highs ? "no swing high" : "no swing low")));
+  }
+
+void H4DirectionEvidence(const SH4Swing &swings[], const int ns, const int digits, SH4DirEvidence &ev)
+  {
+   ev.nh = 0;
+   ev.nl = 0;
+   ev.h_old = -1;
+   ev.h_new = -1;
+   ev.l_old = -1;
+   ev.l_new = -1;
+   ev.h_old_price = 0.0; ev.h_old_pivot = 0; ev.h_old_confirm = 0;
+   ev.h_new_price = 0.0; ev.h_new_pivot = 0; ev.h_new_confirm = 0;
+   ev.l_old_price = 0.0; ev.l_old_pivot = 0; ev.l_old_confirm = 0;
+   ev.l_new_price = 0.0; ev.l_new_pivot = 0; ev.l_new_confirm = 0;
+   ev.h_cmp = H4_CMP_NONE;
+   ev.l_cmp = H4_CMP_NONE;
+   for(int i = ns - 1; i >= 0; i--)
+     {
+      if(swings[i].is_high)
+        {
+         if(ev.nh == 0)
+            ev.h_new = i;
+         else
+            if(ev.nh == 1)
+               ev.h_old = i;
+         ev.nh++;
+        }
+      else
+        {
+         if(ev.nl == 0)
+            ev.l_new = i;
+         else
+            if(ev.nl == 1)
+               ev.l_old = i;
+         ev.nl++;
+        }
+     }
+   if(ev.h_new >= 0)
+     {
+      ev.h_new_price = swings[ev.h_new].price;
+      ev.h_new_pivot = swings[ev.h_new].pivot_time;
+      ev.h_new_confirm = swings[ev.h_new].confirm_time;
+     }
+   if(ev.h_old >= 0)
+     {
+      ev.h_old_price = swings[ev.h_old].price;
+      ev.h_old_pivot = swings[ev.h_old].pivot_time;
+      ev.h_old_confirm = swings[ev.h_old].confirm_time;
+     }
+   if(ev.l_new >= 0)
+     {
+      ev.l_new_price = swings[ev.l_new].price;
+      ev.l_new_pivot = swings[ev.l_new].pivot_time;
+      ev.l_new_confirm = swings[ev.l_new].confirm_time;
+     }
+   if(ev.l_old >= 0)
+     {
+      ev.l_old_price = swings[ev.l_old].price;
+      ev.l_old_pivot = swings[ev.l_old].pivot_time;
+      ev.l_old_confirm = swings[ev.l_old].confirm_time;
+     }
+   if(ev.nh >= 2)
+      ev.h_cmp = H4Compare(ev.h_old_price, ev.h_new_price);
+   if(ev.nl >= 2)
+      ev.l_cmp = H4Compare(ev.l_old_price, ev.l_new_price);
+
+   ev.h_text = H4PairText(true, ev.nh, ev.h_old_price, ev.h_old_pivot, ev.h_new_price,
+                          ev.h_new_pivot, ev.h_cmp, digits);
+   ev.l_text = H4PairText(false, ev.nl, ev.l_old_price, ev.l_old_pivot, ev.l_new_price,
+                          ev.l_new_pivot, ev.l_cmp, digits);
+
+   if(ev.nh < 2 || ev.nl < 2)
+     {
+      ev.direction = H4_DIR_UNKNOWN;
+      string why = "";
+      if(ev.nh < 2)
+         why = (ev.nh == 1 ? "only 1 swing high" : "no swing high");
+      if(ev.nl < 2)
+         why += (why != "" ? " and " : "") + (ev.nl == 1 ? "only 1 swing low" : "no swing low");
+      ev.tail = why + " => UNKNOWN";
+      ev.verdict = ev.tail;
+      return;
+     }
+   if(ev.h_cmp == H4_CMP_LOWER && ev.l_cmp == H4_CMP_LOWER)
+      ev.direction = H4_DIR_BEARISH;
+   else
+      if(ev.h_cmp == H4_CMP_HIGHER && ev.l_cmp == H4_CMP_HIGHER)
+         ev.direction = H4_DIR_BULLISH;
+      else
+         ev.direction = H4_DIR_MIXED;
+   ev.tail = "=> " + H4DirName(ev.direction);
+   if(ev.direction == H4_DIR_MIXED)
+     {
+      if(ev.h_cmp == H4_CMP_EQUAL || ev.l_cmp == H4_CMP_EQUAL)
+         ev.tail += " (EQ is not a trend)";
+      else
+         ev.tail += StringFormat(" (highs %s but lows %s)", H4CmpName(true, ev.h_cmp),
+                                 H4CmpName(false, ev.l_cmp));
+     }
+   ev.verdict = ev.h_text + "; " + ev.l_text + " " + ev.tail;
+  }
+
+//--- true when swings[i] is one of the (up to) four swings used for the direction
+bool H4IsDirSwing(const SH4DirEvidence &ev, const int i)
+  {
+   return(i >= 0 && (i == ev.h_old || i == ev.h_new || i == ev.l_old || i == ev.l_new));
   }
 
 //--- an IRL -> ERL setup is active only for a trending direction, a valid

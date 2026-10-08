@@ -214,6 +214,57 @@ strip_comments src/include/H4Structure.mqh | grep -q 'now_ms - last_ms' && echo 
 printf 'string t = "no more on server"; bool b = H4RefreshDue(1, 2, 3);\n' > "$TMPD/stale.mqh"
 strip_comments "$TMPD/stale.mqh" | grep -qE 'no more on server|H4RefreshDue' && echo "  PASS 14f: stale claim / H4RefreshDue detected" || { echo "  FAIL 14f: stale logic not detected"; FAIL=1; }
 
+echo "=== CHECK 15: historical review wiring (single copy helper, no live price, static map) ==="
+# fn_body FILE REGEX -> stripped source of the function whose definition line matches REGEX
+# (definitions end with a line of exactly two spaces and a closing brace, as in the EA)
+fn_body() { strip_comments "$1" | awk -v re="$2" '$0 ~ re {p=1} p{print} p&&/^  }$/{exit}'; }
+# check_hist_wiring FILE -> prints violations, returns 0 when the wiring is intact
+check_hist_wiring() {
+  local f="$1" bad=0 s cl rb hp rp po b fn
+  s=$(strip_comments "$f")
+  cl=$(fn_body "$f" '^int CopyClosedSet\(.*\)$')
+  rb=$(fn_body "$f" '^bool RecomputeMap\(void\)$')
+  hp=$(fn_body "$f" '^bool HistoryProbe\(void\)$')
+  rp=$(fn_body "$f" '^void RefreshPrice\(.*\)$')
+  po=$(fn_body "$f" '^void Poll\(void\)$')
+  [ -n "$cl" ] && [ -n "$rb" ] && [ -n "$hp" ] && [ -n "$rp" ] && [ -n "$po" ] || { echo "    function body not found"; return 1; }
+  # a) exactly two CopyRates calls in the whole EA, both inside CopyClosedSet
+  [ "$(echo "$s" | grep -c 'CopyRates(')" = "2" ] && [ "$(echo "$cl" | grep -c 'CopyRates(')" = "2" ] || { echo "    CopyRates must appear exactly twice, both in CopyClosedSet"; bad=1; }
+  # b) RecomputeMap and HistoryProbe use the helper and never copy themselves
+  for b in "$rb" "$hp"; do
+    echo "$b" | grep -q 'CopyClosedSet(' || { echo "    RecomputeMap/HistoryProbe must call CopyClosedSet"; bad=1; }
+    echo "$b" | grep -q 'CopyRates(' && { echo "    RecomputeMap/HistoryProbe must not call CopyRates"; bad=1; }
+  done
+  # c) the helper applies the shared pure filter and newest-bar rule
+  for fn in H4ClosedCountAsOf H4AsOfSetStart H4EffectiveAsOf H4NewestOk; do
+    echo "$cl" | grep -q "$fn(" || { echo "    CopyClosedSet must use $fn"; bad=1; }
+  done
+  # d) the only live price read is guarded by !g_hist; no other live-price or clock API
+  [ "$(echo "$s" | grep -c 'SymbolInfoDouble(')" = "1" ] && [ "$(echo "$s" | grep -c 'SYMBOL_BID')" = "1" ] || { echo "    exactly one SymbolInfoDouble(SYMBOL_BID) expected"; bad=1; }
+  echo "$s" | grep -B3 'SymbolInfoDouble(' | head -3 | grep -q '!g_hist' || { echo "    the bid read is not guarded by !g_hist"; bad=1; }
+  echo "$s" | grep -qE 'SymbolInfoTick|SYMBOL_ASK|SYMBOL_LAST|TimeCurrent\(|TimeLocal\(|TimeTradeServer\(|\biClose\(|\biTime\(' && { echo "    live price / clock API in the EA"; bad=1; }
+  echo "$rp" | grep -q 'H4SelectionPrice(g_hist' || { echo "    RefreshPrice must take its price from H4SelectionPrice(g_hist, ...)"; bad=1; }
+  # e) historical mode never passes the raw new_bar to the lifecycle
+  echo "$po" | grep -q 'H4NewBarForLife(g_hist, new_bar)' || { echo "    Poll must pass H4NewBarForLife(g_hist, new_bar)"; bad=1; }
+  echo "$po" | grep -E 'H4LifeDecide' -A2 | grep -qE '[ ,]new_bar,' && { echo "    Poll passes the raw new_bar to H4LifeDecide"; bad=1; }
+  return $bad
+}
+out=$(check_hist_wiring $EA) && echo "  PASS $EA: one copy helper (CopyClosedSet) for RecomputeMap and HistoryProbe; bid read only when !g_hist; new bars gated by H4NewBarForLife" || { echo "$out"; echo "  FAIL historical wiring in $EA"; FAIL=1; }
+grep -q '^input datetime[[:space:]]*InpAsOfTime[[:space:]]*=[[:space:]]*0;' $EA && grep -q 'NOT UTC, NOT TradingView' $EA && echo "  PASS InpAsOfTime input present (default 0) with the broker/server time warning" || { echo "  FAIL InpAsOfTime input or its time-base warning missing"; FAIL=1; }
+# negative controls: each mutation of the EA must be detected
+NEG15=$(mktemp -d)
+sed 's/int got = CopyClosedSet(g_bars, oldest, newest_ok);/int got = CopyRates(g_symbol, PERIOD_H4, 1, g_lookback, g_bars);/' $EA > "$NEG15/m1.mq5"
+check_hist_wiring "$NEG15/m1.mq5" >/dev/null && { echo "  FAIL 15a: a second CopyRates in RecomputeMap was NOT detected"; FAIL=1; } || echo "  PASS 15a: separate CopyRates in RecomputeMap detected"
+sed 's/if(!g_hist) .*$/if(true)/' $EA > "$NEG15/m2.mq5"
+check_hist_wiring "$NEG15/m2.mq5" >/dev/null && { echo "  FAIL 15b: unguarded bid read was NOT detected"; FAIL=1; } || echo "  PASS 15b: bid read without the !g_hist guard detected"
+sed 's/H4NewBarForLife(g_hist, new_bar)/new_bar/' $EA > "$NEG15/m3.mq5"
+check_hist_wiring "$NEG15/m3.mq5" >/dev/null && { echo "  FAIL 15c: raw new_bar in Poll was NOT detected"; FAIL=1; } || echo "  PASS 15c: raw new_bar passed to the lifecycle detected"
+sed 's/double bid = 0.0;/double bid = 0.0; datetime tc = TimeCurrent();/' $EA > "$NEG15/m4.mq5"
+check_hist_wiring "$NEG15/m4.mq5" >/dev/null && { echo "  FAIL 15d: TimeCurrent in the EA was NOT detected"; FAIL=1; } || echo "  PASS 15d: clock API in the EA detected"
+sed 's/H4SelectionPrice(g_hist, g_bars\[g_n - 1\].close, bid, g_price)/bid/' $EA > "$NEG15/m5.mq5"
+check_hist_wiring "$NEG15/m5.mq5" >/dev/null && { echo "  FAIL 15e: price not taken from H4SelectionPrice was NOT detected"; FAIL=1; } || echo "  PASS 15e: price bypassing H4SelectionPrice detected"
+rm -rf "$NEG15"
+
 echo "=== RESULT ==="
 [ $FAIL -eq 0 ] && echo "ALL STATIC CHECKS PASSED (not a compilation, not a runtime test)" || echo "STATIC CHECKS FAILED"
 exit $FAIL

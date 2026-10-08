@@ -350,7 +350,388 @@ void T2LoadCase(const int id, MqlRates &bars[], int &n, int &left, int &right, d
         }
      }
   }
-#define T2_SCN_COUNT 16
+string T2EvidenceExpected(const int id)
+  {
+   switch(id)
+     {
+      case 0: return("only 1 swing high and no swing low => UNKNOWN");
+      case 1: return("no swing high and no swing low => UNKNOWN");
+      case 2: return("no swing high and no swing low => UNKNOWN");
+      case 3: return("no swing high and no swing low => UNKNOWN");
+      case 4: return("no swing high and no swing low => UNKNOWN");
+      case 5: return("no swing high and no swing low => UNKNOWN");
+      case 6: return("no swing high and no swing low => UNKNOWN");
+      case 7: return("no swing high and no swing low => UNKNOWN");
+      case 8: return("no swing high and no swing low => UNKNOWN");
+      case 9: return("no swing high and no swing low => UNKNOWN");
+      case 10: return("no swing high and no swing low => UNKNOWN");
+      case 11: return("no swing high and only 1 swing low => UNKNOWN");
+      case 12: return("no swing high and only 1 swing low => UNKNOWN");
+      case 13: return("no swing high and no swing low => UNKNOWN");
+      case 14: return("only 1 swing high and no swing low => UNKNOWN");
+      case 15: return("only 1 swing high and no swing low => UNKNOWN");
+      case 16: return("highs 2105.00@2026.01.05 12:00 -> 2105.00@2026.01.08 20:00 = EQ; lows 2055.00@2026.01.07 04:00 -> 2035.00@2026.01.11 08:00 = LL => MIXED (EQ is not a trend)");
+      case 17: return("highs 2105.00@2026.01.05 12:00 -> 2117.00@2026.01.09 08:00 = HH; lows 2055.00@2026.01.07 04:00 -> 2035.00@2026.01.12 08:00 = LL => MIXED (highs HH but lows LL)");
+      case 18: return("only 1 swing low => UNKNOWN");
+      case 19: return("highs 2097.00@2026.01.07 20:00 -> 2081.00@2026.01.11 04:00 = LH; lows 2039.00@2026.01.09 20:00 -> 2023.00@2026.01.12 20:00 = LL => BEARISH");
+      case 20: return("highs 2097.00@2026.01.07 20:00 -> 2081.00@2026.01.11 04:00 = LH; lows 2039.00@2026.01.09 20:00 -> 2023.00@2026.01.12 20:00 = LL => BEARISH");
+      case 21: return("highs 2097.00@2026.01.07 20:00 -> 2081.00@2026.01.11 04:00 = LH; lows 2039.00@2026.01.09 20:00 -> 2023.00@2026.01.12 20:00 = LL => BEARISH");
+      case 22: return("highs 2097.00@2026.01.07 20:00 -> 2081.00@2026.01.11 04:00 = LH; lows 2039.00@2026.01.09 20:00 -> 2023.00@2026.01.12 20:00 = LL => BEARISH");
+      case 23: return("highs 2097.00@2026.01.07 20:00 -> 2081.00@2026.01.11 04:00 = LH; lows 2039.00@2026.01.09 20:00 -> 2023.00@2026.01.12 20:00 = LL => BEARISH");
+      case 24: return("highs 2097.00@2026.01.07 20:00 -> 2081.00@2026.01.11 04:00 = LH; lows 2039.00@2026.01.09 20:00 -> 2023.00@2026.01.12 20:00 = LL => BEARISH");
+      case 25: return("highs 2097.00@2026.01.07 20:00 -> 2081.00@2026.01.11 04:00 = LH; lows 2039.00@2026.01.09 20:00 -> 2023.00@2026.01.12 20:00 = LL => BEARISH");
+      case 26: return("highs 2161.00@2026.01.09 20:00 -> 2177.00@2026.01.12 20:00 = HH; lows 2103.00@2026.01.07 20:00 -> 2119.00@2026.01.11 04:00 = HL => BULLISH");
+      case 27: return("highs 2161.00@2026.01.09 20:00 -> 2177.00@2026.01.12 20:00 = HH; lows 2103.00@2026.01.07 20:00 -> 2119.00@2026.01.11 04:00 = HL => BULLISH");
+      case 28: return("highs 2161.00@2026.01.09 20:00 -> 2177.00@2026.01.12 20:00 = HH; lows 2103.00@2026.01.07 20:00 -> 2119.00@2026.01.11 04:00 = HL => BULLISH");
+      case 29: return("highs 2161.00@2026.01.09 20:00 -> 2177.00@2026.01.12 20:00 = HH; lows 2103.00@2026.01.07 20:00 -> 2119.00@2026.01.11 04:00 = HL => BULLISH");
+      case 30: return("highs 2161.00@2026.01.09 20:00 -> 2177.00@2026.01.12 20:00 = HH; lows 2103.00@2026.01.07 20:00 -> 2119.00@2026.01.11 04:00 = HL => BULLISH");
+     }
+   return("");
+  }
+#define T2_ASOF_COUNT 48
+void T2LoadAsOf(const int id, string &name, int &m, int &extra, int &lookback, int &exp_count, string &exp_summary, string &exp_verdict)
+  {
+   switch(id)
+     {
+      case 0:
+        {
+         name = "bear_invalid_eq"; m = 12; extra = 0; lookback = 300; exp_count = 12;
+         exp_summary = "DIR=UNKNOWN;RNG=NONE;H=0.00;L=0.00;K=0;ERL=NA;ERLP=0.00;TT=0;AMB=0;SW=S202601051200H@1767657600:2105.00;FV=F202601052000D:FRESH:NONE:2079.00:2087.00,F202601060000D:FRESH:NONE:2075.00:2083.00;SEL=";
+         exp_verdict = "only 1 swing high and no swing low => UNKNOWN";
+         break;
+        }
+      case 1:
+        {
+         name = "bear_invalid_eq"; m = 27; extra = 0; lookback = 300; exp_count = 27;
+         exp_summary = "DIR=UNKNOWN;RNG=NONE;H=0.00;L=0.00;K=0;ERL=NA;ERLP=0.00;TT=0;AMB=0;SW=S202601051200H@1767657600:2105.00,S202601062000L@1767772800:2055.00,S202601072000H@1767859200:2097.00;FV=F202601052000D:INVALID:NONE:2079.00:2087.00,F202601060000D:INVALID:NONE:2075.00:2083.00,F202601070400U:INVALID:NONE:2073.00:2079.00,F202601070800U:INVALID:NONE:2077.00:2083.00;SEL=";
+         exp_verdict = "only 1 swing low => UNKNOWN";
+         break;
+        }
+      case 2:
+        {
+         name = "bear_invalid_eq"; m = 36; extra = 0; lookback = 300; exp_count = 36;
+         exp_summary = "DIR=BEARISH;RNG=VALID;H=2097.00;L=2039.00;K=1768032000;ERL=UNTOUCHED;ERLP=2039.00;TT=0;AMB=0;SW=S202601051200H@1767657600:2105.00,S202601062000L@1767772800:2055.00,S202601072000H@1767859200:2097.00,S202601092000L@1768032000:2039.00;FV=F202601052000D:INVALID:NONE:2079.00:2087.00,F202601060000D:INVALID:NONE:2075.00:2083.00,F202601070400U:INVALID:NONE:2073.00:2079.00,F202601070800U:INVALID:NONE:2077.00:2083.00;SEL=";
+         exp_verdict = "highs 2105.00@2026.01.05 12:00 -> 2097.00@2026.01.07 20:00 = LH; lows 2055.00@2026.01.06 20:00 -> 2039.00@2026.01.09 20:00 = LL => BEARISH";
+         break;
+        }
+      case 3:
+        {
+         name = "bear_invalid_eq"; m = 53; extra = 0; lookback = 300; exp_count = 53;
+         exp_summary = "DIR=BEARISH;RNG=VALID;H=2081.00;L=2023.00;K=1768291200;ERL=UNTOUCHED;ERLP=2023.00;TT=0;AMB=0;SW=S202601051200H@1767657600:2105.00,S202601062000L@1767772800:2055.00,S202601072000H@1767859200:2097.00,S202601092000L@1768032000:2039.00,S202601110400H@1768147200:2081.00,S202601122000L@1768291200:2023.00;FV=F202601052000D:INVALID:NONE:2079.00:2087.00,F202601060000D:INVALID:NONE:2075.00:2083.00,F202601070400U:INVALID:NONE:2073.00:2079.00,F202601070800U:INVALID:NONE:2077.00:2083.00,F202601111200D:FRESH:IRL:2057.00:2063.00,F202601111600D:TOUCHED:IRL:2053.00:2059.00;SEL=F202601111600D,F202601111200D";
+         exp_verdict = "highs 2097.00@2026.01.07 20:00 -> 2081.00@2026.01.11 04:00 = LH; lows 2039.00@2026.01.09 20:00 -> 2023.00@2026.01.12 20:00 = LL => BEARISH";
+         break;
+        }
+      case 4:
+        {
+         name = "bear_invalid_eq"; m = 55; extra = 0; lookback = 300; exp_count = 55;
+         exp_summary = "DIR=BEARISH;RNG=VALID;H=2081.00;L=2023.00;K=1768291200;ERL=UNTOUCHED;ERLP=2023.00;TT=0;AMB=0;SW=S202601051200H@1767657600:2105.00,S202601062000L@1767772800:2055.00,S202601072000H@1767859200:2097.00,S202601092000L@1768032000:2039.00,S202601110400H@1768147200:2081.00,S202601122000L@1768291200:2023.00;FV=F202601052000D:INVALID:NONE:2079.00:2087.00,F202601060000D:INVALID:NONE:2075.00:2083.00,F202601070400U:INVALID:NONE:2073.00:2079.00,F202601070800U:INVALID:NONE:2077.00:2083.00,F202601111200D:TOUCHED:IRL:2057.00:2063.00,F202601111600D:INVALID:NONE:2053.00:2059.00,F202601131600U:FRESH:OPPOSITE:2053.00:2056.00;SEL=F202601111200D";
+         exp_verdict = "highs 2097.00@2026.01.07 20:00 -> 2081.00@2026.01.11 04:00 = LH; lows 2039.00@2026.01.09 20:00 -> 2023.00@2026.01.12 20:00 = LL => BEARISH";
+         break;
+        }
+      case 5:
+        {
+         name = "bear_invalid_eq"; m = 27; extra = 3600; lookback = 300; exp_count = 27;
+         exp_summary = "DIR=UNKNOWN;RNG=NONE;H=0.00;L=0.00;K=0;ERL=NA;ERLP=0.00;TT=0;AMB=0;SW=S202601051200H@1767657600:2105.00,S202601062000L@1767772800:2055.00,S202601072000H@1767859200:2097.00;FV=F202601052000D:INVALID:NONE:2079.00:2087.00,F202601060000D:INVALID:NONE:2075.00:2083.00,F202601070400U:INVALID:NONE:2073.00:2079.00,F202601070800U:INVALID:NONE:2077.00:2083.00;SEL=";
+         exp_verdict = "only 1 swing low => UNKNOWN";
+         break;
+        }
+      case 6:
+        {
+         name = "bear_invalid_eq"; m = 27; extra = -1; lookback = 300; exp_count = 26;
+         exp_summary = "DIR=UNKNOWN;RNG=NONE;H=0.00;L=0.00;K=0;ERL=NA;ERLP=0.00;TT=0;AMB=0;SW=S202601051200H@1767657600:2105.00,S202601062000L@1767772800:2055.00,S202601072000H@1767859200:2097.00;FV=F202601052000D:INVALID:NONE:2079.00:2087.00,F202601060000D:INVALID:NONE:2075.00:2083.00,F202601070400U:INVALID:NONE:2073.00:2079.00,F202601070800U:INVALID:NONE:2077.00:2083.00;SEL=";
+         exp_verdict = "only 1 swing low => UNKNOWN";
+         break;
+        }
+      case 7:
+        {
+         name = "bear_invalid_eq"; m = 53; extra = 0; lookback = 25; exp_count = 53;
+         exp_summary = "DIR=UNKNOWN;RNG=NONE;H=0.00;L=0.00;K=0;ERL=NA;ERLP=0.00;TT=0;AMB=0;SW=S202601110400H@1768147200:2081.00,S202601122000L@1768291200:2023.00;FV=F202601111200D:FRESH:NONE:2057.00:2063.00,F202601111600D:TOUCHED:NONE:2053.00:2059.00;SEL=";
+         exp_verdict = "only 1 swing high and only 1 swing low => UNKNOWN";
+         break;
+        }
+      case 8:
+        {
+         name = "bull_invalid_eq"; m = 12; extra = 0; lookback = 300; exp_count = 12;
+         exp_summary = "DIR=UNKNOWN;RNG=NONE;H=0.00;L=0.00;K=0;ERL=NA;ERLP=0.00;TT=0;AMB=0;SW=S202601051200L@1767657600:2095.00;FV=F202601052000U:FRESH:NONE:2113.00:2121.00,F202601060000U:FRESH:NONE:2117.00:2125.00;SEL=";
+         exp_verdict = "no swing high and only 1 swing low => UNKNOWN";
+         break;
+        }
+      case 9:
+        {
+         name = "bull_invalid_eq"; m = 27; extra = 0; lookback = 300; exp_count = 27;
+         exp_summary = "DIR=UNKNOWN;RNG=NONE;H=0.00;L=0.00;K=0;ERL=NA;ERLP=0.00;TT=0;AMB=0;SW=S202601051200L@1767657600:2095.00,S202601062000H@1767772800:2145.00,S202601072000L@1767859200:2103.00;FV=F202601052000U:INVALID:NONE:2113.00:2121.00,F202601060000U:INVALID:NONE:2117.00:2125.00,F202601070400D:INVALID:NONE:2121.00:2127.00,F202601070800D:INVALID:NONE:2117.00:2123.00;SEL=";
+         exp_verdict = "only 1 swing high => UNKNOWN";
+         break;
+        }
+      case 10:
+        {
+         name = "bull_invalid_eq"; m = 36; extra = 0; lookback = 300; exp_count = 36;
+         exp_summary = "DIR=BULLISH;RNG=VALID;H=2161.00;L=2103.00;K=1768032000;ERL=UNTOUCHED;ERLP=2161.00;TT=0;AMB=0;SW=S202601051200L@1767657600:2095.00,S202601062000H@1767772800:2145.00,S202601072000L@1767859200:2103.00,S202601092000H@1768032000:2161.00;FV=F202601052000U:INVALID:NONE:2113.00:2121.00,F202601060000U:INVALID:NONE:2117.00:2125.00,F202601070400D:INVALID:NONE:2121.00:2127.00,F202601070800D:INVALID:NONE:2117.00:2123.00;SEL=";
+         exp_verdict = "highs 2145.00@2026.01.06 20:00 -> 2161.00@2026.01.09 20:00 = HH; lows 2095.00@2026.01.05 12:00 -> 2103.00@2026.01.07 20:00 = HL => BULLISH";
+         break;
+        }
+      case 11:
+        {
+         name = "bull_invalid_eq"; m = 53; extra = 0; lookback = 300; exp_count = 53;
+         exp_summary = "DIR=BULLISH;RNG=VALID;H=2177.00;L=2119.00;K=1768291200;ERL=UNTOUCHED;ERLP=2177.00;TT=0;AMB=0;SW=S202601051200L@1767657600:2095.00,S202601062000H@1767772800:2145.00,S202601072000L@1767859200:2103.00,S202601092000H@1768032000:2161.00,S202601110400L@1768147200:2119.00,S202601122000H@1768291200:2177.00;FV=F202601052000U:INVALID:NONE:2113.00:2121.00,F202601060000U:INVALID:NONE:2117.00:2125.00,F202601070400D:INVALID:NONE:2121.00:2127.00,F202601070800D:INVALID:NONE:2117.00:2123.00,F202601111200U:FRESH:IRL:2137.00:2143.00,F202601111600U:TOUCHED:IRL:2141.00:2147.00;SEL=F202601111600U,F202601111200U";
+         exp_verdict = "highs 2161.00@2026.01.09 20:00 -> 2177.00@2026.01.12 20:00 = HH; lows 2103.00@2026.01.07 20:00 -> 2119.00@2026.01.11 04:00 = HL => BULLISH";
+         break;
+        }
+      case 12:
+        {
+         name = "bull_invalid_eq"; m = 55; extra = 0; lookback = 300; exp_count = 55;
+         exp_summary = "DIR=BULLISH;RNG=VALID;H=2177.00;L=2119.00;K=1768291200;ERL=UNTOUCHED;ERLP=2177.00;TT=0;AMB=0;SW=S202601051200L@1767657600:2095.00,S202601062000H@1767772800:2145.00,S202601072000L@1767859200:2103.00,S202601092000H@1768032000:2161.00,S202601110400L@1768147200:2119.00,S202601122000H@1768291200:2177.00;FV=F202601052000U:INVALID:NONE:2113.00:2121.00,F202601060000U:INVALID:NONE:2117.00:2125.00,F202601070400D:INVALID:NONE:2121.00:2127.00,F202601070800D:INVALID:NONE:2117.00:2123.00,F202601111200U:TOUCHED:IRL:2137.00:2143.00,F202601111600U:INVALID:NONE:2141.00:2147.00,F202601131600D:FRESH:OPPOSITE:2144.00:2147.00;SEL=F202601111200U";
+         exp_verdict = "highs 2161.00@2026.01.09 20:00 -> 2177.00@2026.01.12 20:00 = HH; lows 2103.00@2026.01.07 20:00 -> 2119.00@2026.01.11 04:00 = HL => BULLISH";
+         break;
+        }
+      case 13:
+        {
+         name = "bull_invalid_eq"; m = 27; extra = 3600; lookback = 300; exp_count = 27;
+         exp_summary = "DIR=UNKNOWN;RNG=NONE;H=0.00;L=0.00;K=0;ERL=NA;ERLP=0.00;TT=0;AMB=0;SW=S202601051200L@1767657600:2095.00,S202601062000H@1767772800:2145.00,S202601072000L@1767859200:2103.00;FV=F202601052000U:INVALID:NONE:2113.00:2121.00,F202601060000U:INVALID:NONE:2117.00:2125.00,F202601070400D:INVALID:NONE:2121.00:2127.00,F202601070800D:INVALID:NONE:2117.00:2123.00;SEL=";
+         exp_verdict = "only 1 swing high => UNKNOWN";
+         break;
+        }
+      case 14:
+        {
+         name = "bull_invalid_eq"; m = 27; extra = -1; lookback = 300; exp_count = 26;
+         exp_summary = "DIR=UNKNOWN;RNG=NONE;H=0.00;L=0.00;K=0;ERL=NA;ERLP=0.00;TT=0;AMB=0;SW=S202601051200L@1767657600:2095.00,S202601062000H@1767772800:2145.00,S202601072000L@1767859200:2103.00;FV=F202601052000U:INVALID:NONE:2113.00:2121.00,F202601060000U:INVALID:NONE:2117.00:2125.00,F202601070400D:INVALID:NONE:2121.00:2127.00,F202601070800D:INVALID:NONE:2117.00:2123.00;SEL=";
+         exp_verdict = "only 1 swing high => UNKNOWN";
+         break;
+        }
+      case 15:
+        {
+         name = "bull_invalid_eq"; m = 53; extra = 0; lookback = 25; exp_count = 53;
+         exp_summary = "DIR=UNKNOWN;RNG=NONE;H=0.00;L=0.00;K=0;ERL=NA;ERLP=0.00;TT=0;AMB=0;SW=S202601110400L@1768147200:2119.00,S202601122000H@1768291200:2177.00;FV=F202601111200U:FRESH:NONE:2137.00:2143.00,F202601111600U:TOUCHED:NONE:2141.00:2147.00;SEL=";
+         exp_verdict = "only 1 swing high and only 1 swing low => UNKNOWN";
+         break;
+        }
+      case 16:
+        {
+         name = "bear_touched_inside_two"; m = 12; extra = 0; lookback = 300; exp_count = 12;
+         exp_summary = "DIR=UNKNOWN;RNG=NONE;H=0.00;L=0.00;K=0;ERL=NA;ERLP=0.00;TT=0;AMB=0;SW=S202601051200H@1767657600:2105.00;FV=F202601052000D:FRESH:NONE:2079.00:2087.00,F202601060000D:FRESH:NONE:2075.00:2083.00;SEL=";
+         exp_verdict = "only 1 swing high and no swing low => UNKNOWN";
+         break;
+        }
+      case 17:
+        {
+         name = "bear_touched_inside_two"; m = 27; extra = 0; lookback = 300; exp_count = 27;
+         exp_summary = "DIR=UNKNOWN;RNG=NONE;H=0.00;L=0.00;K=0;ERL=NA;ERLP=0.00;TT=0;AMB=0;SW=S202601051200H@1767657600:2105.00,S202601062000L@1767772800:2055.00,S202601072000H@1767859200:2097.00;FV=F202601052000D:INVALID:NONE:2079.00:2087.00,F202601060000D:INVALID:NONE:2075.00:2083.00,F202601070400U:INVALID:NONE:2073.00:2079.00,F202601070800U:INVALID:NONE:2077.00:2083.00;SEL=";
+         exp_verdict = "only 1 swing low => UNKNOWN";
+         break;
+        }
+      case 18:
+        {
+         name = "bear_touched_inside_two"; m = 36; extra = 0; lookback = 300; exp_count = 36;
+         exp_summary = "DIR=BEARISH;RNG=VALID;H=2097.00;L=2039.00;K=1768032000;ERL=UNTOUCHED;ERLP=2039.00;TT=0;AMB=0;SW=S202601051200H@1767657600:2105.00,S202601062000L@1767772800:2055.00,S202601072000H@1767859200:2097.00,S202601092000L@1768032000:2039.00;FV=F202601052000D:INVALID:NONE:2079.00:2087.00,F202601060000D:INVALID:NONE:2075.00:2083.00,F202601070400U:INVALID:NONE:2073.00:2079.00,F202601070800U:INVALID:NONE:2077.00:2083.00;SEL=";
+         exp_verdict = "highs 2105.00@2026.01.05 12:00 -> 2097.00@2026.01.07 20:00 = LH; lows 2055.00@2026.01.06 20:00 -> 2039.00@2026.01.09 20:00 = LL => BEARISH";
+         break;
+        }
+      case 19:
+        {
+         name = "bear_touched_inside_two"; m = 52; extra = 0; lookback = 300; exp_count = 52;
+         exp_summary = "DIR=BEARISH;RNG=VALID;H=2081.00;L=2023.00;K=1768291200;ERL=UNTOUCHED;ERLP=2023.00;TT=0;AMB=0;SW=S202601051200H@1767657600:2105.00,S202601062000L@1767772800:2055.00,S202601072000H@1767859200:2097.00,S202601092000L@1768032000:2039.00,S202601110400H@1768147200:2081.00,S202601122000L@1768291200:2023.00;FV=F202601052000D:INVALID:NONE:2079.00:2087.00,F202601060000D:INVALID:NONE:2075.00:2083.00,F202601070400U:INVALID:NONE:2073.00:2079.00,F202601070800U:INVALID:NONE:2077.00:2083.00,F202601111200D:FRESH:IRL:2057.00:2063.00,F202601111600D:FRESH:IRL:2053.00:2059.00;SEL=F202601111600D,F202601111200D";
+         exp_verdict = "highs 2097.00@2026.01.07 20:00 -> 2081.00@2026.01.11 04:00 = LH; lows 2039.00@2026.01.09 20:00 -> 2023.00@2026.01.12 20:00 = LL => BEARISH";
+         break;
+        }
+      case 20:
+        {
+         name = "bear_touched_inside_two"; m = 54; extra = 0; lookback = 300; exp_count = 54;
+         exp_summary = "DIR=BEARISH;RNG=VALID;H=2081.00;L=2023.00;K=1768291200;ERL=UNTOUCHED;ERLP=2023.00;TT=0;AMB=0;SW=S202601051200H@1767657600:2105.00,S202601062000L@1767772800:2055.00,S202601072000H@1767859200:2097.00,S202601092000L@1768032000:2039.00,S202601110400H@1768147200:2081.00,S202601122000L@1768291200:2023.00;FV=F202601052000D:INVALID:NONE:2079.00:2087.00,F202601060000D:INVALID:NONE:2075.00:2083.00,F202601070400U:INVALID:NONE:2073.00:2079.00,F202601070800U:INVALID:NONE:2077.00:2083.00,F202601111200D:TOUCHED:IRL:2057.00:2063.00,F202601111600D:TOUCHED:IRL:2053.00:2059.00;SEL=F202601111600D,F202601111200D";
+         exp_verdict = "highs 2097.00@2026.01.07 20:00 -> 2081.00@2026.01.11 04:00 = LH; lows 2039.00@2026.01.09 20:00 -> 2023.00@2026.01.12 20:00 = LL => BEARISH";
+         break;
+        }
+      case 21:
+        {
+         name = "bear_touched_inside_two"; m = 27; extra = 3600; lookback = 300; exp_count = 27;
+         exp_summary = "DIR=UNKNOWN;RNG=NONE;H=0.00;L=0.00;K=0;ERL=NA;ERLP=0.00;TT=0;AMB=0;SW=S202601051200H@1767657600:2105.00,S202601062000L@1767772800:2055.00,S202601072000H@1767859200:2097.00;FV=F202601052000D:INVALID:NONE:2079.00:2087.00,F202601060000D:INVALID:NONE:2075.00:2083.00,F202601070400U:INVALID:NONE:2073.00:2079.00,F202601070800U:INVALID:NONE:2077.00:2083.00;SEL=";
+         exp_verdict = "only 1 swing low => UNKNOWN";
+         break;
+        }
+      case 22:
+        {
+         name = "bear_touched_inside_two"; m = 27; extra = -1; lookback = 300; exp_count = 26;
+         exp_summary = "DIR=UNKNOWN;RNG=NONE;H=0.00;L=0.00;K=0;ERL=NA;ERLP=0.00;TT=0;AMB=0;SW=S202601051200H@1767657600:2105.00,S202601062000L@1767772800:2055.00,S202601072000H@1767859200:2097.00;FV=F202601052000D:INVALID:NONE:2079.00:2087.00,F202601060000D:INVALID:NONE:2075.00:2083.00,F202601070400U:INVALID:NONE:2073.00:2079.00,F202601070800U:INVALID:NONE:2077.00:2083.00;SEL=";
+         exp_verdict = "only 1 swing low => UNKNOWN";
+         break;
+        }
+      case 23:
+        {
+         name = "bear_touched_inside_two"; m = 52; extra = 0; lookback = 25; exp_count = 52;
+         exp_summary = "DIR=UNKNOWN;RNG=NONE;H=0.00;L=0.00;K=0;ERL=NA;ERLP=0.00;TT=0;AMB=0;SW=S202601092000L@1768032000:2039.00,S202601110400H@1768147200:2081.00,S202601122000L@1768291200:2023.00;FV=F202601111200D:FRESH:NONE:2057.00:2063.00,F202601111600D:FRESH:NONE:2053.00:2059.00;SEL=";
+         exp_verdict = "only 1 swing high => UNKNOWN";
+         break;
+        }
+      case 24:
+        {
+         name = "bear_base"; m = 12; extra = 0; lookback = 300; exp_count = 12;
+         exp_summary = "DIR=UNKNOWN;RNG=NONE;H=0.00;L=0.00;K=0;ERL=NA;ERLP=0.00;TT=0;AMB=0;SW=S202601051200H@1767657600:2105.00;FV=F202601052000D:FRESH:NONE:2079.00:2087.00,F202601060000D:FRESH:NONE:2075.00:2083.00;SEL=";
+         exp_verdict = "only 1 swing high and no swing low => UNKNOWN";
+         break;
+        }
+      case 25:
+        {
+         name = "bear_base"; m = 25; extra = 0; lookback = 300; exp_count = 25;
+         exp_summary = "DIR=UNKNOWN;RNG=NONE;H=0.00;L=0.00;K=0;ERL=NA;ERLP=0.00;TT=0;AMB=0;SW=S202601051200H@1767657600:2105.00,S202601062000L@1767772800:2055.00,S202601072000H@1767859200:2097.00;FV=F202601052000D:INVALID:NONE:2079.00:2087.00,F202601060000D:INVALID:NONE:2075.00:2083.00,F202601070400U:INVALID:NONE:2073.00:2079.00,F202601070800U:INVALID:NONE:2077.00:2083.00;SEL=";
+         exp_verdict = "only 1 swing low => UNKNOWN";
+         break;
+        }
+      case 26:
+        {
+         name = "bear_base"; m = 33; extra = 0; lookback = 300; exp_count = 33;
+         exp_summary = "DIR=BEARISH;RNG=VALID;H=2097.00;L=2039.00;K=1768032000;ERL=UNTOUCHED;ERLP=2039.00;TT=0;AMB=0;SW=S202601051200H@1767657600:2105.00,S202601062000L@1767772800:2055.00,S202601072000H@1767859200:2097.00,S202601092000L@1768032000:2039.00;FV=F202601052000D:INVALID:NONE:2079.00:2087.00,F202601060000D:INVALID:NONE:2075.00:2083.00,F202601070400U:INVALID:NONE:2073.00:2079.00,F202601070800U:INVALID:NONE:2077.00:2083.00;SEL=";
+         exp_verdict = "highs 2105.00@2026.01.05 12:00 -> 2097.00@2026.01.07 20:00 = LH; lows 2055.00@2026.01.06 20:00 -> 2039.00@2026.01.09 20:00 = LL => BEARISH";
+         break;
+        }
+      case 27:
+        {
+         name = "bear_base"; m = 48; extra = 0; lookback = 300; exp_count = 48;
+         exp_summary = "DIR=BEARISH;RNG=VALID;H=2097.00;L=2039.00;K=1768032000;ERL=TAKEN;ERLP=2039.00;TT=1768190400;AMB=0;SW=S202601051200H@1767657600:2105.00,S202601062000L@1767772800:2055.00,S202601072000H@1767859200:2097.00,S202601092000L@1768032000:2039.00,S202601110400H@1768147200:2081.00;FV=F202601052000D:INVALID:NONE:2079.00:2087.00,F202601060000D:INVALID:NONE:2075.00:2083.00,F202601070400U:INVALID:NONE:2073.00:2079.00,F202601070800U:INVALID:NONE:2077.00:2083.00,F202601111200D:FRESH:IRL:2057.00:2063.00,F202601111600D:FRESH:IRL:2053.00:2059.00;SEL=F202601111600D,F202601111200D";
+         exp_verdict = "highs 2097.00@2026.01.07 20:00 -> 2081.00@2026.01.11 04:00 = LH; lows 2055.00@2026.01.06 20:00 -> 2039.00@2026.01.09 20:00 = LL => BEARISH";
+         break;
+        }
+      case 28:
+        {
+         name = "bear_base"; m = 50; extra = 0; lookback = 300; exp_count = 50;
+         exp_summary = "DIR=BEARISH;RNG=VALID;H=2081.00;L=2023.00;K=1768291200;ERL=UNTOUCHED;ERLP=2023.00;TT=0;AMB=0;SW=S202601051200H@1767657600:2105.00,S202601062000L@1767772800:2055.00,S202601072000H@1767859200:2097.00,S202601092000L@1768032000:2039.00,S202601110400H@1768147200:2081.00,S202601122000L@1768291200:2023.00;FV=F202601052000D:INVALID:NONE:2079.00:2087.00,F202601060000D:INVALID:NONE:2075.00:2083.00,F202601070400U:INVALID:NONE:2073.00:2079.00,F202601070800U:INVALID:NONE:2077.00:2083.00,F202601111200D:FRESH:IRL:2057.00:2063.00,F202601111600D:FRESH:IRL:2053.00:2059.00;SEL=F202601111600D,F202601111200D";
+         exp_verdict = "highs 2097.00@2026.01.07 20:00 -> 2081.00@2026.01.11 04:00 = LH; lows 2039.00@2026.01.09 20:00 -> 2023.00@2026.01.12 20:00 = LL => BEARISH";
+         break;
+        }
+      case 29:
+        {
+         name = "bear_base"; m = 25; extra = 3600; lookback = 300; exp_count = 25;
+         exp_summary = "DIR=UNKNOWN;RNG=NONE;H=0.00;L=0.00;K=0;ERL=NA;ERLP=0.00;TT=0;AMB=0;SW=S202601051200H@1767657600:2105.00,S202601062000L@1767772800:2055.00,S202601072000H@1767859200:2097.00;FV=F202601052000D:INVALID:NONE:2079.00:2087.00,F202601060000D:INVALID:NONE:2075.00:2083.00,F202601070400U:INVALID:NONE:2073.00:2079.00,F202601070800U:INVALID:NONE:2077.00:2083.00;SEL=";
+         exp_verdict = "only 1 swing low => UNKNOWN";
+         break;
+        }
+      case 30:
+        {
+         name = "bear_base"; m = 25; extra = -1; lookback = 300; exp_count = 24;
+         exp_summary = "DIR=UNKNOWN;RNG=NONE;H=0.00;L=0.00;K=0;ERL=NA;ERLP=0.00;TT=0;AMB=0;SW=S202601051200H@1767657600:2105.00,S202601062000L@1767772800:2055.00,S202601072000H@1767859200:2097.00;FV=F202601052000D:INVALID:NONE:2079.00:2087.00,F202601060000D:INVALID:NONE:2075.00:2083.00,F202601070400U:INVALID:NONE:2073.00:2079.00,F202601070800U:INVALID:NONE:2077.00:2083.00;SEL=";
+         exp_verdict = "only 1 swing low => UNKNOWN";
+         break;
+        }
+      case 31:
+        {
+         name = "bear_base"; m = 48; extra = 0; lookback = 25; exp_count = 48;
+         exp_summary = "DIR=UNKNOWN;RNG=NONE;H=0.00;L=0.00;K=0;ERL=NA;ERLP=0.00;TT=0;AMB=0;SW=S202601092000L@1768032000:2039.00,S202601110400H@1768147200:2081.00;FV=F202601111200D:FRESH:NONE:2057.00:2063.00,F202601111600D:FRESH:NONE:2053.00:2059.00;SEL=";
+         exp_verdict = "only 1 swing high and only 1 swing low => UNKNOWN";
+         break;
+        }
+      case 32:
+        {
+         name = "bull_touched_below"; m = 12; extra = 0; lookback = 300; exp_count = 12;
+         exp_summary = "DIR=UNKNOWN;RNG=NONE;H=0.00;L=0.00;K=0;ERL=NA;ERLP=0.00;TT=0;AMB=0;SW=S202601051200L@1767657600:2095.00;FV=F202601052000U:FRESH:NONE:2113.00:2121.00,F202601060000U:FRESH:NONE:2117.00:2125.00;SEL=";
+         exp_verdict = "no swing high and only 1 swing low => UNKNOWN";
+         break;
+        }
+      case 33:
+        {
+         name = "bull_touched_below"; m = 27; extra = 0; lookback = 300; exp_count = 27;
+         exp_summary = "DIR=UNKNOWN;RNG=NONE;H=0.00;L=0.00;K=0;ERL=NA;ERLP=0.00;TT=0;AMB=0;SW=S202601051200L@1767657600:2095.00,S202601062000H@1767772800:2145.00,S202601072000L@1767859200:2103.00;FV=F202601052000U:INVALID:NONE:2113.00:2121.00,F202601060000U:INVALID:NONE:2117.00:2125.00,F202601070400D:INVALID:NONE:2121.00:2127.00,F202601070800D:INVALID:NONE:2117.00:2123.00;SEL=";
+         exp_verdict = "only 1 swing high => UNKNOWN";
+         break;
+        }
+      case 34:
+        {
+         name = "bull_touched_below"; m = 36; extra = 0; lookback = 300; exp_count = 36;
+         exp_summary = "DIR=BULLISH;RNG=VALID;H=2161.00;L=2103.00;K=1768032000;ERL=UNTOUCHED;ERLP=2161.00;TT=0;AMB=0;SW=S202601051200L@1767657600:2095.00,S202601062000H@1767772800:2145.00,S202601072000L@1767859200:2103.00,S202601092000H@1768032000:2161.00;FV=F202601052000U:INVALID:NONE:2113.00:2121.00,F202601060000U:INVALID:NONE:2117.00:2125.00,F202601070400D:INVALID:NONE:2121.00:2127.00,F202601070800D:INVALID:NONE:2117.00:2123.00;SEL=";
+         exp_verdict = "highs 2145.00@2026.01.06 20:00 -> 2161.00@2026.01.09 20:00 = HH; lows 2095.00@2026.01.05 12:00 -> 2103.00@2026.01.07 20:00 = HL => BULLISH";
+         break;
+        }
+      case 35:
+        {
+         name = "bull_touched_below"; m = 52; extra = 0; lookback = 300; exp_count = 52;
+         exp_summary = "DIR=BULLISH;RNG=VALID;H=2177.00;L=2119.00;K=1768291200;ERL=UNTOUCHED;ERLP=2177.00;TT=0;AMB=0;SW=S202601051200L@1767657600:2095.00,S202601062000H@1767772800:2145.00,S202601072000L@1767859200:2103.00,S202601092000H@1768032000:2161.00,S202601110400L@1768147200:2119.00,S202601122000H@1768291200:2177.00;FV=F202601052000U:INVALID:NONE:2113.00:2121.00,F202601060000U:INVALID:NONE:2117.00:2125.00,F202601070400D:INVALID:NONE:2121.00:2127.00,F202601070800D:INVALID:NONE:2117.00:2123.00,F202601111200U:FRESH:IRL:2137.00:2143.00,F202601111600U:FRESH:IRL:2141.00:2147.00;SEL=F202601111600U,F202601111200U";
+         exp_verdict = "highs 2161.00@2026.01.09 20:00 -> 2177.00@2026.01.12 20:00 = HH; lows 2103.00@2026.01.07 20:00 -> 2119.00@2026.01.11 04:00 = HL => BULLISH";
+         break;
+        }
+      case 36:
+        {
+         name = "bull_touched_below"; m = 54; extra = 0; lookback = 300; exp_count = 54;
+         exp_summary = "DIR=BULLISH;RNG=VALID;H=2177.00;L=2119.00;K=1768291200;ERL=UNTOUCHED;ERLP=2177.00;TT=0;AMB=0;SW=S202601051200L@1767657600:2095.00,S202601062000H@1767772800:2145.00,S202601072000L@1767859200:2103.00,S202601092000H@1768032000:2161.00,S202601110400L@1768147200:2119.00,S202601122000H@1768291200:2177.00;FV=F202601052000U:INVALID:NONE:2113.00:2121.00,F202601060000U:INVALID:NONE:2117.00:2125.00,F202601070400D:INVALID:NONE:2121.00:2127.00,F202601070800D:INVALID:NONE:2117.00:2123.00,F202601111200U:TOUCHED:IRL:2137.00:2143.00,F202601111600U:TOUCHED:IRL:2141.00:2147.00;SEL=F202601111600U,F202601111200U";
+         exp_verdict = "highs 2161.00@2026.01.09 20:00 -> 2177.00@2026.01.12 20:00 = HH; lows 2103.00@2026.01.07 20:00 -> 2119.00@2026.01.11 04:00 = HL => BULLISH";
+         break;
+        }
+      case 37:
+        {
+         name = "bull_touched_below"; m = 27; extra = 3600; lookback = 300; exp_count = 27;
+         exp_summary = "DIR=UNKNOWN;RNG=NONE;H=0.00;L=0.00;K=0;ERL=NA;ERLP=0.00;TT=0;AMB=0;SW=S202601051200L@1767657600:2095.00,S202601062000H@1767772800:2145.00,S202601072000L@1767859200:2103.00;FV=F202601052000U:INVALID:NONE:2113.00:2121.00,F202601060000U:INVALID:NONE:2117.00:2125.00,F202601070400D:INVALID:NONE:2121.00:2127.00,F202601070800D:INVALID:NONE:2117.00:2123.00;SEL=";
+         exp_verdict = "only 1 swing high => UNKNOWN";
+         break;
+        }
+      case 38:
+        {
+         name = "bull_touched_below"; m = 27; extra = -1; lookback = 300; exp_count = 26;
+         exp_summary = "DIR=UNKNOWN;RNG=NONE;H=0.00;L=0.00;K=0;ERL=NA;ERLP=0.00;TT=0;AMB=0;SW=S202601051200L@1767657600:2095.00,S202601062000H@1767772800:2145.00,S202601072000L@1767859200:2103.00;FV=F202601052000U:INVALID:NONE:2113.00:2121.00,F202601060000U:INVALID:NONE:2117.00:2125.00,F202601070400D:INVALID:NONE:2121.00:2127.00,F202601070800D:INVALID:NONE:2117.00:2123.00;SEL=";
+         exp_verdict = "only 1 swing high => UNKNOWN";
+         break;
+        }
+      case 39:
+        {
+         name = "bull_touched_below"; m = 52; extra = 0; lookback = 25; exp_count = 52;
+         exp_summary = "DIR=UNKNOWN;RNG=NONE;H=0.00;L=0.00;K=0;ERL=NA;ERLP=0.00;TT=0;AMB=0;SW=S202601092000H@1768032000:2161.00,S202601110400L@1768147200:2119.00,S202601122000H@1768291200:2177.00;FV=F202601111200U:FRESH:NONE:2137.00:2143.00,F202601111600U:FRESH:NONE:2141.00:2147.00;SEL=";
+         exp_verdict = "only 1 swing low => UNKNOWN";
+         break;
+        }
+      case 40:
+        {
+         name = "mixed_expanding"; m = 12; extra = 0; lookback = 300; exp_count = 12;
+         exp_summary = "DIR=UNKNOWN;RNG=NONE;H=0.00;L=0.00;K=0;ERL=NA;ERLP=0.00;TT=0;AMB=0;SW=S202601051200H@1767657600:2105.00;FV=;SEL=";
+         exp_verdict = "only 1 swing high and no swing low => UNKNOWN";
+         break;
+        }
+      case 41:
+        {
+         name = "mixed_expanding"; m = 23; extra = 0; lookback = 300; exp_count = 23;
+         exp_summary = "DIR=UNKNOWN;RNG=NONE;H=0.00;L=0.00;K=0;ERL=NA;ERLP=0.00;TT=0;AMB=0;SW=S202601051200H@1767657600:2105.00,S202601070400L@1767801600:2055.00;FV=;SEL=";
+         exp_verdict = "only 1 swing high and only 1 swing low => UNKNOWN";
+         break;
+        }
+      case 42:
+        {
+         name = "mixed_expanding"; m = 31; extra = 0; lookback = 300; exp_count = 31;
+         exp_summary = "DIR=UNKNOWN;RNG=NONE;H=0.00;L=0.00;K=0;ERL=NA;ERLP=0.00;TT=0;AMB=0;SW=S202601051200H@1767657600:2105.00,S202601070400L@1767801600:2055.00,S202601090800H@1767988800:2117.00;FV=;SEL=";
+         exp_verdict = "only 1 swing low => UNKNOWN";
+         break;
+        }
+      case 43:
+        {
+         name = "mixed_expanding"; m = 45; extra = 0; lookback = 300; exp_count = 45;
+         exp_summary = "DIR=UNKNOWN;RNG=NONE;H=0.00;L=0.00;K=0;ERL=NA;ERLP=0.00;TT=0;AMB=0;SW=S202601051200H@1767657600:2105.00,S202601070400L@1767801600:2055.00,S202601090800H@1767988800:2117.00;FV=;SEL=";
+         exp_verdict = "only 1 swing low => UNKNOWN";
+         break;
+        }
+      case 44:
+        {
+         name = "mixed_expanding"; m = 47; extra = 0; lookback = 300; exp_count = 47;
+         exp_summary = "DIR=MIXED;RNG=NONE;H=0.00;L=0.00;K=0;ERL=NA;ERLP=0.00;TT=0;AMB=0;SW=S202601051200H@1767657600:2105.00,S202601070400L@1767801600:2055.00,S202601090800H@1767988800:2117.00,S202601120800L@1768248000:2035.00;FV=;SEL=";
+         exp_verdict = "highs 2105.00@2026.01.05 12:00 -> 2117.00@2026.01.09 08:00 = HH; lows 2055.00@2026.01.07 04:00 -> 2035.00@2026.01.12 08:00 = LL => MIXED (highs HH but lows LL)";
+         break;
+        }
+      case 45:
+        {
+         name = "mixed_expanding"; m = 23; extra = 3600; lookback = 300; exp_count = 23;
+         exp_summary = "DIR=UNKNOWN;RNG=NONE;H=0.00;L=0.00;K=0;ERL=NA;ERLP=0.00;TT=0;AMB=0;SW=S202601051200H@1767657600:2105.00,S202601070400L@1767801600:2055.00;FV=;SEL=";
+         exp_verdict = "only 1 swing high and only 1 swing low => UNKNOWN";
+         break;
+        }
+      case 46:
+        {
+         name = "mixed_expanding"; m = 23; extra = -1; lookback = 300; exp_count = 22;
+         exp_summary = "DIR=UNKNOWN;RNG=NONE;H=0.00;L=0.00;K=0;ERL=NA;ERLP=0.00;TT=0;AMB=0;SW=S202601051200H@1767657600:2105.00,S202601070400L@1767801600:2055.00;FV=;SEL=";
+         exp_verdict = "only 1 swing high and only 1 swing low => UNKNOWN";
+         break;
+        }
+      case 47:
+        {
+         name = "mixed_expanding"; m = 45; extra = 0; lookback = 25; exp_count = 45;
+         exp_summary = "DIR=UNKNOWN;RNG=NONE;H=0.00;L=0.00;K=0;ERL=NA;ERLP=0.00;TT=0;AMB=0;SW=S202601090800H@1767988800:2117.00;FV=;SEL=";
+         exp_verdict = "only 1 swing high and no swing low => UNKNOWN";
+         break;
+        }
+     }
+  }
+#define T2_SCN_COUNT 22
 void T2LoadScenario(const int id, string &name, ulong &start_ms, int &first, int &last, int &duration, int &acts[], string &expected)
   {
    switch(id)
@@ -510,6 +891,66 @@ void T2LoadScenario(const int id, string &name, ulong &start_ms, int &first, int
          int a[] = {0,9,0,100,0,700};
          name = "i_wrap_while_slow"; start_ms = 4294892296; first = 880; last = 999; duration = 130;
          expected = "t=0 B | t=0 HIST:PARTIAL HISTORY (120 of 300, refreshing) | t=0 MAP:120 | t=3 P | t=6 P | t=9 P | t=12 P | t=15 P | t=18 P | t=21 P | t=24 P | t=27 P | t=30 P | t=33 P | t=36 P | t=39 P | t=42 P | t=45 P | t=48 P | t=51 P | t=54 P | t=57 P | t=60 P | t=60 HIST:PARTIAL HISTORY (120 of 300, loading stalled; retrying) | t=90 P | t=120 P | t=120 B | t=120 HIST:HISTORY COMPLETE (300 of 300) | t=120 MAP:300 | END map=1 drawn=1 noprog=0 text=HISTORY COMPLETE (300 of 300)";
+         ArrayResize(acts, ArraySize(a));
+         for(int k = 0; k < ArraySize(a); k++)
+            acts[k] = a[k];
+         break;
+        }
+      case 16:
+        {
+         int a[] = {0,6,1,30,5,1000,60,5,1001};
+         name = "j1_hist_new_bars_ignored"; start_ms = 100000; first = 700; last = 999; duration = 100;
+         expected = "t=0 B | t=0 HIST:HISTORY COMPLETE (300 of 300) | t=0 MAP:300 | END map=1 drawn=1 noprog=0 text=HISTORY COMPLETE (300 of 300)";
+         ArrayResize(acts, ArraySize(a));
+         for(int k = 0; k < ArraySize(a); k++)
+            acts[k] = a[k];
+         break;
+        }
+      case 17:
+        {
+         int a[] = {0,9,0,30,1,1000,60,1,1001};
+         name = "j2_live_contrast"; start_ms = 100000; first = 700; last = 999; duration = 100;
+         expected = "t=0 B | t=0 HIST:HISTORY COMPLETE (300 of 300) | t=0 MAP:300 | t=30 B | t=30 MAP:300 | t=60 B | t=60 MAP:300 | END map=1 drawn=1 noprog=0 text=HISTORY COMPLETE (300 of 300)";
+         ArrayResize(acts, ArraySize(a));
+         for(int k = 0; k < ArraySize(a); k++)
+            acts[k] = a[k];
+         break;
+        }
+      case 18:
+        {
+         int a[] = {0,6,1,0,5,1010};
+         name = "j3_hist_watcher_ahead_no_clear"; start_ms = 100000; first = 700; last = 999; duration = 100;
+         expected = "t=0 B | t=0 HIST:HISTORY COMPLETE (300 of 300) | t=0 MAP:300 | END map=1 drawn=1 noprog=0 text=HISTORY COMPLETE (300 of 300)";
+         ArrayResize(acts, ArraySize(a));
+         for(int k = 0; k < ArraySize(a); k++)
+            acts[k] = a[k];
+         break;
+        }
+      case 19:
+        {
+         int a[] = {0,6,1,15,0,700};
+         name = "j4_hist_asof_before_history"; start_ms = 100000; first = 1000; last = 999; duration = 40;
+         expected = "t=0 B | t=3 B | t=6 B | t=9 B | t=12 B | t=15 B | t=15 HIST:HISTORY COMPLETE (300 of 300) | t=15 MAP:300 | END map=1 drawn=1 noprog=0 text=HISTORY COMPLETE (300 of 300)";
+         ArrayResize(acts, ArraySize(a));
+         for(int k = 0; k < ArraySize(a); k++)
+            acts[k] = a[k];
+         break;
+        }
+      case 20:
+        {
+         int a[] = {0,6,1,10,5,1000,25,0,700};
+         name = "j5_hist_partial_then_complete"; start_ms = 100000; first = 880; last = 999; duration = 60;
+         expected = "t=0 B | t=0 HIST:PARTIAL HISTORY (120 of 300, refreshing) | t=0 MAP:120 | t=3 P | t=6 P | t=9 P | t=12 P | t=15 P | t=18 P | t=21 P | t=24 P | t=27 P | t=27 B | t=27 HIST:HISTORY COMPLETE (300 of 300) | t=27 MAP:300 | END map=1 drawn=1 noprog=0 text=HISTORY COMPLETE (300 of 300)";
+         ArrayResize(acts, ArraySize(a));
+         for(int k = 0; k < ArraySize(a); k++)
+            acts[k] = a[k];
+         break;
+        }
+      case 21:
+        {
+         int a[] = {0,6,1,16,2,0,30,2,1};
+         name = "j6_hist_series_not_ready"; start_ms = 100000; first = 700; last = 999; duration = 60;
+         expected = "t=0 B | t=0 HIST:HISTORY COMPLETE (300 of 300) | t=0 MAP:300 | t=16 CLEAR:H4 series not ready: SIM | t=30 B | t=30 REBUILT:H4 series not ready: SIM | t=30 MAP:300 | END map=1 drawn=1 noprog=0 text=HISTORY COMPLETE (300 of 300)";
          ArrayResize(acts, ArraySize(a));
          for(int k = 0; k < ArraySize(a); k++)
             acts[k] = a[k];
@@ -883,7 +1324,8 @@ void TestPureDecisions(void)
 
 SH4Life g_lf;
 int     s_first = 0, s_last = 0, s_seen = -1, s_t = 0;
-bool    s_ready = true, s_fail = false, s_mismatch = false, s_drawn = false;
+bool    s_ready = true, s_fail = false, s_mismatch = false, s_drawn = false, s_hist = false;
+int     s_wlast = 0;
 ulong   s_start = 0;
 string  s_ev = "";
 
@@ -909,8 +1351,16 @@ void T2SimCopy(const string kind_char, int &got, datetime &oldest, bool &newest_
       return;
      }
    got = MathMin(T2_LOOKBACK, s_last - s_first + 1);
+   if(got <= 0)
+     {
+      got = 0;                 // no closed bar in range (as-of before the history)
+      oldest = 0;
+      newest_ok = false;
+      return;
+     }
+   datetime watcher_open = T2SimTime(s_wlast) + (datetime)(s_mismatch ? T2_PERIOD : 0);
    oldest = T2SimTime(s_last - got + 1);
-   newest_ok = !s_mismatch;
+   newest_ok = H4NewestOk(s_hist, T2SimTime(s_last), watcher_open);
   }
 
 void T2Apply(const SH4LifeOut &o)
@@ -962,13 +1412,14 @@ void T2SimPoll(const int t)
    bool new_bar = false;
    if(s_ready)
      {
-      new_bar = (s_seen >= 0 && s_last > s_seen);
-      s_seen = s_last;
+      new_bar = (s_seen >= 0 && s_wlast > s_seen);
+      s_seen = s_wlast;
      }
    ulong full = s_start + (ulong)t * 1000;
    uint now_ms = (uint)(full % (ulong)4294967296);
    SH4LifeOut o;
-   H4LifeDecide(g_lf, s_ready, "H4 series not ready: SIM", new_bar, now_ms, T2_LOOKBACK, o);
+   H4LifeDecide(g_lf, s_ready, "H4 series not ready: SIM", H4NewBarForLife(s_hist, new_bar),
+                now_ms, T2_LOOKBACK, o);
    T2Apply(o);
    if(s_ready)
      {
@@ -980,7 +1431,7 @@ void T2SimPoll(const int t)
      }
   }
 
-//--- ops: 0 first, 1 last, 2 ready, 3 fail, 4 mismatch, 9 nop
+//--- ops: 0 first, 1 last, 2 ready, 3 fail, 4 mismatch, 5 watcher last, 6 historical mode, 9 nop
 string T2RunScenario(const int id, string &name, string &expected)
   {
    ulong start_ms;
@@ -990,6 +1441,8 @@ string T2RunScenario(const int id, string &name, string &expected)
    H4LifeInit(g_lf);
    s_first = first;
    s_last = last;
+   s_wlast = last;
+   s_hist = false;
    s_seen = -1;
    s_ready = true;
    s_fail = false;
@@ -1004,20 +1457,20 @@ string T2RunScenario(const int id, string &name, string &expected)
            {
             int op = acts[i + 1];
             int val = acts[i + 2];
-            if(op == 0)
-               s_first = val;
-            else
-               if(op == 1)
+            switch(op)
+              {
+               case 0: s_first = val; break;
+               case 1:
                   s_last = val;
-               else
-                  if(op == 2)
-                     s_ready = (val != 0);
-                  else
-                     if(op == 3)
-                        s_fail = (val != 0);
-                     else
-                        if(op == 4)
-                           s_mismatch = (val != 0);
+                  if(!s_hist)
+                     s_wlast = val;
+                  break;
+               case 2: s_ready = (val != 0); break;
+               case 3: s_fail = (val != 0); break;
+               case 4: s_mismatch = (val != 0); break;
+               case 5: s_wlast = val; break;
+               case 6: s_hist = (val != 0); break;
+              }
            }
       T2SimPoll(t);
      }
@@ -1056,6 +1509,358 @@ void TestLifecycle(void)
    Check(StringFind(trs[10], "t=30 CLEAR:newest copied bar does not match the watcher") >= 0, "(f) mismatch clears the map");
    Check(StringFind(trs[11], "t=0 B | t=0 HIST:HISTORY COMPLETE (300 of 300) | t=0 MAP:300 | END") >= 0, "(g) complete history: a single copy in 600 s");
    Check(trs[13] == trs[14] && trs[13] == trs[15], "(i) unsigned tick arithmetic: wrapped runs equal the unwrapped run");
+   //--- historical review scenarios (indexes 16..21 = j1..j6)
+   Check(StringFind(trs[16], "t=0 B | t=0 HIST:HISTORY COMPLETE (300 of 300) | t=0 MAP:300 | END map=1") >= 0 &&
+         StringFind(trs[16], "t=30") < 0 && StringFind(trs[16], "t=60") < 0, "(j1) historical: new bars do not recompute or redraw");
+   Check(StringFind(trs[17], "t=30 B | t=30 MAP:300 | t=60 B | t=60 MAP:300") >= 0, "(j2) live contrast: new bars rebuild");
+   Check(StringFind(trs[18], "CLEAR") < 0 && StringFind(trs[18], "END map=1 drawn=1") >= 0, "(j3) historical: watcher ahead of the as-of set never clears the map");
+   Check(StringFind(trs[19], "t=15 B | t=15 HIST:HISTORY COMPLETE (300 of 300) | t=15 MAP:300") >= 0 && StringFind(trs[19], "CLEAR") < 0,
+         "(j4) as-of before the history: rebuilt when the history completes");
+   Check(StringFind(trs[20], "t=27 P | t=27 B | t=27 HIST:HISTORY COMPLETE (300 of 300) | t=27 MAP:300") >= 0, "(j5) partial history completes in historical mode");
+   Check(StringFind(trs[21], "t=16 CLEAR:H4 series not ready: SIM") >= 0 && StringFind(trs[21], "t=30 REBUILT:H4 series not ready: SIM") >= 0,
+         "(j6) series not ready clears and rebuilds in historical mode");
+  }
+
+//--- 9. historical review (as-of): filter, no look-ahead, price, direction evidence.
+//--- Twin of test_asof_filter / test_asof_no_lookahead / test_asof_price /
+//--- test_direction_evidence in tests/t002_reference_test.py.
+#define T2_MIRROR 4200.0
+
+void TestAsOfFilter(void)
+  {
+   Print("--- as-of filter (H4ClosedCountAsOf and helpers)");
+   double d[30];
+   for(int i = 0; i < 10; i++)
+     {
+      d[3 * i]     = 10.0 + i;
+      d[3 * i + 1] = 5.0 + i;
+      d[3 * i + 2] = 7.5 + i;
+     }
+   MqlRates bars[];
+   T2FillBars(d, 10, bars);
+   Check(H4ClosedCountAsOf(bars, 10, bars[5].time + T2_PERIOD, T2_PERIOD) == 6, "bar closing exactly at AsOfTime is included");
+   Check(H4ClosedCountAsOf(bars, 10, bars[5].time + T2_PERIOD - 1, T2_PERIOD) == 5, "bar closing 1 s after AsOfTime is excluded");
+   Check(H4ClosedCountAsOf(bars, 10, bars[6].time, T2_PERIOD) == 6, "bar opening exactly at AsOfTime is excluded");
+   Check(H4ClosedCountAsOf(bars, 10, bars[5].time + 3600, T2_PERIOD) == 5, "AsOfTime in the middle of bar 5: bar 5 excluded");
+   Check(H4ClosedCountAsOf(bars, 10, bars[0].time, T2_PERIOD) == 0, "AsOfTime at the open of the first bar -> 0");
+   Check(H4ClosedCountAsOf(bars, 10, T2Base() - 10 * T2_PERIOD, T2_PERIOD) == 0, "AsOfTime before all history -> 0");
+   Check(H4ClosedCountAsOf(bars, 10, bars[0].time + T2_PERIOD - 1, T2_PERIOD) == 0, "AsOfTime 1 s before the first close -> 0");
+   Check(H4ClosedCountAsOf(bars, 10, bars[0].time + T2_PERIOD, T2_PERIOD) == 1, "AsOfTime exactly at the first close -> 1");
+   Check(H4ClosedCountAsOf(bars, 10, T2Base() + 1000000000, T2_PERIOD) == 10, "AsOfTime far in the future -> all bars");
+   Check(H4ClosedCountAsOf(bars, 0, T2Base() + 1000000000, T2_PERIOD) == 0, "no bars -> 0");
+   Check(H4ClosedCountAsOf(bars, 4, T2Base() + 1000000000, T2_PERIOD) == 4, "only the first n bars are looked at");
+   Check(H4ClosedCountAsOf(bars, 10, bars[2].time + 3600, 3600) == 3, "period is a parameter");
+   int prev = -1;
+   bool mono = true;
+   for(int k = 0; k < 12 * T2_PERIOD; k += 1800)
+     {
+      int c = H4ClosedCountAsOf(bars, 10, T2Base() + k, T2_PERIOD);
+      mono = mono && c >= prev && c <= 10;
+      prev = c;
+     }
+   Check(mono, "count never decreases as AsOfTime grows");
+   datetime ft = T2Base() + 7 * T2_PERIOD;
+   Check(H4EffectiveAsOf(T2Base() + 100 * T2_PERIOD, ft) == ft, "AsOfTime in the future is capped at the forming bar open");
+   Check(H4EffectiveAsOf(T2Base() + 3 * T2_PERIOD, ft) == T2Base() + 3 * T2_PERIOD, "AsOfTime in the past is kept");
+   Check(H4EffectiveAsOf(T2Base() + 3 * T2_PERIOD, 0) == T2Base() + 3 * T2_PERIOD, "unknown forming bar -> no cap");
+   Check(H4ClosedCountAsOf(bars, 10, H4EffectiveAsOf(T2Base() + 1000000000, bars[7].time), T2_PERIOD) == 7,
+         "future AsOfTime never counts the forming bar");
+   Check(H4AsOfSetStart(300, 300) == 0 && H4AsOfSetStart(10, 300) == 0 && H4AsOfSetStart(350, 300) == 50 &&
+         H4AsOfSetStart(301, 300) == 1, "set clipped to the newest lookback closed bars");
+  }
+
+//--- bars[0..cnt-1] kept; every later bar replaced; 6 more garbage bars appended
+void T2Garbage(const MqlRates &bars[], const int n, const int cnt, const int variant, MqlRates &out[])
+  {
+   ArrayResize(out, n + 6);
+   for(int j = 0; j < n + 6; j++)
+     {
+      if(j < cnt)
+        {
+         out[j] = bars[j];
+         continue;
+        }
+      out[j].time = T2Base() + (datetime)(j * T2_PERIOD);
+      if(variant == 0)
+        {
+         out[j].high  = 99999.0 + j;
+         out[j].low   = -99999.0;
+         out[j].close = (j % 2 == 0 ? 99999.0 : -99999.0);
+        }
+      else
+         if(j < n)
+           {
+            out[j].high  = T2_MIRROR - bars[j].low;
+            out[j].low   = T2_MIRROR - bars[j].high;
+            out[j].close = T2_MIRROR - bars[j].close;
+           }
+         else
+           {
+            double k = (j - n + 1) * 50.0;
+            out[j].high  = 6000.0 + k + 5.0;
+            out[j].low   = 6000.0 + k - 5.0;
+            out[j].close = 6000.0 + k;
+           }
+      out[j].open = out[j].close;
+     }
+  }
+
+//--- the EA's historical path without the CopyRates call: filter, clip, analyse,
+//--- summary with the historical price (close of the last bar of the set)
+bool T2AsOfRun(const MqlRates &src[], const int srcn, const datetime asof, const int lb,
+               const int l, const int r, string &summ, string &verdict, int &closed, int &dir_res, int &dir_ev)
+  {
+   closed = H4ClosedCountAsOf(src, srcn, asof, T2_PERIOD);
+   if(closed <= 0)
+      return(false);
+   int start = H4AsOfSetStart(closed, lb);
+   int cnt = closed - start;
+   MqlRates st[];
+   ArrayResize(st, cnt);
+   for(int i = 0; i < cnt; i++)
+      st[i] = src[start + i];
+   SH4Swing sw[];
+   SH4Fvg fv[];
+   SH4Result res;
+   int ns, nf;
+   H4Analyze(st, cnt, l, r, T2_PERIOD, sw, ns, fv, nf, res);
+   double price = H4SelectionPrice(true, st[cnt - 1].close, 0.0, 0.0);
+   summ = H4Summary(sw, ns, fv, nf, res, price);
+   SH4DirEvidence ev;
+   H4DirectionEvidence(sw, ns, 2, ev);
+   verdict = ev.verdict;
+   dir_res = res.direction;
+   dir_ev = ev.direction;
+   return(true);
+  }
+
+void TestAsOfNoLookahead(void)
+  {
+   Print("--- as-of path: no look-ahead (truncated series == full series with garbage after AsOfTime)");
+   for(int id = 0; id < T2_ASOF_COUNT; id++)
+     {
+      string name, exp_sum, exp_ver;
+      int m, extra, lb, exp_cnt;
+      T2LoadAsOf(id, name, m, extra, lb, exp_cnt, exp_sum, exp_ver);
+      int ci = T2FindCase(name);
+      if(ci < 0)
+        {
+         Check(false, "case found: " + name);
+         continue;
+        }
+      MqlRates bars[];
+      int n, l, r;
+      double price;
+      string nm, ex;
+      T2LoadCase(ci, bars, n, l, r, price, nm, ex);
+      datetime asof = bars[m - 1].time + T2_PERIOD + extra;
+      bool ok = true;
+      for(int variant = 0; variant < 2; variant++)
+        {
+         MqlRates g[];
+         T2Garbage(bars, n, exp_cnt, variant, g);
+         string sm, vd;
+         int closed, dr, de;
+         bool got = T2AsOfRun(g, ArraySize(g), asof, lb, l, r, sm, vd, closed, dr, de);
+         ok = ok && got && closed == exp_cnt && sm == exp_sum && vd == exp_ver && dr == de;
+        }
+      //--- plain truncated series, no as-of function
+      int s0 = (exp_cnt > lb ? exp_cnt - lb : 0);
+      MqlRates tr[];
+      ArrayResize(tr, exp_cnt - s0);
+      for(int i = s0; i < exp_cnt; i++)
+         tr[i - s0] = bars[i];
+      SH4Swing tsw[];
+      SH4Fvg tfv[];
+      SH4Result tres;
+      int tns, tnf;
+      H4Analyze(tr, exp_cnt - s0, l, r, T2_PERIOD, tsw, tns, tfv, tnf, tres);
+      ok = ok && (H4Summary(tsw, tns, tfv, tnf, tres, tr[exp_cnt - s0 - 1].close) == exp_sum);
+      Check(ok, StringFormat("as-of %s m=%d extra=%d lookback=%d: result == truncated == Python model, garbage ignored",
+                             name, m, extra, lb));
+     }
+  }
+
+void TestAsOfPrice(void)
+  {
+   Print("--- historical price = close of the last closed bar; a live bid never changes the selection");
+   int ci = T2FindCase("bear_touched_inside_two");
+   MqlRates bars[];
+   int n, l, r;
+   double price;
+   string nm, ex;
+   T2LoadCase(ci, bars, n, l, r, price, nm, ex);
+   SH4Swing sw[];
+   SH4Fvg fv[];
+   SH4Result res;
+   int ns, nf;
+   H4Analyze(bars, n, l, r, T2_PERIOD, sw, ns, fv, nf, res);
+   double last_close = bars[n - 1].close;
+   double bids[] = {0.0, -1.0, 1.0, 2036.0, 2055.0, 2058.0, 2070.0, 1000000.0};
+   string base = H4Summary(sw, ns, fv, nf, res, H4SelectionPrice(true, last_close, 0.0, 0.0));
+   bool same = true;
+   for(int i = 0; i < ArraySize(bids); i++)
+     {
+      double p = H4SelectionPrice(true, last_close, bids[i], 1234.5);
+      same = same && p == last_close && H4Summary(sw, ns, fv, nf, res, p) == base;
+     }
+   Check(same, "historical selection identical for any live bid");
+   Check(H4SelectionPrice(false, 99.0, 2055.0, 1.0) == 2055.0 && H4SelectionPrice(false, 99.0, 0.0, 7.5) == 7.5 &&
+         H4SelectionPrice(false, 99.0, -3.0, 7.5) == 7.5, "live mode keeps bid (previous price when bid is invalid)");
+   int o1[], o3[];
+   int c1 = H4SelectIrl(fv, nf, res, 2055.0, o1);
+   int c3 = H4SelectIrl(fv, nf, res, 2070.0, o3);
+   Check(c1 > 0 && c3 == 0, "sanity: the selection depends on the price, so the bid test has power");
+  }
+
+string T2Verdict(const SH4Swing &sw[], const int ns)
+  {
+   SH4DirEvidence ev;
+   H4DirectionEvidence(sw, ns, 2, ev);
+   return(ev.verdict);
+  }
+
+//--- every generated case: verdict text equals the Python model's, and on every
+//--- prefix of every case the evidence direction equals H4DeriveDirection
+void T2EvidenceSweep(bool &all_text, bool &all_dir, int &prefixes)
+  {
+   all_text = true;
+   all_dir = true;
+   prefixes = 0;
+   for(int i = 0; i < T2_CASE_COUNT; i++)
+     {
+      MqlRates cb[];
+      int cn, cl, cr;
+      double cp;
+      string cnm, cex;
+      T2LoadCase(i, cb, cn, cl, cr, cp, cnm, cex);
+      SH4Swing csw[];
+      SH4Fvg cfv[];
+      SH4Result cres;
+      int cns, cnf;
+      H4Analyze(cb, cn, cl, cr, T2_PERIOD, csw, cns, cfv, cnf, cres);
+      if(T2Verdict(csw, cns) != T2EvidenceExpected(i))
+        {
+         all_text = false;
+         PrintFormat("    verdict mismatch in %s: got '%s' expected '%s'", cnm, T2Verdict(csw, cns), T2EvidenceExpected(i));
+        }
+      for(int k = 1; k <= cn; k++)
+        {
+         SH4Swing psw[];
+         SH4Fvg pfv[];
+         SH4Result pres;
+         int pns, pnf;
+         H4Analyze(cb, k, cl, cr, T2_PERIOD, psw, pns, pfv, pnf, pres);
+         SH4DirEvidence pev;
+         H4DirectionEvidence(psw, pns, 2, pev);
+         prefixes++;
+         if(pev.direction != pres.direction || pev.direction != H4DeriveDirection(psw, pns))
+            all_dir = false;
+        }
+     }
+  }
+
+void TestDirectionEvidence(void)
+  {
+   Print("--- direction evidence");
+   bool all_text, all_dir;
+   int prefixes;
+   T2EvidenceSweep(all_text, all_dir, prefixes);
+   Check(all_text, "verdict text equals the Python model for all generated cases");
+   Check(all_dir, StringFormat("evidence direction == H4DeriveDirection on %d prefixes of all cases", prefixes));
+
+   int id = T2FindCase("bear_base");
+   MqlRates b[];
+   int n, l, r;
+   double price;
+   string nm, ex;
+   T2LoadCase(id, b, n, l, r, price, nm, ex);
+   SH4Swing sw[];
+   SH4Fvg fv[];
+   SH4Result res;
+   int ns, nf;
+   H4Analyze(b, n, l, r, T2_PERIOD, sw, ns, fv, nf, res);
+   SH4DirEvidence ev;
+   H4DirectionEvidence(sw, ns, 2, ev);
+   Check(ev.direction == H4_DIR_BEARISH && ev.h_cmp == H4_CMP_LOWER && ev.l_cmp == H4_CMP_LOWER &&
+         ev.h_old < ev.h_new && ev.l_old < ev.l_new && ev.h_old_pivot < ev.h_new_pivot && ev.l_old_pivot < ev.l_new_pivot,
+         "bear_base: BEARISH, LH + LL, swings older -> newer");
+   Check(ev.h_new_price == sw[ev.h_new].price && ev.h_new_pivot == sw[ev.h_new].pivot_time &&
+         ev.h_new_confirm == sw[ev.h_new].confirm_time && ev.l_old_price == sw[ev.l_old].price,
+         "price, pivot_time and confirm_time are carried");
+   int tagged = 0;
+   for(int i = 0; i < ns; i++)
+      if(H4IsDirSwing(ev, i))
+         tagged++;
+   Check(tagged == 4 && !H4IsDirSwing(ev, -1), "exactly four swings are tagged dir");
+   id = T2FindCase("bull_base");
+   T2LoadCase(id, b, n, l, r, price, nm, ex);
+   H4Analyze(b, n, l, r, T2_PERIOD, sw, ns, fv, nf, res);
+   H4DirectionEvidence(sw, ns, 2, ev);
+   Check(ev.direction == H4_DIR_BULLISH && ev.h_cmp == H4_CMP_HIGHER && ev.l_cmp == H4_CMP_HIGHER, "bull_base: BULLISH, HH + HL");
+
+   //--- synthetic swing lists: ties, opposite pairs, too few swings
+   SH4Swing s1[];
+   ArrayResize(s1, 4);
+   s1[0] = T2MkSwing(true, 3, 110);  s1[1] = T2MkSwing(false, 6, 100);
+   s1[2] = T2MkSwing(true, 9, 105);  s1[3] = T2MkSwing(false, 12, 100);
+   H4DirectionEvidence(s1, 4, 2, ev);
+   Check(ev.direction == H4_DIR_MIXED && ev.l_cmp == H4_CMP_EQUAL && H4DeriveDirection(s1, 4) == H4_DIR_MIXED &&
+         StringFind(ev.verdict, "= EQ => MIXED (EQ is not a trend)") >= 0, "tie on the lows -> EQ -> MIXED");
+   s1[1] = T2MkSwing(false, 6, 90);  s1[3] = T2MkSwing(false, 12, 95);
+   H4DirectionEvidence(s1, 4, 2, ev);
+   Check(ev.direction == H4_DIR_MIXED && H4DeriveDirection(s1, 4) == H4_DIR_MIXED &&
+         StringFind(ev.verdict, "= HL => MIXED (highs LH but lows HL)") >= 0, "opposite pairs: highs LH, lows HL -> MIXED");
+   s1[0] = T2MkSwing(true, 3, 110);  s1[2] = T2MkSwing(true, 9, 115);  s1[3] = T2MkSwing(false, 12, 85);
+   H4DirectionEvidence(s1, 4, 2, ev);
+   Check(ev.direction == H4_DIR_MIXED && StringFind(ev.verdict, "(highs HH but lows LL)") >= 0, "opposite pairs: highs HH, lows LL -> MIXED");
+   s1[2] = T2MkSwing(true, 9, 110);  s1[3] = T2MkSwing(false, 12, 90);
+   H4DirectionEvidence(s1, 4, 2, ev);
+   Check(ev.direction == H4_DIR_MIXED && ev.h_cmp == H4_CMP_EQUAL && ev.l_cmp == H4_CMP_EQUAL, "all four equal -> MIXED");
+   SH4Swing s2[];
+   ArrayResize(s2, 3);
+   s2[0] = T2MkSwing(false, 3, 90);  s2[1] = T2MkSwing(true, 6, 110);  s2[2] = T2MkSwing(false, 9, 85);
+   H4DirectionEvidence(s2, 3, 2, ev);
+   Check(ev.direction == H4_DIR_UNKNOWN && ev.verdict == "only 1 swing high => UNKNOWN", "only 1 swing high => UNKNOWN");
+   H4DirectionEvidence(s2, 0, 2, ev);
+   Check(ev.direction == H4_DIR_UNKNOWN && ev.verdict == "no swing high and no swing low => UNKNOWN", "no swings => UNKNOWN");
+
+   //--- deterministic random sweep (ties are common): never disagrees with H4DeriveDirection
+   long seed = 12345;
+   int bad = 0;
+   bool seen[4];
+   seen[0] = seen[1] = seen[2] = seen[3] = false;
+   for(int it = 0; it < 4000; it++)
+     {
+      seed = (seed * 1103515245 + 12345) & 0x7FFFFFFF;
+      int len = (int)((seed >> 8) % 9);
+      SH4Swing rs[];
+      ArrayResize(rs, len);
+      for(int j = 0; j < len; j++)
+        {
+         seed = (seed * 1103515245 + 12345) & 0x7FFFFFFF;
+         bool hi = (((seed >> 5) & 1) == 1);
+         double pr = 100.0 + (double)((seed >> 9) % 4);
+         rs[j] = T2MkSwing(hi, 3 * j, pr);
+        }
+      H4DirectionEvidence(rs, len, 2, ev);
+      if(ev.direction != H4DeriveDirection(rs, len))
+         bad++;
+      seen[ev.direction] = true;
+     }
+   Check(bad == 0 && seen[0] && seen[1] && seen[2] && seen[3], "evidence direction == H4DeriveDirection on 4000 random swing lists, all outcomes occur");
+  }
+
+void TestHistoricalPure(void)
+  {
+   Print("--- historical lifecycle helpers");
+   datetime w = T2Base() + 1010 * T2_PERIOD;
+   datetime a = T2Base() + 999 * T2_PERIOD;
+   Check(!H4NewestOk(false, a, w) && H4NewestOk(true, a, w), "live newest==watcher fails for an as-of set; historical accepts it");
+   Check(H4NewestOk(true, a, a) && !H4NewestOk(true, w + T2_PERIOD, w) && H4NewestOk(true, a, 0) && H4NewestOk(false, a, 0) &&
+         H4NewestOk(false, a, a), "newest-bar test: historical newest <= watcher, unknown watcher accepts");
+   Check(H4NewBarForLife(false, true) && !H4NewBarForLife(true, true) && !H4NewBarForLife(false, false) && !H4NewBarForLife(true, false),
+         "new_bar reaches the lifecycle only in live mode");
   }
 
 void OnStart(void)
@@ -1072,6 +1877,11 @@ void OnStart(void)
    TestIds();
    TestPureDecisions();
    TestLifecycle();
+   TestAsOfFilter();
+   TestAsOfNoLookahead();
+   TestAsOfPrice();
+   TestDirectionEvidence();
+   TestHistoricalPure();
    PrintFormat("T002 LOGIC TEST finished: %d passed, %d failed", g_pass, g_fail);
   }
 //+------------------------------------------------------------------+

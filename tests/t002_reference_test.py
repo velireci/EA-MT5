@@ -10,6 +10,10 @@ IMPORTANT - what this file proves and what it does not:
   * The rules tested are developer proposals awaiting client validation,
     not client answers.
 
+Historical review (AsOfTime) is modelled too: as-of filter, no-look-ahead of the
+as-of path, historical price, direction evidence and the static-map lifecycle.
+The CopyRates call itself (CopyClosedSet in the EA) cannot be modelled.
+
 Usage:
   python3 tests/t002_reference_test.py              run all tests
   python3 tests/t002_reference_test.py --emit-mql   print the generated case
@@ -446,6 +450,171 @@ def map_transition(had_map, build_ok):
     return ACT_REBUILT if build_ok else ACT_NONE
 
 
+# ---- historical review (as-of) helpers: mirror of section 10 of
+# ---- src/include/H4Structure.mqh (H4ClosedCountAsOf, H4EffectiveAsOf,
+# ---- H4AsOfSetStart, H4NewestOk, H4NewBarForLife, H4SelectionPrice).
+def closed_count_asof(bars, n, asof, period):
+    """leading bars (chronological) with open + period <= asof"""
+    c = 0
+    for i in range(n):
+        if bars[i].time + period > asof:
+            break
+        c += 1
+    return c
+
+
+def effective_asof(asof, forming_open):
+    if forming_open > 0 and forming_open < asof:
+        return forming_open
+    return asof
+
+
+def asof_set_start(closed, lookback):
+    if lookback > 0 and closed > lookback:
+        return closed - lookback
+    return 0
+
+
+def newest_ok(historical, newest_time, watcher_closed_open):
+    if watcher_closed_open == 0:
+        return True
+    if historical:
+        return newest_time <= watcher_closed_open
+    return newest_time == watcher_closed_open
+
+
+def new_bar_for_life(historical, new_bar):
+    return (not historical) and new_bar
+
+
+def selection_price(historical, last_closed_close, bid, prev_price):
+    if historical:
+        return last_closed_close
+    if bid > 0.0:
+        return bid
+    return prev_price
+
+
+def asof_set(bars, asof, lookback, period=PERIOD):
+    """Python twin of the post-copy part of CopyClosedSet: the closed-by-asof
+    prefix, clipped to the newest `lookback` bars. Returns (set, closed)."""
+    closed = closed_count_asof(bars, len(bars), asof, period)
+    start = asof_set_start(closed, lookback)
+    return list(bars[start:closed]), closed
+
+
+def asof_analysis(bars, asof, lookback, left=2, right=2, period=PERIOD):
+    """what the EA analyses in historical mode: (analysis, set, price)"""
+    st, _ = asof_set(bars, asof, lookback, period)
+    if not st:
+        return None, st, 0.0
+    price = selection_price(True, st[-1].close, 0.0, 0.0)
+    return analyze(st, len(st), left, right, period), st, price
+
+
+# ---- direction evidence: mirror of H4DirectionEvidence (section 11).
+CMP_NONE, CMP_HIGHER, CMP_LOWER, CMP_EQUAL = 0, 1, 2, 3
+
+
+def time_text(t):
+    return time.strftime('%Y.%m.%d %H:%M', time.gmtime(t))
+
+
+def cmp_name(highs, c):
+    if c == CMP_EQUAL:
+        return 'EQ'
+    if c == CMP_HIGHER:
+        return 'HH' if highs else 'HL'
+    if c == CMP_LOWER:
+        return 'LH' if highs else 'LL'
+    return 'n/a'
+
+
+def compare(older, newer):
+    if newer > older:
+        return CMP_HIGHER
+    if newer < older:
+        return CMP_LOWER
+    return CMP_EQUAL
+
+
+def pair_text(highs, cnt, po, to, pn, tn, c, digits):
+    if cnt >= 2:
+        return '%s %.*f@%s -> %.*f@%s = %s' % ('highs' if highs else 'lows', digits, po, time_text(to),
+                                               digits, pn, time_text(tn), cmp_name(highs, c))
+    if cnt == 1:
+        what = 'only 1 swing high' if highs else 'only 1 swing low'
+    else:
+        what = 'no swing high' if highs else 'no swing low'
+    return '%s: %s (need 2)' % ('highs' if highs else 'lows', what)
+
+
+class DirEvidence(object):
+    pass
+
+
+def direction_evidence(swings, digits=2):
+    ev = DirEvidence()
+    ev.nh = ev.nl = 0
+    ev.h_old = ev.h_new = ev.l_old = ev.l_new = -1
+    for i in range(len(swings) - 1, -1, -1):
+        if swings[i].is_high:
+            if ev.nh == 0:
+                ev.h_new = i
+            elif ev.nh == 1:
+                ev.h_old = i
+            ev.nh += 1
+        else:
+            if ev.nl == 0:
+                ev.l_new = i
+            elif ev.nl == 1:
+                ev.l_old = i
+            ev.nl += 1
+
+    def f(i):
+        if i < 0:
+            return 0.0, 0, 0
+        return swings[i].price, swings[i].pivot_time, swings[i].confirm_time
+    ev.h_old_price, ev.h_old_pivot, ev.h_old_confirm = f(ev.h_old)
+    ev.h_new_price, ev.h_new_pivot, ev.h_new_confirm = f(ev.h_new)
+    ev.l_old_price, ev.l_old_pivot, ev.l_old_confirm = f(ev.l_old)
+    ev.l_new_price, ev.l_new_pivot, ev.l_new_confirm = f(ev.l_new)
+    ev.h_cmp = compare(ev.h_old_price, ev.h_new_price) if ev.nh >= 2 else CMP_NONE
+    ev.l_cmp = compare(ev.l_old_price, ev.l_new_price) if ev.nl >= 2 else CMP_NONE
+    ev.h_text = pair_text(True, ev.nh, ev.h_old_price, ev.h_old_pivot, ev.h_new_price,
+                          ev.h_new_pivot, ev.h_cmp, digits)
+    ev.l_text = pair_text(False, ev.nl, ev.l_old_price, ev.l_old_pivot, ev.l_new_price,
+                          ev.l_new_pivot, ev.l_cmp, digits)
+    if ev.nh < 2 or ev.nl < 2:
+        ev.direction = 'UNKNOWN'
+        why = ''
+        if ev.nh < 2:
+            why = 'only 1 swing high' if ev.nh == 1 else 'no swing high'
+        if ev.nl < 2:
+            why += (' and ' if why != '' else '') + ('only 1 swing low' if ev.nl == 1 else 'no swing low')
+        ev.tail = why + ' => UNKNOWN'
+        ev.verdict = ev.tail
+        return ev
+    if ev.h_cmp == CMP_LOWER and ev.l_cmp == CMP_LOWER:
+        ev.direction = 'BEARISH'
+    elif ev.h_cmp == CMP_HIGHER and ev.l_cmp == CMP_HIGHER:
+        ev.direction = 'BULLISH'
+    else:
+        ev.direction = 'MIXED'
+    ev.tail = '=> ' + ev.direction
+    if ev.direction == 'MIXED':
+        if ev.h_cmp == CMP_EQUAL or ev.l_cmp == CMP_EQUAL:
+            ev.tail += ' (EQ is not a trend)'
+        else:
+            ev.tail += ' (highs %s but lows %s)' % (cmp_name(True, ev.h_cmp), cmp_name(False, ev.l_cmp))
+    ev.verdict = ev.h_text + '; ' + ev.l_text + ' ' + ev.tail
+    return ev
+
+
+def is_dir_swing(ev, i):
+    return i >= 0 and i in (ev.h_old, ev.h_new, ev.l_old, ev.l_new)
+
+
 # ---- map lifecycle step functions: mirror of SH4Life / H4LifeDecide /
 # ---- H4LifeOnCopy in src/include/H4Structure.mqh (same order of statements).
 RETRY_MS = 3000
@@ -567,7 +736,7 @@ def life_on_copy(st, kind, got, oldest, newest_ok, lookback, left, right):
 # ---- HistoryProbe / RecomputeMap in src/XauUsdH4Map.mq5 (the real CopyRates,
 # ---- drawing and logging are replaced by this fake; the decisions are the
 # ---- step functions above).
-OP_FIRST, OP_LAST, OP_READY, OP_FAIL, OP_MISMATCH, OP_NOP = 0, 1, 2, 3, 4, 9
+OP_FIRST, OP_LAST, OP_READY, OP_FAIL, OP_MISMATCH, OP_WLAST, OP_HIST, OP_NOP = 0, 1, 2, 3, 4, 5, 6, 9
 BASE_IDX = 1000
 LOOKBACK = 300
 SIM_LEFT = SIM_RIGHT = 2
@@ -580,6 +749,8 @@ def sim_time(k):
 class Sim(object):
     def __init__(self, first, last, start_ms):
         self.first, self.last = first, last
+        self.wlast = last          # newest closed bar the watcher reports (follows last in live mode)
+        self.hist = False          # historical review mode
         self.start_ms = start_ms
         self.ready, self.fail, self.mismatch = True, False, False
         self.seen_last = -1
@@ -597,7 +768,10 @@ class Sim(object):
         if self.fail:
             return -1, 0, False
         got = min(LOOKBACK, self.last - self.first + 1)
-        return got, sim_time(self.last - got + 1), not self.mismatch
+        if got <= 0:
+            return 0, 0, False     # no closed bar in range (as-of before the history)
+        watcher_open = sim_time(self.wlast) + (PERIOD if self.mismatch else 0)
+        return got, sim_time(self.last - got + 1), newest_ok(self.hist, sim_time(self.last), watcher_open)
 
     def apply(self, o):
         if o.log_hist:
@@ -630,10 +804,11 @@ class Sim(object):
         self.t = t
         new_bar = False
         if self.ready:
-            new_bar = self.seen_last >= 0 and self.last > self.seen_last
-            self.seen_last = self.last
+            new_bar = self.seen_last >= 0 and self.wlast > self.seen_last
+            self.seen_last = self.wlast
         now = (self.start_ms + t * 1000) & U32
-        o = life_decide(self.life, self.ready, 'H4 series not ready: SIM', new_bar, now, LOOKBACK)
+        o = life_decide(self.life, self.ready, 'H4 series not ready: SIM',
+                        new_bar_for_life(self.hist, new_bar), now, LOOKBACK)
         self.apply(o)
         if self.ready:
             if o.attempt == ATT_PROBE:
@@ -647,6 +822,12 @@ class Sim(object):
             self.first = val
         elif op == OP_LAST:
             self.last = val
+            if not self.hist:
+                self.wlast = val
+        elif op == OP_WLAST:
+            self.wlast = val
+        elif op == OP_HIST:
+            self.hist = val != 0
         elif op == OP_READY:
             self.ready = val != 0
         elif op == OP_FAIL:
@@ -705,6 +886,19 @@ def build_scenarios():
     s.append(('i_ref_unwrapped', 100000, P[0], P[1], 130, ref_acts))
     s.append(('i_wrap_early', 4294959296, P[0], P[1], 130, ref_acts))     # wraps at t=8
     s.append(('i_wrap_while_slow', 4294892296, P[0], P[1], 130, ref_acts))  # wraps at t=75
+    # historical review mode (OP_HIST at t=0): static map, as-of set ends before the watcher's bar
+    hist = (0, OP_HIST, 1)
+    s.append(('j1_hist_new_bars_ignored', 100000, FULL[0], FULL[1], 100,
+              [hist, (30, OP_WLAST, 1000), (60, OP_WLAST, 1001)]))
+    s.append(('j2_live_contrast', 100000, FULL[0], FULL[1], 100,
+              [nop, (30, OP_LAST, 1000), (60, OP_LAST, 1001)]))
+    s.append(('j3_hist_watcher_ahead_no_clear', 100000, FULL[0], FULL[1], 100,
+              [hist, (0, OP_WLAST, 1010)]))
+    s.append(('j4_hist_asof_before_history', 100000, 1000, 999, 40, [hist, (15, OP_FIRST, 700)]))
+    s.append(('j5_hist_partial_then_complete', 100000, P[0], P[1], 60,
+              [hist, (10, OP_WLAST, 1000), (25, OP_FIRST, 700)]))
+    s.append(('j6_hist_series_not_ready', 100000, FULL[0], FULL[1], 60,
+              [hist, (16, OP_READY, 0), (30, OP_READY, 1)]))
     return s
 
 
@@ -1161,6 +1355,293 @@ def test_lifecycle_scenarios():
     check(ok, 'in every scenario a CopyRates failure leaves the stall counter unchanged')
 
 
+# ----------------------------------------- historical review (as-of) data ----
+ASOF_CASES = ('bear_invalid_eq', 'bull_invalid_eq', 'bear_touched_inside_two', 'bear_base',
+              'bull_touched_below', 'mixed_expanding')
+
+
+def build_asof_checks():
+    """(case, m, extra_seconds, lookback): AsOfTime = close time of bar m-1 + extra.
+    extra 0   -> bar m-1 closes exactly at AsOfTime (included)
+    extra 3600 -> bar m is still forming at AsOfTime (excluded)
+    extra -1  -> bar m-1 closes one second AFTER AsOfTime (excluded)"""
+    out = []
+    for nm in ASOF_CASES:
+        n = len(case(nm)[3])
+        for m in sorted(set([12, n // 2, (2 * n) // 3, n - 2, n])):
+            if m >= 8:
+                out.append((nm, m, 0, 300))
+        out.append((nm, n // 2, 3600, 300))
+        out.append((nm, n // 2, -1, 300))
+        out.append((nm, n - 2, 0, 25))
+    return out
+
+
+def asof_time(bars, m, extra):
+    return bars[m - 1].time + PERIOD + extra
+
+
+def garbage_series(bars, cnt, variant):
+    """bars[:cnt] kept; every later bar replaced; 6 more garbage bars appended"""
+    n = len(bars)
+    out = list(bars[:cnt])
+    for j in range(cnt, n + 6):
+        t = T0 + j * PERIOD
+        if variant == 0:      # huge values
+            out.append(Bar(t, 99999.0 + j, -99999.0, 99999.0 if j % 2 == 0 else -99999.0))
+        else:                 # opposite trend: mirrored bars, then a steep opposite run
+            if j < n:
+                b = bars[j]
+                out.append(Bar(t, MIRROR - b.low, MIRROR - b.high, MIRROR - b.close))
+            else:
+                k = (j - n + 1) * 50.0
+                out.append(Bar(t, 6000.0 + k + 5, 6000.0 + k - 5, 6000.0 + k))
+    return out
+
+
+def expected_asof(chk):
+    """(count, summary, verdict) from the plain truncated series, no as-of function"""
+    nm, m, extra, lb = chk
+    _, l, r, bars, _ = case(nm)
+    cnt = m - 1 if extra == -1 else m
+    st = bars[max(0, cnt - lb):cnt]
+    a = analyze(st, len(st), l, r)
+    return cnt, summary(a, st[-1].close), direction_evidence(a.swings).verdict
+
+
+def test_asof_filter():
+    print('--- as-of filter (H4ClosedCountAsOf and helpers)')
+    bars = hl_bars([(10 + i, 5 + i) for i in range(10)])
+    n = len(bars)
+    check(closed_count_asof(bars, n, bars[5].time + PERIOD, PERIOD) == 6,
+          'bar closing exactly at AsOfTime is included (6 bars, last open = bar 5)')
+    check(closed_count_asof(bars, n, bars[5].time + PERIOD - 1, PERIOD) == 5,
+          'bar closing 1 s after AsOfTime is excluded (still forming at AsOfTime)')
+    check(closed_count_asof(bars, n, bars[6].time, PERIOD) == 6,
+          'bar OPENING exactly at AsOfTime is excluded (the bar before closes at that instant)')
+    check(closed_count_asof(bars, n, bars[5].time + 3600, PERIOD) == 5,
+          'AsOfTime in the middle of bar 5: bar 5 excluded, 5 bars')
+    check(closed_count_asof(bars, n, bars[0].time, PERIOD) == 0, 'AsOfTime at the open of the first bar -> 0')
+    check(closed_count_asof(bars, n, T0 - 10 * PERIOD, PERIOD) == 0, 'AsOfTime before all history -> 0')
+    check(closed_count_asof(bars, n, bars[0].time + PERIOD - 1, PERIOD) == 0, 'AsOfTime 1 s before the first bar closes -> 0')
+    check(closed_count_asof(bars, n, bars[0].time + PERIOD, PERIOD) == 1, 'AsOfTime exactly at the first close -> 1')
+    check(closed_count_asof(bars, n, T0 + 10 ** 9, PERIOD) == n, 'AsOfTime far in the future -> all bars')
+    check(closed_count_asof(bars, 0, T0 + 10 ** 9, PERIOD) == 0, 'no bars -> 0')
+    check(closed_count_asof(bars, 4, T0 + 10 ** 9, PERIOD) == 4, 'only the first n bars are looked at')
+    check(closed_count_asof(bars, n, bars[2].time + 3600, 3600) == 3, 'period is a parameter (1h bars: bar 2 closes at +3600)')
+    prev = -1
+    mono = True
+    for k in range(0, 12 * PERIOD, 1800):
+        c = closed_count_asof(bars, n, T0 + k, PERIOD)
+        mono = mono and c >= prev and c <= n
+        prev = c
+    check(mono, 'count never decreases as AsOfTime grows (scanned in 30 min steps)')
+    ft = T0 + 7 * PERIOD
+    check(effective_asof(T0 + 100 * PERIOD, ft) == ft, 'AsOfTime in the future is capped at the forming bar open')
+    check(effective_asof(T0 + 3 * PERIOD, ft) == T0 + 3 * PERIOD, 'AsOfTime in the past is kept')
+    check(effective_asof(T0 + 3 * PERIOD, 0) == T0 + 3 * PERIOD, 'unknown forming bar (0) -> no cap')
+    check(closed_count_asof(bars, n, effective_asof(T0 + 10 ** 9, bars[7].time), PERIOD) == 7,
+          'future AsOfTime never counts the forming bar (7 closed bars when bar 7 is forming)')
+    check(asof_set_start(300, 300) == 0 and asof_set_start(10, 300) == 0 and asof_set_start(350, 300) == 50 and
+          asof_set_start(301, 300) == 1, 'set clipped to the newest `lookback` closed bars')
+    check(len(asof_set(bars, bars[5].time + PERIOD, 4)[0]) == 4 and asof_set(bars, bars[5].time + PERIOD, 4)[0][-1] == bars[5],
+          'clip keeps the NEWEST bars of the as-of set')
+    st, closed = asof_set(bars, bars[5].time + PERIOD, 300)
+    check(closed == 6 and st == bars[:6], 'lookback larger than the set -> the whole as-of set')
+
+
+def test_asof_no_lookahead():
+    print('--- as-of path: no look-ahead (truncated series == full series with garbage after AsOfTime)')
+    checks = build_asof_checks()
+    by_case = {}
+    powered = 0
+    for chk in checks:
+        nm, m, extra, lb = chk
+        _, l, r, bars, _ = case(nm)
+        cnt, exp_sum, exp_verdict = expected_asof(chk)
+        asof = asof_time(bars, m, extra)
+        ok = True
+        for variant in (0, 1):
+            g = garbage_series(bars, cnt, variant)
+            a, st, price = asof_analysis(g, asof, lb, l, r)
+            ok = ok and (len(g) > cnt and closed_count_asof(g, len(g), asof, PERIOD) == cnt)
+            ok = ok and a is not None and summary(a, price) == exp_sum
+            ok = ok and direction_evidence(a.swings).verdict == exp_verdict
+            ok = ok and price == bars[cnt - 1].close
+            # the garbage must be able to matter: analysing ALL of it differs
+            wrong = analyze(g, len(g), l, r)
+            powered += 1 if summary(wrong, price) != exp_sum else 0
+        # the same on the real (un-garbaged) full series
+        a2, _, p2 = asof_analysis(bars, asof, lb, l, r)
+        ok = ok and summary(a2, p2) == exp_sum
+        by_case.setdefault(nm, []).append(ok)
+    for nm in ASOF_CASES:
+        check(all(by_case[nm]), 'as-of result == truncated result, garbage after AsOfTime ignored (%s, %d AsOfTime values)'
+              % (nm, len(by_case[nm])))
+    check(powered >= len(checks), 'the garbage series is not vacuous: analysing it unfiltered gives a different result (%d of %d runs)'
+          % (powered, 2 * len(checks)))
+    # swings, FVG states/classes, ERL and interval each compared individually for one case
+    _, l, r, bars, _ = case('bear_invalid_eq')
+    cnt = 40
+    asof = asof_time(bars, cnt, 0)
+    ref = analyze(bars[:cnt], cnt, l, r)
+    a, st, price = asof_analysis(garbage_series(bars, cnt, 0), asof, 300, l, r)
+    check([(x.id, x.confirm_time, x.price) for x in a.swings] == [(x.id, x.confirm_time, x.price) for x in ref.swings],
+          'swings identical (bear_invalid_eq, 40 bars)')
+    check([(f.id, f.state, f.cls, f.lower, f.upper) for f in a.fvgs] == [(f.id, f.state, f.cls, f.lower, f.upper) for f in ref.fvgs],
+          'FVG ids, states and classes identical')
+    check((a.res.direction, a.res.range_state, a.res.range_high, a.res.range_low, a.res.range_known_time,
+           a.res.erl_state, a.res.erl_price, a.res.erl_taken_time) ==
+          (ref.res.direction, ref.res.range_state, ref.res.range_high, ref.res.range_low, ref.res.range_known_time,
+           ref.res.erl_state, ref.res.erl_price, ref.res.erl_taken_time),
+          'direction, interval and ERL state identical')
+    # later bars that would TAKE the ERL / INVALIDATE a zone in the full series must not leak in
+    full = analyze(bars, len(bars), l, r)
+    early = analyze(bars[:30], 30, l, r)
+    check(early.res.erl_state != full.res.erl_state or [f.state for f in early.fvgs] != [f.state for f in full.fvgs[:len(early.fvgs)]],
+          'sanity: the full series differs from an early as-of set (ERL or FVG states change later)')
+
+
+def test_asof_price():
+    print('--- historical price = close of the last closed bar; a live Bid never changes the historical selection')
+    _, l, r, bars, _ = case('bear_touched_inside_two')
+    n = len(bars)
+    asof = asof_time(bars, n, 0)
+    a, st, price = asof_analysis(bars, asof, 300, l, r)
+    check(price == bars[n - 1].close, 'historical price is the Close of the last closed bar in the set')
+    base = summary(a, selection_price(True, st[-1].close, 0.0, 0.0))
+    same = True
+    for bid in (0.0, -1.0, 1.0, 2036.0, 2055.0, 2058.0, 2070.0, 1e6):
+        same = same and selection_price(True, st[-1].close, bid, 1234.5) == st[-1].close
+        same = same and summary(a, selection_price(True, st[-1].close, bid, 1234.5)) == base
+    check(same, 'historical selection identical for any live Bid (0, negative, below, inside, above, huge)')
+    check(selection_price(False, 99.0, 2055.0, 1.0) == 2055.0 and selection_price(False, 99.0, 0.0, 7.5) == 7.5 and
+          selection_price(False, 99.0, -3.0, 7.5) == 7.5, 'live mode keeps Bid (and the previous price when Bid is invalid)')
+    sel = [tuple(f.id for f in select_irl(a.fvgs, a.res, p)) for p in (2055.0, 2058.0, 2070.0)]
+    check(len(set(sel)) > 1, 'sanity: the selection DOES depend on the price (%s), so the Bid test above has power' % (sel,))
+    _, l2, r2, b2, _ = case('bear_touched_inside_one')
+    a2, _, p2 = asof_analysis(b2, asof_time(b2, len(b2), 0), 300, l2, r2)
+    check(p2 == b2[-1].close and summary(a2, p2) == summary(a2, selection_price(True, b2[-1].close, 2070.0, 0.0)),
+          'a second case: same price rule and Bid independence')
+
+
+def mk_sw(is_high, idx, price):
+    return mk_swing(is_high, idx, price)
+
+
+def test_direction_evidence():
+    print('--- direction evidence (the two latest highs and lows behind the direction)')
+    expect = {
+        'bear_base': 'highs 2097.00@2026.01.07 20:00 -> 2081.00@2026.01.11 04:00 = LH; '
+                     'lows 2039.00@2026.01.09 20:00 -> 2023.00@2026.01.12 20:00 = LL => BEARISH',
+        'bull_base': 'highs 2161.00@2026.01.09 20:00 -> 2177.00@2026.01.12 20:00 = HH; '
+                     'lows 2103.00@2026.01.07 20:00 -> 2119.00@2026.01.11 04:00 = HL => BULLISH',
+        'mixed_expanding': 'highs 2105.00@2026.01.05 12:00 -> 2117.00@2026.01.09 08:00 = HH; '
+                           'lows 2055.00@2026.01.07 04:00 -> 2035.00@2026.01.12 08:00 = LL => MIXED (highs HH but lows LL)',
+        'mixed_equal_highs': 'highs 2105.00@2026.01.05 12:00 -> 2105.00@2026.01.08 20:00 = EQ; '
+                             'lows 2055.00@2026.01.07 04:00 -> 2035.00@2026.01.11 08:00 = LL => MIXED (EQ is not a trend)',
+        'unknown_few_swings': 'only 1 swing low => UNKNOWN',
+        'equal_highs': 'no swing high and no swing low => UNKNOWN',
+    }
+    for nm, text in sorted(expect.items()):
+        a, _, _ = run(nm)
+        ev = direction_evidence(a.swings)
+        check(ev.verdict == text, 'verdict text (%s): %s' % (nm, ev.direction))
+    a, _, _ = run('bear_base')
+    ev = direction_evidence(a.swings)
+    hs = [s for s in a.swings if s.is_high]
+    ls = [s for s in a.swings if not s.is_high]
+    check((ev.h_old, ev.h_new, ev.l_old, ev.l_new) == (a.swings.index(hs[-2]), a.swings.index(hs[-1]),
+                                                        a.swings.index(ls[-2]), a.swings.index(ls[-1])) and
+          ev.h_old < ev.h_new and ev.l_old < ev.l_new and ev.h_old_pivot < ev.h_new_pivot and
+          ev.l_old_pivot < ev.l_new_pivot, 'the four swings are the two latest of each kind, older -> newer')
+    check((ev.h_new_price, ev.h_new_pivot, ev.h_new_confirm) == (hs[-1].price, hs[-1].pivot_time, hs[-1].confirm_time) and
+          (ev.l_old_price, ev.l_old_pivot, ev.l_old_confirm) == (ls[-2].price, ls[-2].pivot_time, ls[-2].confirm_time),
+          'price, pivot_time and confirm_time are carried for each swing')
+    check(all(is_dir_swing(ev, i) == (i in (ev.h_old, ev.h_new, ev.l_old, ev.l_new)) for i in range(-1, len(a.swings))) and
+          sum(1 for i in range(len(a.swings)) if is_dir_swing(ev, i)) == 4 and not is_dir_swing(ev, -1),
+          'exactly four swings are tagged "dir" (none for index -1)')
+    # ties on the LOWS and opposite pairs the other way round, synthetic swing lists
+    syn = [
+        ('lows EQ', [mk_sw(True, 3, 110), mk_sw(False, 6, 100), mk_sw(True, 9, 105), mk_sw(False, 12, 100)], 'MIXED'),
+        ('highs LH, lows HL', [mk_sw(True, 3, 110), mk_sw(False, 6, 90), mk_sw(True, 9, 105), mk_sw(False, 12, 95)], 'MIXED'),
+        ('highs HH, lows LL', [mk_sw(True, 3, 110), mk_sw(False, 6, 90), mk_sw(True, 9, 115), mk_sw(False, 12, 85)], 'MIXED'),
+        ('all EQ', [mk_sw(True, 3, 110), mk_sw(False, 6, 90), mk_sw(True, 9, 110), mk_sw(False, 12, 90)], 'MIXED'),
+        ('1 high 2 lows', [mk_sw(False, 3, 90), mk_sw(True, 6, 110), mk_sw(False, 9, 85)], 'UNKNOWN'),
+        ('no swings', [], 'UNKNOWN'),
+    ]
+    for label, sw, want in syn:
+        ev = direction_evidence(sw)
+        check(ev.direction == want == derive_direction(sw), 'synthetic %s -> %s (same as derive_direction)' % (label, want))
+    ev = direction_evidence(syn[1][1])
+    check(ev.verdict.endswith('= HL => MIXED (highs LH but lows HL)'), 'opposite pairs: verdict names both pairs (%s)' % ev.verdict[-40:])
+    ev = direction_evidence(syn[0][1])
+    check('= EQ => MIXED (EQ is not a trend)' in ev.verdict, 'tie on the lows is reported as EQ')
+    check(direction_evidence(syn[4][1]).verdict == 'only 1 swing high => UNKNOWN', 'only 1 swing high => UNKNOWN')
+    # never disagree with H4DeriveDirection: every case, every prefix, then a deterministic random sweep
+    total = 0
+    bad = 0
+    for (nm, l, r, bars, _) in build_cases():
+        for k in range(1, len(bars) + 1):
+            a = analyze(bars, k, l, r)
+            total += 1
+            if direction_evidence(a.swings).direction != a.res.direction:
+                bad += 1
+    check(bad == 0, 'evidence direction == derive_direction on %d prefixes of all %d cases' % (total, len(build_cases())))
+    seed = 12345
+    rnd_total = 0
+    rnd_bad = 0
+    kinds = set()
+    for _ in range(4000):
+        sw = []
+        cnt = 0
+        seed = (seed * 1103515245 + 12345) & 0x7FFFFFFF
+        length = (seed >> 8) % 9
+        for j in range(length):
+            seed = (seed * 1103515245 + 12345) & 0x7FFFFFFF
+            hi = ((seed >> 5) & 1) == 1
+            price = 100 + ((seed >> 9) % 4)          # few distinct prices: many ties
+            sw.append(mk_sw(hi, 3 * j, float(price)))
+        ev = direction_evidence(sw)
+        rnd_total += 1
+        kinds.add(ev.direction)
+        if ev.direction != derive_direction(sw):
+            rnd_bad += 1
+    check(rnd_bad == 0 and kinds == set(['BEARISH', 'BULLISH', 'MIXED', 'UNKNOWN']),
+          'evidence direction == derive_direction on %d random swing lists (all four outcomes occur)' % rnd_total)
+
+
+def test_historical_lifecycle():
+    print('--- historical review lifecycle (scripted scenarios)')
+    S = dict((scn[0], run_scenario(scn)) for scn in build_scenarios())
+    j1 = S['j1_hist_new_bars_ignored']
+    check(times(j1, 'B') == [0] and not times(j1, 'P') and not times(j1, 'CLEAR') and j1.wlast == 1001 and
+          j1.snap[100] == (True, 0, True), 'new H4 bars do not trigger a recompute or redraw in historical mode (1 copy in 100 s)')
+    j2 = S['j2_live_contrast']
+    check(times(j2, 'B') == [0, 30, 60], 'contrast: the same new bars DO rebuild in live mode')
+    j3 = S['j3_hist_watcher_ahead_no_clear']
+    check(times(j3, 'B') == [0] and not times(j3, 'CLEAR') and j3.snap[100] == (True, 0, True),
+          'watcher bar newer than the as-of set: no endless clear, map stays')
+    check(not newest_ok(False, sim_time(999), sim_time(1010)) and newest_ok(True, sim_time(999), sim_time(1010)),
+          'the live "newest == watcher" test would fail here; the historical test accepts it')
+    check(newest_ok(True, sim_time(999), sim_time(999)) and not newest_ok(True, sim_time(1011), sim_time(1010)) and
+          newest_ok(True, sim_time(5), 0) and newest_ok(False, sim_time(5), 0) and newest_ok(False, sim_time(7), sim_time(7)),
+          'newest-bar test: historical accepts newest <= watcher, rejects a set newer than the watcher; unknown watcher accepts')
+    check(new_bar_for_life(False, True) and not new_bar_for_life(True, True) and not new_bar_for_life(False, False) and
+          not new_bar_for_life(True, False), 'new_bar is passed to the lifecycle only in live mode')
+    j4 = S['j4_hist_asof_before_history']
+    check(times(j4, 'B') == [0, 3, 6, 9, 12, 15] and texts(j4, 'MAP') == [(15, '300')] and not times(j4, 'CLEAR') and
+          j4.snap[14] == (False, 0, False), 'as-of before the history: no map, retried every 3 s, built when history completes')
+    j5 = S['j5_hist_partial_then_complete']
+    check(texts(j5, 'MAP') == [(0, '120'), (27, '300')] and times(j5, 'B') == [0, 27] and
+          texts(j5, 'HIST')[0] == (0, 'PARTIAL HISTORY (120 of 300, refreshing)'),
+          'partial history: PARTIAL, probed every 3 s, rebuilt when complete; a new watcher bar at t=10 changed nothing')
+    j6 = S['j6_hist_series_not_ready']
+    check(texts(j6, 'CLEAR') == [(16, 'H4 series not ready: SIM')] and texts(j6, 'REBUILT') == [(30, 'H4 series not ready: SIM')] and
+          j6.snap[20] == (False, 0, False) and j6.snap[30] == (True, 0, True),
+          'series not ready still clears the map, and it is rebuilt when ready again')
+
+
 def emit_mql():
     out = ['// BEGIN GENERATED CASE DATA (tests/t002_reference_test.py --emit-mql)']
     cases = build_cases()
@@ -1179,6 +1660,33 @@ def emit_mql():
         out.append('         expected = "%s";' % summary(a, price))
         out.append('         T2FillBars(d, %d, bars);' % len(bars))
         out.append('         n = %d;' % len(bars))
+        out.append('         break;')
+        out.append('        }')
+    out.append('     }')
+    out.append('  }')
+    out.append('string T2EvidenceExpected(const int id)')
+    out.append('  {')
+    out.append('   switch(id)')
+    out.append('     {')
+    for i, (nm, l, r, bars, price) in enumerate(cases):
+        a = analyze(bars, len(bars), l, r)
+        out.append('      case %d: return("%s");' % (i, direction_evidence(a.swings).verdict))
+    out.append('     }')
+    out.append('   return("");')
+    out.append('  }')
+    checks = build_asof_checks()
+    out.append('#define T2_ASOF_COUNT %d' % len(checks))
+    out.append('void T2LoadAsOf(const int id, string &name, int &m, int &extra, int &lookback, int &exp_count, string &exp_summary, string &exp_verdict)')
+    out.append('  {')
+    out.append('   switch(id)')
+    out.append('     {')
+    for i, chk in enumerate(checks):
+        cnt, esum, ever = expected_asof(chk)
+        out.append('      case %d:' % i)
+        out.append('        {')
+        out.append('         name = "%s"; m = %d; extra = %d; lookback = %d; exp_count = %d;' % (chk[0], chk[1], chk[2], chk[3], cnt))
+        out.append('         exp_summary = "%s";' % esum)
+        out.append('         exp_verdict = "%s";' % ever)
         out.append('         break;')
         out.append('        }')
     out.append('     }')
@@ -1228,6 +1736,11 @@ def main():
     test_ids_and_selection_ties()
     test_pure_decisions()
     test_lifecycle_scenarios()
+    test_asof_filter()
+    test_asof_no_lookahead()
+    test_asof_price()
+    test_direction_evidence()
+    test_historical_lifecycle()
     print('')
     print('%d passed, %d failed' % (len(PASSES), len(FAILS)))
     if FAILS:

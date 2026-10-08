@@ -68,14 +68,14 @@ private:
      }
 
    void              Note(const string name, const datetime t, const double p, const string text,
-                          const color clr, const ENUM_ANCHOR_POINT anchor)
+                          const color clr, const ENUM_ANCHOR_POINT anchor, const int fontsize = 8)
      {
       if(!Ensure(name, OBJ_TEXT))
          return;
       Put(name, 0, t, p);
       ObjectSetString(m_chart, name, OBJPROP_TEXT, text);
       ObjectSetString(m_chart, name, OBJPROP_FONT, "Arial");
-      ObjectSetInteger(m_chart, name, OBJPROP_FONTSIZE, 8);
+      ObjectSetInteger(m_chart, name, OBJPROP_FONTSIZE, fontsize);
       ObjectSetInteger(m_chart, name, OBJPROP_COLOR, clr);
       ObjectSetInteger(m_chart, name, OBJPROP_ANCHOR, anchor);
      }
@@ -150,7 +150,8 @@ public:
    void              DrawStatic(const MqlRates &bars[], const int n, const int period_seconds,
                                 const SH4Swing &swings[], const int ns,
                                 const SH4Fvg &fvgs[], const int nf,
-                                const SH4Result &res, const bool show_invalid)
+                                const SH4Result &res, const SH4DirEvidence &dir,
+                                const bool show_invalid)
      {
       ClearMap();
       if(n < 1)
@@ -161,12 +162,14 @@ public:
       //--- swings, marked at the PIVOT time; the text carries the confirmation time
       for(int i = 0; i < ns; i++)
         {
-         string txt = StringFormat("%s %s conf %s", swings[i].is_high ? "SH" : "SL",
+         //--- the (up to) four swings that decide the direction get a "dir" tag and a larger font
+         bool is_dir = H4IsDirSwing(dir, i);
+         string txt = StringFormat("%s%s %s conf %s", is_dir ? "dir " : "", swings[i].is_high ? "SH" : "SL",
                                    DoubleToString(swings[i].price, _Digits),
                                    TimeToString(swings[i].confirm_time, TIME_DATE|TIME_MINUTES));
          Note(m_prefix + "sw_" + swings[i].id, swings[i].pivot_time, swings[i].price, txt,
               swings[i].is_high ? m_clr_bear : m_clr_bull,
-              swings[i].is_high ? ANCHOR_LOWER : ANCHOR_UPPER);
+              swings[i].is_high ? ANCHOR_LOWER : ANCHOR_UPPER, is_dir ? 11 : 8);
         }
 
       //--- structural interval and ERL
