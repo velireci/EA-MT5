@@ -3,7 +3,7 @@
 Status: DRAFT. NOT started. This file is a reviewable specification only: no MQL5, no tests and no tools exist for it, and none may be described as implemented or passed. Implementation needs the owner's explicit go after Codex's review of this text.
 Builds on T002 (PR velireci/EA-MT5#2, draft, not merged) and keeps T002's behaviour and tests unchanged.
 Out of scope: M5/M15 logic, entries, sizing, SL/TP, the 2R policy, news, trade management, handling of positions that are already open.
-Revision 2 (2026-10-13) adds the client's BUY example, corrects the touch rule (now client information), and answers Codex's remarks on the level, the start of the bias, continuity across windows, and intrabar blocking.
+Revision 2 (2026-10-13) adds the client's BUY example, corrects the touch rule (now client information), and answers Codex's remarks on the level, the start of the bias, continuity across windows, and intrabar blocking. Revision 3 (2026-10-13) adds the client's closing statement for the BUY example (E6): after the liquidity grab the new H4 FVG, the return and then an M15 structure break, with the last HH as the target of that example.
 
 ## 1. Provenance (never blur these)
 A. CLIENT STATEMENTS, text clarifications and examples relayed by the owner (also in docs/DECISIONS.md and docs/STRATEGY_SPEC.md):
@@ -14,20 +14,23 @@ A. CLIENT STATEMENTS, text clarifications and examples relayed by the owner (als
 - S5. After the new H4 FVG: the touch happens at that H4 FVG (a wick touch is allowed) and we wait for the close of the H4 candle that touched it (an earlier client clarification relayed by the owner; its original wording is not in the repository); then a new M15 structure break; entry at the M15 FVG after the break. H4 FVG/IRL is context, not entry; setups only in the trend direction, IRL -> ERL.
 - S6. Open: the role of M5 in M15 confirmation; the policy when the ERL target is below 2R.
 - E1-E5. BUY example (second client screenshot, H4, explanation relayed by the owner): price was rising and the example shows two consecutive BOS. In the circled part price looked as if it had broken the structure downward but it was only a liquidity grab. After that grab the next H4 FVG formed (the green zone); price touched it and then made another BOS upward. The red arrow shows the rise the client expected. The client said: "Entry is made at the FVG and the target is the top of the third broken structure."
-Interpretation limits for E1-E5 (owner's instructions):
+- E6. Closing statement for the same BUY example, third client screenshot (the client's words as relayed by the owner): "After the liquidity we have the main FVG where we expect price to return, and we have to wait for a structure break on M15. The target is the upper red line, at the last HH." It shows an INTERNAL liquidity grab without a confirmed change of the BUY trend; after the grab a new H4 FVG forms; we wait for the return/touch and then for an M15 structure break. The H4 FVG is the context, not a direct entry; the earlier rule stays (entry at the M15 FVG after the break, S5). The target of this example is the last HH, marked by the upper red line; it is not the local level labelled on the right-hand price axis of the picture.
+Interpretation limits for E1-E6 (owner's instructions):
 1. It is evidence, on the BUY side, for the difference between a wick / liquidity grab and a confirmed change of structure.
 2. "Two BOS" and "third BOS" describe the order in this example. They are not a condition: the robot does not wait for a fixed number of BOS.
 3. The green zone is the H4 FVG formed after the liquidity grab, per the client's explanation.
 4. The arrow is an expectation, not an executed confirmation and not an entry signal.
-5. The H4 screenshot does not show the M15 entry. "Entry at the FVG" does not cancel S5: H4 is the context and the entry is at the M15 FVG after the structure break.
-6. The target in the example is the top of the broken structure. It is not turned into a universal rule for choosing the ERL.
+5. The H4 screenshots do not show the M15 entry. "Entry at the FVG" (E5) does not cancel S5: H4 is the context and the entry is at the M15 FVG after the structure break. E6 confirms the sequence for BUY: new H4 FVG after the grab -> return/touch -> M15 structure break; it does not add an M5 role.
+6. The target in this example is the last HH (E6; E5 called it the top of the third broken structure). Both describe this example. Neither is turned into a universal rule for choosing the ERL, and the last HH is not to be confused with the local level labelled on the price axis. Any algorithmic target choice is only the labelled proposal P13.
 7. Prices, dates and candle indexes in the pictures are illustrations, never values to hard-code; where a text clarification exists it wins over how arrows or shapes might be read. The first screenshot's zone is not assumed to be "the new FVG after the wick"; that was confirmed separately in text (S4).
-8. The BUY example is client evidence only for what is listed in point 1 and in E1-E5. The details of the BUY/SELL mirror (P8) are NOT client confirmations.
-The screenshots are not stored in the repository.
+8. The BUY example (E1-E6) is client evidence, for BUY, of: the distinction between a liquidity grab and a confirmed change of structure; a new H4 FVG formed after the grab; the return/touch; the wait for an M15 structure break; entry at the M15 FVG per S5. The remaining details of the BUY/SELL mirror (P8: body-close rule for the flip, which FVG candle must follow the wick, hysteresis, the protected-level choice) are NOT client confirmations.
+9. Internal liquidity is not the structural level. In E1-E6 the low that was grabbed is not assumed to be the protecting higher low; the automatic choice of the structural level stays a proposal for validation (P2, section 10). A price drawn in the picture is never assumed to be the level.
+10. Not a fixed count: no condition of two or three BOS exists; the numbers describe the example.
+The three screenshots are not stored in the repository.
 
 B. EARLIER AUTHORISED DECISION: the owner's authorisation (2026-10-07) to create mechanical rules, as proposals awaiting visual validation, for what the client selects visually. The T002 proposals (2/2 swings, confirmed pivots, direction test, FVG definition and states, closed bars only) stay as they are.
 
-C. TECHNICAL PROPOSALS: section 3. P1-P9 and P10-P12 are developer proposals, NOT client answers. P12 (intrabar block) originates from Codex's review. All must be labelled "proposed" in drawings and logs.
+C. TECHNICAL PROPOSALS: section 3. P1-P13 are developer proposals, NOT client answers. P12 (intrabar block) originates from Codex's review. All must be labelled "proposed" in drawings and logs.
 
 D. OPEN questions that affect implementation: section 8.
 
@@ -41,7 +44,7 @@ D. OPEN questions that affect implementation: section 8.
 ## 3. Proposals
 P1. Body versus wick as in section 2. A body break takes precedence over wick-only for the same bar.
 
-P2. Structural level (formalises "the relevant level"; still a proposal, not validated). SELL context: consider the confirmed, non-ambiguous swing lows in order. A "lower low" is strictly below the confirmed low immediately before it (equality is not lower). Take the latest lower low and the low before it. The structural high S is the HIGHEST confirmed swing high whose pivot lies strictly between them. Swing highs inside the leg that are not its top, and corrective higher lows after the last lower low, never become the level; the higher high before the leg is not used (S1). If a bound or the high is missing, or any bar after S's pivot up to now has a high above S, the level is UNDEFINED ("no evidence"; a previously held level is kept). The level is known from max(confirmation of S's pivot, confirmation of the lower low); only bars opening at or after that time can produce events against it. BUY context is the mirror: latest higher high, structural low S = LOWEST confirmed swing low strictly between that high and the high before it. Validation is by the visual comparison of section 10, not by a pass/fail claim.
+P2. Structural level (formalises "the relevant level"; still a proposal, not validated). SELL context: consider the confirmed, non-ambiguous swing lows in order. A "lower low" is strictly below the confirmed low immediately before it (equality is not lower). Take the latest lower low and the low before it. The structural high S is the HIGHEST confirmed swing high whose pivot lies strictly between them. Swing highs inside the leg that are not its top, and corrective higher lows after the last lower low, never become the level; the higher high before the leg is not used (S1). If a bound or the high is missing, or any bar after S's pivot up to now has a high above S, the level is UNDEFINED ("no evidence"; a previously held level is kept). The level is known from max(confirmation of S's pivot, confirmation of the lower low); only bars opening at or after that time can produce events against it. BUY context is the mirror: latest higher high, structural low S = LOWEST confirmed swing low strictly between that high and the high before it. Validation is by the visual comparison of section 10, not by a pass/fail claim. Internal liquidity versus structural level: a sweep of liquidity that is not the P2 level (for example an interior low of the structure) is NOT automatically the level of this proposal; E1-E6 show such a grab with the BUY trend unconfirmed, and the low that was grabbed is not assumed to be the protecting low. How the robot should treat a sweep of internal liquidity (HOLD and new-FVG reconfirmation as for the structural level, or only a recorded event) is open (F8). What the proposal guarantees in either case: no body break, no flip.
 
 P3. Bias layer with hysteresis next to T002's swing-based direction (unchanged, still displayed; the two may disagree). States NONE -> BIAS_BEARISH / BIAS_BULLISH (see P10 for how the first bias is set). Once in a bias, it is kept until a body break of its level (S1/S2), whatever T002's direction says, including MIXED. The level may be re-derived while ACTIVE; it is frozen during HOLD and RECONFIRMED. After a flip the new bias has no level until P2 yields one; no reversal can fire without a level.
 
@@ -53,7 +56,7 @@ P6. Reconfirmation, per eligible FVG and on closed bars after its candle C. The 
 
 P7. Interrupting transitions: a body break (HOLD or RECONFIRMED) flips the bias and discards the reconfirmation progress; another wick-only bar restarts HOLD from the LATEST wick (earlier eligible FVGs become PRE_WICK); the recorded FVG becoming INVALID returns RECONFIRMED -> HOLD; an eligible FVG becoming INVALID before its touch is dropped, and with none left HOLD continues. RECONFIRMED_H4 only means "H4 context ready, awaiting a new M15 structure break"; the M15 phase is not part of T003.
 
-P8. BUY mirrors every rule. This is a proposal. The client's BUY example (E1-E5) supports the wick/grab-versus-structure distinction and the post-grab FVG; it does not confirm the other mirrored details.
+P8. BUY mirrors every rule. This is a proposal. The client's BUY example (E1-E6) is evidence for BUY of the sequence grab without a confirmed change -> new H4 FVG after the grab -> return/touch -> M15 structure break, with entry at the M15 FVG (S5); it does not confirm the other mirrored details (body-close rule for the flip, which FVG candle must follow the wick, hysteresis, the choice of the protected level).
 
 P9. Live and historical share one pure replay over closed bars: `bars[0..n-1]` -> bias state, level, events with their times, eligible FVGs. Live applies it on init and on each new closed H4 bar; historical applies the same function to the bars closed by AsOfTime (T002's as-of filter). The replay is causal: state at bar t uses only swings confirmed by t and bars up to t. Window handling is in P11.
 
@@ -72,6 +75,8 @@ P12. Intrabar block, Codex's technical proposal (not client-confirmed, not imple
 - body break (close beyond the level): the overlay ends in the bias flip of P3; no HOLD is entered for the old bias;
 - a crossing that exactly touches the level (equality) is not a crossing.
 The forming bar is read only by this overlay and only to restrict. Historical mode (closed bars only, no ticks) cannot reproduce the overlay and says so; live and historical therefore differ in timing by design. The overlay reads the forming bar's high/low from the series, not a tick feed.
+
+P13. Target candidate for display (proposal; E6 and E5 are one example, no universal rule). In the trend direction the ERL candidate shown for comparison is the latest confirmed higher high (BUY) / lower low (SELL) as defined in P10, kept apart from local levels (for example a swing created by the pullback). It is displayed only; T002's ERL (interval based) is unchanged and both may be shown. Open details: whether the candidate must still be untaken, must lie beyond price, how it is chosen when several qualify, and the relation to the 2R policy (F5, F3). Compared with the client's example by the section 10 protocol, never claimed validated.
 
 ## 4. States and transitions of the replay (SELL naming; BUY by mirror)
 | From | Event on closed bar t (level S known) | To | Notes |
@@ -108,7 +113,7 @@ Order inside one bar: update swings from the prefix; test events of bar t agains
 6. Continuity (P11): see tests 11-14; a window change alone never produces a FLIP, WICK or RECONFIRMED event.
 7. Live and historical use the same replay; as-of results do not depend on bars after the as-of time.
 8. Intrabar overlay (P12): never enables, never changes the bias, resolved at the close as defined; absent and labelled in historical mode.
-9. T002 behaviour and tests unchanged; no order or position API; no M15/M5 code.
+9. T002 behaviour and tests unchanged; no order or position API; no M15/M5 code. The target candidate (P13), if built, is display only, kept apart from local levels, labelled proposed, and not used as a universal target rule.
 10. Drawings and panel show the bias, the level (pivot and confirmation times), the wick event (bar time and known time), eligible versus PRE_WICK FVGs, the LIMITED_BY_HISTORY state, the intrabar block when active, and whether the bias and T002's direction disagree. Labels must not hide the panel or candles (the owner observed overlapping labels in T002).
 11. Compilation, tests, script runs and MT5 observation reported separately and attributed.
 
@@ -117,9 +122,10 @@ Order inside one bar: update swings from the prefix; test events of bar t agains
 - F2. The M5/M15 relation (S6).
 - F3. The policy when the ERL target is below 2R (S6). A recommendation to skip below 2R exists and is NOT an approved decision.
 - F4. Positions already open when a wick or a flip occurs.
-- F5. ERL selection and the validity of a reconfirmation: how the ERL is chosen after a flip (the target in the client's BUY example is not a universal rule), whether a post-wick FVG must lie inside T002's interval, how long RECONFIRMED stays valid, whether the frozen level is re-derived after a new extreme during the wait.
+- F5. ERL selection and the validity of a reconfirmation: how the ERL is chosen after a flip (the target in the client's BUY example, the last HH, is not a universal rule; P13 is only a display proposal), whether a post-wick FVG must lie inside T002's interval, how long RECONFIRMED stays valid, whether the frozen level is re-derived after a new extreme during the wait.
 - F6. The intrabar overlay P12 is Codex's technical proposal and awaits the owner's decision; the client has not been asked whether an intrabar block is wanted at all.
 - F7. How an entry module should treat LIMITED_BY_HISTORY.
+- F8. Internal liquidity versus the structural level: whether a sweep of internal liquidity (E1-E6) requires the same HOLD and new-FVG reconfirmation as a wick through the structural level, and how the robot tells the two apart automatically (P2 is a proposal; the grabbed low in the example is not assumed to be the protecting low).
 - Resolved (no longer open): the touch rule, now client information (S5).
 
 ## 9. Tests the implementation must include (none exist yet; none are claimed)
@@ -133,7 +139,7 @@ Controlled-data cases, pure logic first (same style as T002):
 7. Level selection: minor swings ignored, the leg's top chosen, the higher high before the leg not required, undefined when a bound is missing or the level was already touched.
 8. Historical analysis: results at as-of time T identical when later bars are replaced by garbage; the replay on a prefix equals the full replay restricted to what was knowable at T, for many T.
 9. Lifecycle and reload: no duplicate objects, clear/rebuild as in T002.
-10. BUY mirror cases, including a liquidity-grab-then-FVG-then-touch sequence like E1-E5 built from controlled data (not from the picture's prices).
+10. BUY mirror cases, including a liquidity-grab-then-FVG-then-touch sequence like E1-E6 built from controlled data (not from the picture's prices).
 11. Bias rebuilt from break history with T002 MIXED at the evaluation time (the acceptance case of criterion 5, including the shorter window).
 12. Window slides forward bar by bar with an active HOLD: the wick bar stays inside the anchored window and HOLD is not lost; a real flip is still detected after sliding.
 13. Window expansion that adds older bars: states that change are reported as RE-DERIVATION (history extended), not as a market event; states that do not depend on the new bars stay identical.
@@ -141,7 +147,7 @@ Controlled-data cases, pure logic first (same style as T002):
 15. Intrabar overlay: crossing blocks only; wick-only close turns it into HOLD; body-break close ends it in a flip; equality is not a crossing; no effect and an explicit note in historical mode.
 
 ## 10. Visual comparison with the client's examples (a comparison, not a validation)
-The client's two H4 screenshots (bearish-to-bullish expectation with the first marked level; BUY example with a liquidity grab, the post-grab FVG, its touch and a BOS) are illustrations; no price, date or index in them is used by the robot. To compare, the owner picks, in MT5 server time, an as-of time just before each event the client described, runs the historical mode (T002 map plus the T003 layer when it exists) and records:
+The client's three H4 screenshots (bearish-to-bullish expectation with the first marked level; BUY example with a liquidity grab, the post-grab FVG, its touch and a BOS; the BUY example again with the upper red line at the last HH) are illustrations; no price, date or index in them is used by the robot. To compare, the owner picks, in MT5 server time, an as-of time just before each event the client described, runs the historical mode (T002 map plus the T003 layer when it exists) and records:
 - V1. Level: the candle (by time) the robot's level comes from versus the candle the client marked. Compared by candle, not by a price tolerance. Result: same / different / robot undefined.
 - V2. Minor swings: whether the robot's level is a swing the client did not mark; list the swing pivot times the robot considered.
 - V3. "First level": when the client marked the first lower level rather than the major high, whether the robot chose the major high.
@@ -149,4 +155,9 @@ The client's two H4 screenshots (bearish-to-bullish expectation with the first m
 - V5. New FVG: whether the FVG the client coloured green is among the robot's eligible FVGs; record its candles A, B, C against the wick candle (this evidence informs F1).
 - V6. Touch: the robot's touching H4 candle and its close versus the client's candle.
 - V7. Bias at an evaluation time where T002 says MIXED: the robot's bias versus the client's reading.
+- V8. Internal liquidity (E1-E6): at as-of times around the grab, whether the swept low is the robot's level or not, what state the robot reports (it must not flip without a body break), and what a human would call the protecting level; no assumption that the grabbed low is the protecting low.
+- V9. Target (E6): the candle of the client's last HH against the robot's P13 candidate and against T002's ERL; the local level on the price axis must not be reported as the target.
 Each item is recorded as an observation with its source (owner/Codex) and never aggregated into "validated".
+16. Internal liquidity: a sweep of a low that is not the P2 level, with no close beyond the level; the bias stays and no flip is raised; the swept low is not reported as the structural level unless P2 yields it; the reported state follows the F8 decision once taken.
+17. Target candidate (P13): the latest higher high is shown and a local level created by a pullback is not; a change of the candidate when a newer higher high confirms; nothing changes in T002's ERL. Controlled data only; no price from the pictures.
+18. No fixed BOS count: sequences with one, two and three successive breaks give the same bias rule.
