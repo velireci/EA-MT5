@@ -5,9 +5,30 @@
 //| PROPOSED H4 bias logic (H4Bias.mqh). Draws only: it reads no     |
 //| series, no price feed and calls no trading function.             |
 //|                                                                  |
-//| EVERYTHING DRAWN HERE IS A PROPOSAL (tasks/T003-h4-bias-change.  |
-//| md), awaiting the client's visual validation. It is NOT a        |
-//| confirmed client rule and NOT a trading signal.                  |
+//| EVERYTHING DRAWN HERE IS A PROPOSAL / PROTOTYPE (tasks/T003-     |
+//| h4-bias-change.md), awaiting the client's visual validation. It  |
+//| is NOT a confirmed client rule and NOT a trading signal. The     |
+//| T003 bias is never presented as the client's confirmed direction.|
+//|                                                                  |
+//| What is drawn (revision 10 structure / setup separation):        |
+//|  1. T002 structure (HH+HL / LH+LL / MIXED / UNKNOWN) with its    |
+//|     two source highs and two source lows (price, pivot time,     |
+//|     confirmation time).                                          |
+//|  2. T003 prototype bias, the CURRENT protecting level (solid     |
+//|     line) and the swings it was selected from.                   |
+//|  3. MODEL DISAGREEMENT (T002 BULLISH vs T003 BEAR or T002        |
+//|     BEARISH vs T003 BULL only), since-when and for how many      |
+//|     closed bars.                                                 |
+//|  4. The SETUP, separate from the structure: setup_id, phase,     |
+//|     the SNAPSHOT level (dashed line, reference only), the        |
+//|     wick / sweep record, the eligible new FVGs, the              |
+//|     reconfirmation FVG and the ready flag (SH3SetupCtx).         |
+//|  5. HISTORICAL LIQUIDITY (proposal, not ERL / target / protecting|
+//|     level): confirmed 2/2 swings not exceeded by a wick, dotted. |
+//|     Computed by the pure helpers of H4BiasLayers.mqh; they never |
+//|     reach the bias.                                              |
+//| Nothing proposal-derived is drawn when the evaluation is         |
+//| LIMITED_BY_HISTORY.                                              |
 //|                                                                  |
 //| Object naming: every object starts with the prefix velo_t003_    |
 //| and its name is derived from a stable logic ID (absolute times), |
@@ -24,6 +45,7 @@
 #define VELO_H4_BIAS_DRAWER_MQH
 
 #include "H4Bias.mqh"
+#include "H4BiasLayers.mqh"
 
 #define H3V_PREFIX        "velo_t003_"
 #define H3V_PANEL_PREFIX  "velo_t003_pnl_"
@@ -50,6 +72,15 @@ struct SH3View
    bool              t2_consistent;   // the recomputed T002 direction equals the one in the state
    string            pivots_text;
    string            missing;         // anything that could not be located (never invented)
+   SH3LRun           dis;             // MODEL DISAGREEMENT run (T002 vs T003) at the last closed bar
+   bool              dis_consistent;  // the bias rebuilt from the events equals the replay state's bias
+   string            t2_src_text;     // the T002 source swings, in words
+   int               liq_total;       // unexceeded confirmed swings (historical liquidity, proposal)
+   int               liq_shown;
+   string            liq_text;        // "|" separated one-line descriptions of the drawn levels
+   string            setup_text;      // the setup in words (empty when no setup)
+   bool              snap_drawn;
+   SH3SetupCtx       ctx;             // read-only context of the live setup (H3SetupContext)
   };
 
 void H3VViewInit(SH3View &v)
@@ -67,6 +98,18 @@ void H3VViewInit(SH3View &v)
    v.t2_consistent = true;
    v.pivots_text   = "";
    v.missing       = "";
+   H3LRunInit(v.dis);
+   v.dis_consistent = true;
+   v.t2_src_text   = "";
+   v.liq_total     = 0;
+   v.liq_shown     = 0;
+   v.liq_text      = "";
+   v.setup_text    = "";
+   v.snap_drawn    = false;
+   SH3State s0;
+   H3StateInit(s0);
+   SH3Track t0[];
+   H3SetupContext(s0, t0, 0, v.ctx);
   }
 
 //+------------------------------------------------------------------+
@@ -160,6 +203,9 @@ string H3VEventLabel(const SH3Event &e, const bool is_new)
             if(H3VDetailValue(e.detail, "retro") == "1")
                s += " retro";
            }
+         else
+            if(e.type == H3_EV_SETUP_ENDED)
+               s += " " + H3VDetailValue(e.detail, "reason");
    return(s);
   }
 
@@ -171,6 +217,8 @@ color H3VEventColor(const int type)
       return(clrOrange);
    if(type == H3_EV_RECONFIRMED || type == H3_EV_RECONF_LOST)
       return(clrAqua);
+   if(type == H3_EV_SETUP_ENDED)
+      return(clrPlum);
    if(type == H3_EV_INT_SWEEP || type == H3_EV_INT_BREAK)
       return(clrViolet);
    return(clrSilver);
@@ -190,18 +238,18 @@ string H3VPhaseReason(const SH3State &st)
    if(st.dir == H3_NONE)
       return("no bias (" + H3NoneReasonName(st.none_reason) + ")");
    if(st.phase == H3_PH_HOLD)
-      return("HOLD: a wick crossed the frozen protecting level without a body close beyond it; HOLD from detected_at " +
-             H3VTime(st.wk_det));
+      return("HOLD: a wick crossed the protecting level (the snapshot of that moment) without a body close beyond it; HOLD from detected_at " +
+             H3VTime(st.wk_det) + "; the setup waits for an eligible new FVG to be touched (the CURRENT level still decides a flip)");
    if(st.phase == H3_PH_SWEEP_WAIT)
-      return("SWEEP_WAIT: internal liquidity swept at " + H3VTime(st.sweep_time) +
+      return("SWEEP_WAIT: interior swing taken at " + H3VTime(st.sweep_time) +
              "; waiting for an eligible new FVG to be touched (technical proposal)");
    if(st.phase == H3_PH_RECONFIRMED)
      {
       if(st.recon_reason == H3_RR_INTERNAL)
-         return("RECONFIRMED (INTERNAL): eligible FVG " + st.rec_id + " touched after the internal sweep");
+         return("RECONFIRMED (INTERNAL): eligible FVG " + st.rec_id + " touched after the interior sweep");
       return("RECONFIRMED (STRUCT): eligible FVG " + st.rec_id + " touched after the structural wick");
      }
-   return("ACTIVE: protecting level " + (st.has_level ? "defined" : "NOT defined") + ", origin " + H3OriginName(st.origin));
+   return("ACTIVE: no setup; protecting level " + (st.has_level ? "defined" : "NOT defined") + ", origin " + H3OriginName(st.origin));
   }
 
 //--- the swing with this pivot time, or -1
@@ -256,6 +304,10 @@ private:
    color             m_clr_bull;
    color             m_clr_dim;
    color             m_clr_level;
+   color             m_clr_t2;      // T002 structure marks
+   color             m_clr_snap;    // snapshot (dashed, reference only)
+   color             m_clr_liq;     // historical liquidity (dotted, thin)
+   color             m_clr_dis;     // MODEL DISAGREEMENT
 
    bool              Ensure(const string name, const ENUM_OBJECT type)
      {
@@ -338,6 +390,21 @@ private:
                           DoubleToString(sw[k].price, _Digits), H3VTime(pivot_time), H3VTime(sw[k].confirm_time)));
      }
 
+   //--- T002 source swing: a text mark near the pivot (shifted away from the bar by `off`) with the price, the
+   //--- pivot time and the confirmation time. Returns the same facts for the panel.
+   string            T2Mark(const SH4Swing &sw[], const int k, const string tag, const double off, SH3View &v)
+     {
+      if(k < 0)
+         return(tag + " none");
+      string kind = (sw[k].is_high ? "SH" : "SL");
+      string facts = StringFormat("%s %s %s pivot %s known %s", tag, kind, DoubleToString(sw[k].price, _Digits),
+                                  H3VTime(sw[k].pivot_time), H3VTime(sw[k].confirm_time));
+      Note(m_prefix + "t2_" + H3VSanitize(tag) + "_" + H4TimeStamp(sw[k].pivot_time), sw[k].pivot_time,
+           sw[k].price + (sw[k].is_high ? off : -off), "T002 " + facts, m_clr_t2,
+           (sw[k].is_high ? ANCHOR_LEFT_LOWER : ANCHOR_LEFT_UPPER), m_font - 1);
+      return(facts);
+     }
+
 public:
                      CH3BiasDrawer(void)
      {
@@ -349,6 +416,10 @@ public:
       m_clr_bull     = clrDodgerBlue;
       m_clr_dim      = clrDimGray;
       m_clr_level    = clrOrange;
+      m_clr_t2       = clrWhite;
+      m_clr_snap     = clrGoldenrod;
+      m_clr_liq      = clrLightSlateGray;
+      m_clr_dis      = clrOrangeRed;
      }
 
    string            PanelPrefix(void) const { return(m_panel_prefix); }
@@ -392,12 +463,14 @@ public:
    //--- Redraw the whole T003 map from one RELIABLE evaluation. bars[0..n-1] are the closed bars the
    //--- evaluation was given; the examined window is the last ev.r_eff of them (replay A), from which the
    //--- swings and FVG geometry are recomputed with the same T002 functions. When the evaluation is not
-   //--- reliable nothing proposal-derived is drawn (the panel reports the state).
+   //--- reliable (LIMITED_BY_HISTORY) NOTHING proposal-derived is drawn (the panel reports the state).
+   //--- Read-only with respect to the logic: ev, tracks and events are const, the state is only COPIED.
    void              Draw(const MqlRates &bars[], const int n, const SH3Params &p, const SH3Eval &ev,
                           const SH3Track &tracks[], const SH3Event &events[],
                           const string &new_ids[], const int n_new,
                           const int max_events, const int max_fvgs,
-                          const bool show_nonmarket, const bool show_invalid, SH3View &v)
+                          const bool show_nonmarket, const bool show_invalid,
+                          const bool show_liq, const int liq_max, SH3View &v)
      {
       ClearMap();
       H3VViewInit(v);
@@ -421,30 +494,60 @@ public:
       int ns = H4FindSwings(win, nw, p.left, p.right, p.period, sw, amb);
       int nf = H4FindFvgs(win, nw, p.period, fv);
       datetime x_end = win[nw - 1].time + (datetime)(p.period * 6);
+      datetime t_last = win[nw - 1].time;
       SH3State st;
       H3StateCopy(ev.st, st);                   // field-wise copy: the struct holds strings
+      H3SetupContext(st, tracks, ev.nt, v.ctx); // read-only setup context (SH3SetupCtx)
 
       H3VT2Run(win, nw, sw, ns, p.right, H3WarmUp(p), st.t2dir, v);
+      //--- MODEL DISAGREEMENT: derived from the replay events and the T002 swings, by absolute bar times
+      H3LDisagreeRun(win, nw, sw, ns, p.right, H3WarmUp(p), events, ev.ne, v.dis);
+      v.dis_consistent = (v.dis.bias == st.dir);
 
       //--- the average bar range, used to stack labels
       double rsum = 0.0;
       int rcnt = 0;
+      double pmax = win[nw - 1].high;
+      double pmin = win[nw - 1].low;
       for(int b = nw - 1; b >= 0 && rcnt < 30; b--)
         {
          rsum += (win[b].high - win[b].low);
+         if(win[b].high > pmax)
+            pmax = win[b].high;
+         if(win[b].low < pmin)
+            pmin = win[b].low;
          rcnt++;
         }
       double step = (rcnt > 0 ? rsum / rcnt * 0.6 : 0.0);
 
-      //--- 1. protecting level and the pivots it was selected from
+      //--- 0. T002 structure (HH+HL / LH+LL / MIXED / UNKNOWN) with its two source highs and two source lows
+      int nk = H3KnownCount(sw, ns, p.right, nw - 1);
+      int ih2 = -1, ih1 = -1, il2 = -1, il1 = -1;
+      H3LT2Sources(sw, nk, ih2, ih1, il2, il1);
+      string s1 = T2Mark(sw, ih2, "H-latest", step * 2.0, v);
+      string s2 = T2Mark(sw, ih1, "H-prev", step * 2.0, v);
+      string s3 = T2Mark(sw, il2, "L-latest", step * 2.0, v);
+      string s4 = T2Mark(sw, il1, "L-prev", step * 2.0, v);
+      v.t2_src_text = s1 + " | " + s2 + " | " + s3 + " | " + s4;
+      Note(m_prefix + "t2_now", t_last, win[nw - 1].high + step * 1.2,
+           "T002 structure (proposal 2/2 swings): " + H4DirName(v.t2_cur) + " (" + H3LStructureWords(v.t2_cur) + ")",
+           m_clr_t2, ANCHOR_LOWER, m_font);
+
+      //--- 1. the CURRENT protecting level (solid) and the pivots it was selected from
+      if(st.dir != H3_NONE)
+        {
+         color bc = (st.dir == H3_BEAR ? m_clr_bear : m_clr_bull);
+         Note(m_prefix + "t3_now", t_last, win[nw - 1].low - step * 1.2,
+              "T003 PROTOTYPE bias " + H3DirName(st.dir) + " " + H3PhaseName(st.phase) +
+              " (PROPOSAL, not the client's confirmed direction)",
+              bc, ANCHOR_UPPER, m_font);
+        }
       if(st.dir != H3_NONE && st.has_level)
         {
          color lc = (st.dir == H3_BEAR ? m_clr_bear : m_clr_bull);
-         string frz = (st.frozen ? " FROZEN" : "");
-         Segment(m_prefix + "lvl_" + H3VSanitize(st.lv_id), st.lv_pivot, st.lv_price, x_end, st.lv_price, lc, 2,
-                 st.frozen ? STYLE_DASH : STYLE_SOLID);
-         Note(m_prefix + "lvl_lbl_" + H3VSanitize(st.lv_id), x_end, st.lv_price,
-              StringFormat("PROTECTING LEVEL (proposal) %s%s  known %s", DoubleToString(st.lv_price, _Digits), frz,
+         Segment(m_prefix + "lvl_" + H3LShort(st.lv_id), st.lv_pivot, st.lv_price, x_end, st.lv_price, lc, 2, STYLE_SOLID);
+         Note(m_prefix + "lvl_lbl_" + H3LShort(st.lv_id), x_end, st.lv_price,
+              StringFormat("CURRENT protecting level (PROPOSAL) %s known %s - decides FLIP", DoubleToString(st.lv_price, _Digits),
                            H3VTime(st.lv_known)),
               lc, ANCHOR_RIGHT_LOWER, m_font);
          string t1 = Pivot(sw, ns, st.lv_pivot, "S", lc, v);
@@ -452,16 +555,30 @@ public:
          string t3 = Pivot(sw, ns, st.lv_prev, (st.dir == H3_BEAR ? "prevLL" : "prevHH"), m_clr_level, v);
          v.pivots_text = t1 + " | " + t2 + " | " + t3;
         }
-      //--- interior liquidity candidate (technical proposal P14); the time is part of its ID
+      //--- the SNAPSHOT of the protecting level at the creation of the setup: dashed, REFERENCE ONLY
+      if(st.dir != H3_NONE && st.setup_id != "" && st.snap_id != "")
+        {
+         datetime ts = H3VStampToTime(StringSubstr(st.snap_id, 2, 12));
+         if(ts <= 0)
+            ts = (st.snap_known > 0 ? st.snap_known : t_last);
+         bool same = (st.has_level && st.snap_id == st.lv_id);
+         Segment(m_prefix + "snap_" + H3LShort(st.setup_id), ts, st.snap_price, x_end, st.snap_price, m_clr_snap, 1, STYLE_DASH);
+         Note(m_prefix + "snap_lbl_" + H3LShort(st.setup_id), x_end, st.snap_price,
+              StringFormat("snapshot (reference only) %s known %s%s", DoubleToString(st.snap_price, _Digits),
+                           H3VTime(st.snap_known), (same ? " = current level" : "")),
+              m_clr_snap, ANCHOR_RIGHT_UPPER, m_font);
+         v.snap_drawn = true;
+        }
+      //--- interior swing candidate (technical proposal P14); the time is part of its ID
       if(st.dir != H3_NONE && st.has_lint)
         {
          datetime ti = H3VStampToTime(StringSubstr(st.li_id, 2, 12));
          if(ti > 0)
            {
-            Segment(m_prefix + "lint_" + H3VSanitize(st.li_id), ti, st.li_price, x_end, st.li_price, m_clr_dim, 1, STYLE_DOT);
-            Note(m_prefix + "lint_lbl_" + H3VSanitize(st.li_id), x_end, st.li_price,
-                 StringFormat("internal liquidity (proposal) %s%s", DoubleToString(st.li_price, _Digits),
-                              (st.li_consumed ? " CONSUMED" : "")),
+            Segment(m_prefix + "lint_" + H3LShort(st.li_id), ti, st.li_price, x_end, st.li_price, m_clr_dim, 1, STYLE_DOT);
+            Note(m_prefix + "lint_lbl_" + H3LShort(st.li_id), x_end, st.li_price,
+                 StringFormat("interior candidate (P14 proposal, not the historical liquidity layer) %s%s",
+                              DoubleToString(st.li_price, _Digits), (st.li_consumed ? " CONSUMED" : "")),
                  m_clr_dim, ANCHOR_RIGHT_UPPER, m_font);
            }
          else
@@ -499,6 +616,14 @@ public:
            }
          else
             v.missing += (v.missing != "" ? "; " : "") + "sweep bar " + H3VTime(st.sweep_time) + " not in the examined bars";
+        }
+      //--- the SETUP as one label at its last bar (id, phase, reason, ready); the facts are in the panel too
+      if(v.ctx.valid)
+        {
+         Note(m_prefix + "setup_lbl", t_last, win[nw - 1].low - step * 2.4,
+              StringFormat("SETUP (PROPOSAL) %s %s phase %s ready %s", v.ctx.stype, v.ctx.reason, v.ctx.phase,
+                           (v.ctx.ready ? "YES" : "no")),
+              clrGold, ANCHOR_UPPER, m_font);
         }
 
       //--- 3. eligible new FVGs (most recent first up to the limit) and the reconfirmation FVG
@@ -582,13 +707,44 @@ public:
                stack++;
          ArrayResize(drawn_bars, drawn + 1);
          drawn_bars[drawn] = events[e].bar_time;
-         bool is_new = H3VIdInList(H3EventId(events[e].type, events[e].bar_time, events[e].ref), new_ids, n_new);
-         Note(m_prefix + "ev_" + H3VSanitize(H3EventId(events[e].type, events[e].bar_time, events[e].ref)),
-              events[e].bar_time, win[ib].high + step * (stack + 1), H3VEventLabel(events[e], is_new),
+         string eid = H3EventId(events[e].type, events[e].bar_time, events[e].ref);
+         bool is_new = H3VIdInList(eid, new_ids, n_new);
+         Note(m_prefix + "ev_" + H4TimeStamp(events[e].bar_time) + "_" + H3LShort(eid),
+              events[e].bar_time, win[ib].high + step * (stack + 3), H3VEventLabel(events[e], is_new),
               (is_new ? clrLime : H3VEventColor(events[e].type)), ANCHOR_LOWER, (is_new ? m_font + 2 : m_font));
          drawn++;
         }
       v.ev_shown = drawn;
+
+      //--- 5. HISTORICAL LIQUIDITY (PROPOSAL - historical liquidity, not ERL / target / protecting level)
+      if(show_liq && liq_max > 0)
+        {
+         int sel[];
+         int tot = 0;
+         int cnt = H3LLiquidity(win, nw, sw, ns, p.right, liq_max, sel, tot);
+         v.liq_total = tot;
+         for(int z = 0; z < cnt; z++)
+           {
+            int kz = sel[z];
+            string kind = (sw[kz].is_high ? "SH" : "SL");
+            string one = StringFormat("%s %s pivot %s known %s", kind, DoubleToString(sw[kz].price, _Digits),
+                                      H3VTime(sw[kz].pivot_time), H3VTime(sw[kz].confirm_time));
+            Segment(m_prefix + "liq_" + sw[kz].id, sw[kz].pivot_time, sw[kz].price, x_end, sw[kz].price, m_clr_liq, 1, STYLE_DOT);
+            Note(m_prefix + "liq_lbl_" + sw[kz].id, sw[kz].pivot_time, sw[kz].price,
+                 StringFormat("liq %s %s (pivot %s)", kind, DoubleToString(sw[kz].price, _Digits), H3VTime(sw[kz].pivot_time)),
+                 m_clr_liq, (sw[kz].is_high ? ANCHOR_LEFT_LOWER : ANCHOR_LEFT_UPPER), m_font - 1);
+            v.liq_text += (v.liq_text != "" ? "|" : "") + one;
+            v.liq_shown++;
+           }
+        }
+
+      //--- 6. MODEL DISAGREEMENT: a line from the start of the run and the banner next to the last bar
+      if(v.dis.active)
+        {
+         Segment(m_prefix + "dis_since", v.dis.since, pmin, v.dis.since, pmax, m_clr_dis, 1, STYLE_DOT);
+         Note(m_prefix + "dis_lbl", t_last, win[nw - 1].high + step * 3.0,
+              H3LDisagreeText(v.dis, p.period), m_clr_dis, ANCHOR_RIGHT_LOWER, m_font + 1);
+        }
       ChartRedraw(m_chart);
      }
   };

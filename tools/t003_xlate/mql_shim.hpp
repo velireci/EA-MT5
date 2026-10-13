@@ -13,6 +13,7 @@
 #include <initializer_list>
 typedef long long datetime;
 typedef unsigned short ushort;
+typedef unsigned long ulong;
 typedef long long llong;
 struct string {
   std::string v;
@@ -67,3 +68,4 @@ inline void Print_one(const string& s) { printf("%s", s.v.c_str()); }
 template <class... A> void Print(A... a) { (Print_one(a), ...); printf("\n"); }
 inline double StringToDouble(const string& s) { return atof(s.v.c_str()); }
 template <class T> void ZeroMemory(T& x) { x = T(); }
+inline double MathAbs(double x) { return std::fabs(x); }

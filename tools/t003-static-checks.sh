@@ -187,7 +187,7 @@ check_unmodified() {
 # The T003-owned files are legitimately edited in the working tree before they are committed
 # (the T003 code files, the visual EA and its tools, the replay tools, the T003 task/report/doc, the hand-updated STATE). Every OTHER tracked file
 # must be identical to HEAD; the base-commit comparison below covers all code paths of T001/T002.
-T003_OWNED='^(src/include/H4Bias\.mqh|src/tests/T003_LogicTest\.mq5|tests/t003_reference_test\.py|tests/t003_replay_csv\.py|tests/t003_explore_synthetic\.py|tools/t003-static-checks\.sh|tools/t003-xlate-check\.sh|tools/t003_xlate/[A-Za-z0-9_.]+|tools/t003-visual-static-checks\.sh|tools/t003-visual-check\.py|src/XauUsdH4Bias\.mq5|src/include/H4BiasDrawer\.mqh|docs/T003-visual-ea\.md|tasks/T003-h4-bias-change\.md|reports/T003-verification\.md|docs/STATE\.md)$'
+T003_OWNED='^(src/include/H4Bias\.mqh|src/tests/T003_LogicTest\.mq5|tests/t003_reference_test\.py|tests/t003_replay_csv\.py|tests/t003_explore_synthetic\.py|tools/t003-static-checks\.sh|tools/t003-xlate-check\.sh|tools/t003_xlate/[A-Za-z0-9_.]+|tools/t003-visual-static-checks\.sh|tools/t003-visual-check\.py|src/XauUsdH4Bias\.mq5|src/include/H4BiasDrawer\.mqh|src/include/H4BiasLayers\.mqh|src/tests/T003_LayersTest\.mq5|docs/T003-visual-ea\.md|tasks/T003-h4-bias-change\.md|reports/T003-verification\.md|docs/STATE\.md)$'
 EXISTING=$(git ls-files | grep -vE "$T003_OWNED")
 tracked_new=0
 if check_unmodified . $EXISTING; then
@@ -258,13 +258,14 @@ structure_ok() {
   return 0
 }
 out=$(structure_ok $HDR) && echo "  PASS: revision 10 structure present: no freeze/thaw, ratchet (ii)-(iv) in H3AcceptCandidate, H3DeriveStep runs in every phase, observation events in every phase, snapshot used only by the diagnostic SNAPSHOT_CROSSED (empty signature), RECONF_LOST keeps the setup, flip ends it (INVALIDATED_BY_FLIP), new setup REPLACES the old, no SUPERSEDED/M15_OUTCOME, no expiry" || { echo "$out"; echo "  FAIL: revision 10 structure pattern"; FAIL=1; }
-# the visual EA files must stay byte-identical to the base of this round (47a25d9): the pure-logic API change must not touch them
-VIS_BASE=47a25d9
-vis_identical() { git diff --quiet "$VIS_BASE" -- src/XauUsdH4Bias.mq5 src/include/H4BiasDrawer.mqh 2>/dev/null; }
-if git cat-file -e "$VIS_BASE^{commit}" 2>/dev/null; then
-  vis_identical && echo "  PASS: src/XauUsdH4Bias.mq5 and src/include/H4BiasDrawer.mqh are byte-identical to $VIS_BASE (the visual EA is not touched in this round)" || { echo "  FAIL: a visual EA file differs from $VIS_BASE"; FAIL=1; }
+# Integration round (visual EA): the T003 LOGIC must stay byte-identical to the prototype commit 2837527 while the
+# visual files (XauUsdH4Bias.mq5, H4BiasDrawer.mqh, the new H4BiasLayers.mqh) are legitimately changed.
+LOGIC_BASE=2837527
+logic_identical() { git diff --quiet "$LOGIC_BASE" -- src/include/H4Bias.mqh tests/t003_reference_test.py src/tests/T003_LogicTest.mq5 src/include/H4Structure.mqh 2>/dev/null; }
+if git cat-file -e "$LOGIC_BASE^{commit}" 2>/dev/null; then
+  logic_identical && echo "  PASS: src/include/H4Bias.mqh, tests/t003_reference_test.py, src/tests/T003_LogicTest.mq5 (generated block included) and src/include/H4Structure.mqh are byte-identical to $LOGIC_BASE (the visual integration did not touch the logic)" || { echo "  FAIL: a logic file differs from $LOGIC_BASE"; FAIL=1; }
 else
-  echo "  INFO: base $VIS_BASE not available here; the parent must verify that the visual EA files are unchanged"
+  echo "  INFO: base $LOGIC_BASE not available here; the parent must verify that the logic files are unchanged"
 fi
 
 echo "=== CHECK 14: diagnostics, candle export text and the TrackChanges decision are read-only / behaviour neutral (static reading) ==="

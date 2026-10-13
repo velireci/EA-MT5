@@ -3,19 +3,32 @@
 //|                                                                  |
 //|  Submission XAU-20261006-E27N93 - task T003 (H4 bias, VISUAL).   |
 //|                                                                  |
-//|  VISUAL VALIDATION of the T003 bias logic (H4Bias.mqh) against   |
-//|  the client's examples. Draws, from CLOSED H4 bars of the chart  |
-//|  symbol: the T003 bias and the T002 direction (with when each    |
-//|  changed), the protecting level and the pivots it was selected   |
-//|  from (with the time they became known), the phase ACTIVE / HOLD |
-//|  / SWEEP_WAIT / RECONFIRMED with its reason, the wick or sweep   |
-//|  (source_wick_time, known, detected_at), the eligible new FVGs   |
-//|  and the reconfirmation FVG, the support flag CONVERGED / SEEDED |
-//|  / LIMITED_BY_HISTORY with its reason and the A/B depths.        |
+//|  VISUAL VALIDATION of the T003 bias logic (H4Bias.mqh, revision |
+//|  10 PROTOTYPE) against the client's examples. Draws, from CLOSED |
+//|  H4 bars of the chart symbol, with STRUCTURE and SETUP kept      |
+//|  apart:                                                          |
+//|   1 T002 structure HH+HL / LH+LL (or MIXED / UNKNOWN) with its   |
+//|     two source highs and two source lows (price, pivot time,     |
+//|     confirmation time);                                          |
+//|   2 the T003 prototype bias, the CURRENT protecting level (solid)|
+//|     and the swings it was selected from;                         |
+//|   3 MODEL DISAGREEMENT when T002 is BULLISH and T003 BEAR, or    |
+//|     T002 BEARISH and T003 BULL (MIXED / UNKNOWN never count),    |
+//|     since-when and for how many closed bars;                     |
+//|   4 the SETUP: setup_id, phase ACTIVE / HOLD / SWEEP_WAIT /      |
+//|     RECONFIRMED with its reason, the SNAPSHOT level (dashed,     |
+//|     reference only), the wick / sweep record, the eligible new   |
+//|     FVGs, the reconfirmation FVG and the ready flag;             |
+//|   5 HISTORICAL LIQUIDITY (PROPOSAL, not ERL / target / protecting|
+//|     level): confirmed 2/2 swings no later wick has exceeded,     |
+//|     dotted, limited by InpLiqMax, switchable;                    |
+//|   6 the A/B reliability flag CONVERGED / SEEDED / LIMITED_BY_    |
+//|     HISTORY with its reasons and the depths.                     |
 //|                                                                  |
 //|  EVERY RULE IS A PROPOSAL (tasks/T003-h4-bias-change.md): a      |
 //|  developer proposal awaiting the client's visual validation, not |
-//|  a client answer and not a trading rule. The panel says so.      |
+//|  a client answer and not a trading rule. The T003 bias is never  |
+//|  presented as the client's confirmed direction. The panel says so.|
 //|                                                                  |
 //|  LIVE (InpAsOfTime = 0): the logic is replayed when an H4 bar    |
 //|  CLOSES (the forming bar is never read). At start or restart the |
@@ -54,7 +67,7 @@
 //|  (tools/t003-visual-static-checks.sh).                           |
 //+------------------------------------------------------------------+
 #property copyright   "velireci"
-#property version     "1.00"
+#property version     "1.10"
 #property description "T003 H4 bias (visual validation): proposed rules - client validation pending."
 #property description "Contains no order functions and no trading logic."
 
@@ -62,6 +75,7 @@
 #include "include/TimeframeWatcher.mqh"
 #include "include/H4Structure.mqh"
 #include "include/H4Bias.mqh"
+#include "include/H4BiasLayers.mqh"
 #include "include/H4BiasDrawer.mqh"
 
 enum ENUM_T3_PANEL_CORNER
@@ -81,6 +95,10 @@ input int              InpRebuildBars   = 1000;                // R: closed H4 b
 input group "Diagnostics (why LIMITED_BY_HISTORY)"
 input bool             InpDiagnostics   = true;                // Log (Experts) and show (panel) the A/B diagnostics when the evaluation is LIMITED_BY_HISTORY
 input bool             InpExportCandles = false;               // Write the closed-bar set of the evaluation to MQL5/Files/velo_t003_diag_<symbol>_<last bar>.csv (closed bars only)
+
+input group "Historical liquidity layer (PROPOSAL - not ERL / target / protecting level)"
+input bool             InpShowLiquidity = true;                // Draw the historical liquidity layer: confirmed 2/2 swings that no later wick has exceeded (dotted). A proposal; never used by the bias
+input int              InpLiqMax        = 6;                   // Most levels drawn, the NEAREST to the last closed bar's close first (0..50)
 
 input group "Historical review (0 = live mode)"
 input datetime         InpAsOfTime      = 0;                   // AsOfTime: BROKER/SERVER time as shown by MT5 - NOT UTC, NOT TradingView chart time (they can differ; never assume equal). 0 = live mode
@@ -147,7 +165,10 @@ string            g_prev_t2    = "";
 string            g_prev_phase = "";
 string            g_changes[];
 int               g_nchanges   = 0;
+string            g_prev_setup = "";
 string            g_last_flag_text = "";
+int               g_tc_mode    = H3_TC_BASELINE;   // decision of the last TrackChanges (live); BASELINE in historical mode
+string            g_dis_key    = "";               // MODEL DISAGREEMENT state last logged (once per change)
 
 //--- historical review mode
 bool              g_hist     = false;
@@ -168,6 +189,7 @@ int  CopyClosedSet(MqlRates &out[], datetime &oldest, bool &newest_ok);
 void EvaluateAndDraw(const string was_cleared);
 void ConsumeEvents(void);
 void TrackChanges(void);
+void LogDisagreement(void);
 void RunDiagnostics(void);
 void ExportCandles(void);
 void LogEvaluation(void);
@@ -209,6 +231,9 @@ int OnInit(void)
    g_export_text = "";
    g_prev_valid = false;
    g_nchanges = 0;
+   g_prev_setup = "";
+   g_tc_mode = H3_TC_BASELINE;
+   g_dis_key = "";
    g_last_flag_text = "";
    g_clear_reason = "";
    g_set_closed = 0;
@@ -254,6 +279,8 @@ int OnInit(void)
       PrintFormat("NOTICE: rebuild depth R=%d requested, %d closed bars are copied (R is at least 3*L and at most %d)",
                   InpRebuildBars, g_depth, g_params.hard_cap);
 
+   PrintFormat("T003 historical liquidity layer (PROPOSAL, not ERL / target / protecting level; read-only, never used by the bias): %s, at most %d level(s), nearest to the last close first",
+               (InpShowLiquidity ? "ON" : "off"), MathMax(0, MathMin(50, InpLiqMax)));
    PrintFormat("T003 diagnostics: log/panel %s | candle export %s (closed bars only; file in MQL5\\Files of the terminal data folder)",
                (InpDiagnostics ? "ON" : "off"), (InpExportCandles ? "ON" : "off"));
    Print("================ T003 H4 bias (visual) ================");
@@ -349,6 +376,9 @@ void ClearBiasState(const string reason)
    g_cursor = 0;
    g_n_new = 0;
    g_prev_valid = false;
+   g_prev_setup = "";
+   g_tc_mode = H3_TC_BASELINE;
+   g_dis_key = "";
    g_cons_text = "";
    g_clear_reason = reason;
    ArrayResize(g_new_ids, 0);
@@ -466,9 +496,12 @@ void EvaluateAndDraw(const string was_cleared)
       ConsumeEvents();
    g_drawer.Draw(g_bars, g_n, g_params, g_ev, g_tracks, g_events, g_new_ids, g_n_new,
                  MathMax(0, MathMin(200, InpMaxEvents)), MathMax(0, MathMin(50, InpMaxFvgs)),
-                 InpShowNonMarket, InpShowInvalidFvgs, g_view);
+                 InpShowNonMarket, InpShowInvalidFvgs,
+                 InpShowLiquidity, MathMax(0, MathMin(50, InpLiqMax)), g_view);
+   g_tc_mode = H3_TC_BASELINE;
    if(!g_hist)
       TrackChanges();
+   LogDisagreement();
    LogEvaluation();
    RunDiagnostics();
    ExportCandles();
@@ -596,6 +629,11 @@ void ConsumeEvents(void)
      {
       for(int i = 0; i < nn; i++)
         {
+         if(!nev[i].market)
+           {
+            PrintFormat("T003 observation (not a market event) at closed bar %s: %s", H3VTime(nev[i].bar_time), H3EventText(nev[i]));
+            continue;
+           }
          if(g_n_new >= NEW_IDS_MAX)
            {
             int keep = NEW_IDS_MAX / 2;
@@ -659,7 +697,9 @@ void TrackChanges(void)
    string t2 = g_ev.st.t2dir;
    string ph = (g_ev.st.dir == H3_NONE ? "-" : H3PhaseName(g_ev.st.phase));
    string when = H3VTime(g_ev.last_time);
+   string su = (g_ev.st.dir == H3_NONE ? "-" : (g_ev.st.setup_id != "" ? g_ev.st.setup_id : "none"));
    int mode = H3TrackChangesMode(g_cons_status, g_prev_valid);
+   g_tc_mode = mode;
    if(mode == H3_TC_REPORT)
      {
       if(bias != g_prev_bias)
@@ -668,6 +708,8 @@ void TrackChanges(void)
          PushChange(StringFormat("T002 DIRECTION CHANGED %s -> %s at closed bar %s", g_prev_t2, t2, when));
       if(ph != g_prev_phase && bias == g_prev_bias)
          PushChange(StringFormat("PHASE CHANGED %s -> %s at closed bar %s (PROPOSAL)", g_prev_phase, ph, when));
+      if(su != g_prev_setup && bias == g_prev_bias)
+         PushChange(StringFormat("SETUP CHANGED %s -> %s at closed bar %s (PROPOSAL)", g_prev_setup, su, when));
      }
    else
       if(mode == H3_TC_REDERIVE && (bias != g_prev_bias || t2 != g_prev_t2 || ph != g_prev_phase))
@@ -679,6 +721,42 @@ void TrackChanges(void)
    g_prev_bias = bias;
    g_prev_t2 = t2;
    g_prev_phase = ph;
+   g_prev_setup = su;
+  }
+
+//+------------------------------------------------------------------+
+//| LogDisagreement: MODEL DISAGREEMENT (T002 BULLISH vs T003 BEAR or |
+//| T002 BEARISH vs T003 BULL; MIXED / UNKNOWN / no bias never count) |
+//| is logged ONCE per change of its state (the key has no bar count).|
+//| A change is called a market change only when the consumer accepted|
+//| the step (live, H3_TC_REPORT); at start, rebuild, gap and in      |
+//| historical mode it is a STATE of the replay, not a market change. |
+//| Nothing is logged for an unreliable evaluation (no new market     |
+//| event, nothing proposal-derived).                                 |
+//+------------------------------------------------------------------+
+void LogDisagreement(void)
+  {
+   if(!g_ev.reliable)
+     {
+      g_dis_key = "";
+      return;
+     }
+   string key = H3LDisagreeKey(g_view.dis);
+   if(key == g_dis_key)
+      return;
+   string prev = g_dis_key;
+   g_dis_key = key;
+   if(prev == "" && key == "NONE")
+      return;                                   // first evaluation without a disagreement: nothing to say
+   string how = (!g_hist && g_tc_mode == H3_TC_REPORT
+                 ? "CHANGE observed at the closed bar"
+                 : "STATE of the replay (start / rebuild / historical; NOT reported as a market change)");
+   if(g_view.dis.active)
+      PrintFormat("T003 %s | %s | closed bar %s | (PROPOSAL rules, client validation pending)", H3LDisagreeText(g_view.dis, g_params.period),
+                  how, H3VTime(g_ev.last_time));
+   else
+      PrintFormat("T003 MODEL DISAGREEMENT ended or not present (T002 %s vs T003 %s) | %s | closed bar %s",
+                  H4DirName(g_view.dis.t2dir), H3DirName(g_view.dis.bias), how, H3VTime(g_ev.last_time));
   }
 
 //+------------------------------------------------------------------+
@@ -747,10 +825,12 @@ void RenderPanel(void)
    g_panel.Line(StringFormat("depths: R requested %d | R used %d | B depth %d | warm-up %d | check %d | bars available %d",
                              g_ev.r_req, g_ev.r_eff, g_ev.b_depth, g_ev.warm, g_ev.chk, g_ev.n_avail), clrSilver);
    if(g_ev.note != "")
-      g_panel.Line("note: " + g_ev.note, clrOrange);
+      g_panel.Line("note: " + g_ev.note + (StringFind(g_ev.note, "ORG_DIFF") >= 0 ? "   (ORG_DIFF is informational: the origin name differs between A and B; it is never a reason)" : ""), clrOrange);
    if(!g_ev.reliable)
      {
-      g_panel.Line("T003 bias: UNKNOWN (not reliable). Nothing proposal-derived is drawn and no event is emitted.", clrOrange);
+      g_panel.Line("T003 bias: UNKNOWN (not reliable). Nothing proposal-derived is drawn (no setup, no liquidity layer) and no market event is emitted.", clrOrange);
+      if(H3LReasonHelp(g_ev.reason) != "")
+         g_panel.Line("reasons: " + H3LReasonHelp(g_ev.reason), clrOrange);
       if(!g_hist)
          g_panel.Line("consumer: " + g_cons_text, clrOrange);
       if(InpDiagnostics && g_diag.valid && g_ndiag >= 8)
@@ -766,31 +846,34 @@ void RenderPanel(void)
       return;
      }
 
-   //--- bias, phase, T002 direction
+   //--- STRUCTURE: T002 direction (proposal) and the T003 prototype bias, kept apart
    SH3State st;
    H3StateCopy(g_ev.st, st);
    string bias = H3DirName(st.dir);
    color bc = (st.dir == H3_BEAR ? InpColorBear : (st.dir == H3_BULL ? InpColorBull : clrSilver));
-   if(st.dir == H3_NONE)
-      g_panel.Line(StringFormat("T003 bias: NONE (%s)", H3NoneReasonName(st.none_reason)), bc);
-   else
-      g_panel.Line(StringFormat("T003 bias: %s   phase %s   origin %s   since %s  (PROPOSAL)", bias, H3PhaseName(st.phase),
-                                H3OriginName(st.origin), H3VTime(st.bias_start)), bc);
-   g_panel.Line("phase reason: " + H3VPhaseReason(st), bc);
-   string t2line = StringFormat("T002 direction: %s   since bar %s", st.t2dir, H3VTime(g_view.t2_since));
+   g_panel.Line("--- STRUCTURE (PROPOSAL; the client confirmed how direction is DESCRIBED, N1, not these swings or this bias) ---", clrGold);
+   string t2line = StringFormat("T002 structure (2/2 swings, proposal): %s (%s)   since bar %s", st.t2dir,
+                                H3LStructureWords(g_view.t2_cur), H3VTime(g_view.t2_since));
    if(!g_view.t2_exact)
       t2line += " (or earlier: the run reaches the start of the examined bars)";
    else
       if(g_view.t2_prev >= 0)
          t2line += StringFormat("   previous %s", H4DirName(g_view.t2_prev));
    g_panel.Line(t2line, clrWhite);
-   string agree = "n/a";
-   if(st.dir == H3_BEAR)
-      agree = (st.t2dir == "BEARISH" ? "AGREE" : "DISAGREE");
-   if(st.dir == H3_BULL)
-      agree = (st.t2dir == "BULLISH" ? "AGREE" : "DISAGREE");
-   g_panel.Line("T003 bias vs T002 direction: " + agree + "  (the two may legitimately differ)",
-                agree == "DISAGREE" ? clrOrange : clrSilver);
+   g_panel.Line("T002 sources: " + g_view.t2_src_text, clrSilver);
+   if(st.dir == H3_NONE)
+      g_panel.Line(StringFormat("T003 PROTOTYPE bias: NONE (%s)", H3NoneReasonName(st.none_reason)), bc);
+   else
+      g_panel.Line(StringFormat("T003 PROTOTYPE bias (PROPOSAL, NOT the client's confirmed direction): %s   phase %s   origin %s   since %s",
+                                bias, H3PhaseName(st.phase), H3OriginName(st.origin), H3VTime(st.bias_start)), bc);
+   g_panel.Line("phase reason: " + H3VPhaseReason(st), bc);
+   if(g_view.dis.active)
+      g_panel.Line(H3LDisagreeText(g_view.dis, g_params.period), clrOrangeRed);
+   else
+      g_panel.Line(StringFormat("T002 vs T003: no model disagreement (T002 %s, T003 %s). Disagreement = T002 BULLISH vs T003 BEAR or T002 BEARISH vs T003 BULL only; MIXED / UNKNOWN / no bias do not count",
+                                H4DirName(g_view.dis.t2dir), H3DirName(g_view.dis.bias)), clrSilver);
+   if(!g_view.dis_consistent)
+      g_panel.Line("WARNING: the bias rebuilt from the events differs from the replay state", clrRed);
    //--- last bias-change event of the history (a FLIP, BREAK_SET, SEED or CONFLICT)
    for(int i = g_ev.ne - 1; i >= 0; i--)
      {
@@ -804,43 +887,60 @@ void RenderPanel(void)
      }
    for(int c = g_nchanges - 1; c >= 0; c--)
       g_panel.Line("observed live: " + g_changes[c], clrAqua);
-
-   //--- level, wick, sweep, FVGs
+   //--- the CURRENT protecting level (solid on the chart) and where it was selected from
    if(st.dir != H3_NONE && st.has_level)
      {
-      g_panel.Line(StringFormat("protecting level (PROPOSAL): %s %s known %s%s", st.lv_id, DoubleToString(st.lv_price, dg),
-                                H3VTime(st.lv_known), (st.frozen ? "  FROZEN" : "")), clrWhite);
+      g_panel.Line(StringFormat("CURRENT protecting level (PROPOSAL, decides FLIP): %s %s known %s", st.lv_id,
+                                DoubleToString(st.lv_price, dg), H3VTime(st.lv_known)), clrWhite);
       g_panel.Line("selected from: " + g_view.pivots_text, clrSilver);
      }
    else
       if(st.dir != H3_NONE)
-         g_panel.Line("protecting level: NOT defined (no level is drawn)", clrOrange);
-   if(st.dir != H3_NONE && st.has_wick)
-      g_panel.Line(StringFormat("wick: source_wick_time %s | known %s | detected_at %s | %s", H3VTime(st.wk_src),
-                                H3VTime(st.wk_known), H3VTime(st.wk_det),
-                                (st.wk_retro ? "RETROACTIVE (level known after the wick)" : "not retroactive")), clrOrange);
-   if(st.dir != H3_NONE && st.sweep_time != 0)
-      g_panel.Line(StringFormat("internal sweep (technical proposal): bar %s, wait from %s", H3VTime(st.sweep_time),
-                                H3VTime(st.wait_start)), clrViolet);
+         g_panel.Line("CURRENT protecting level: NOT defined (no level is drawn)", clrOrange);
    if(st.dir != H3_NONE && st.has_lint)
-      g_panel.Line(StringFormat("internal liquidity candidate (proposal): %s %s%s", st.li_id, DoubleToString(st.li_price, dg),
-                                (st.li_consumed ? " CONSUMED" : "")), clrViolet);
-   if(st.dir != H3_NONE && st.phase != H3_PH_ACTIVE)
+      g_panel.Line(StringFormat("interior candidate (P14 proposal; not the historical liquidity layer): %s %s%s", st.li_id,
+                                DoubleToString(st.li_price, dg), (st.li_consumed ? " CONSUMED" : "")), clrViolet);
+
+   //--- the SETUP, separate from the structure (read-only SH3SetupCtx)
+   g_panel.Line("--- SETUP (PROPOSAL / PROTOTYPE; separate from the structure; the snapshot is a reference only) ---", clrGold);
+   if(!g_view.ctx.valid)
+      g_panel.Line("SETUP: none (phase ACTIVE; no wick or sweep is waiting for a new FVG)", clrSilver);
+   else
      {
-      g_panel.Line(StringFormat("eligible new FVGs: %d (invalid %d), %d drawn | reconfirmation FVG: %s", g_view.fvg_total,
-                                g_view.fvg_invalid, g_view.fvg_shown, (st.rec_id != "" ? st.rec_id : "none")), clrGold);
+      g_panel.Line(StringFormat("SETUP %s", g_view.ctx.setup_id), clrGold);
+      g_panel.Line(StringFormat("  direction %s | type %s | reason %s | phase %s | READY %s (true only in RECONFIRMED; M15 is not built)",
+                                g_view.ctx.direction, g_view.ctx.stype, g_view.ctx.reason, g_view.ctx.phase, (g_view.ctx.ready ? "YES" : "no")), g_view.ctx.ready ? clrLime : clrGold);
+      g_panel.Line(StringFormat("  snapshot level (dashed, reference only): %s %s known %s", g_view.ctx.snap_id,
+                                DoubleToString(g_view.ctx.snap_price, dg), H3VTime(g_view.ctx.snap_known)), clrGoldenrod);
+      g_panel.Line(StringFormat("  current level (solid, decides FLIP): %s %s", (g_view.ctx.live_id != "" ? g_view.ctx.live_id : "none"),
+                                (g_view.ctx.live_id != "" ? DoubleToString(g_view.ctx.live_price, dg) : "-")), clrWhite);
+      if(st.has_wick)
+         g_panel.Line(StringFormat("  wick: source_wick_time %s | known %s | detected_at %s | %s", H3VTime(st.wk_src),
+                                   H3VTime(st.wk_known), H3VTime(st.wk_det),
+                                   (st.wk_retro ? "RETROACTIVE (level known after the wick)" : "not retroactive")), clrOrange);
+      if(st.sweep_time != 0)
+         g_panel.Line(StringFormat("  internal sweep (technical proposal): bar %s, wait from %s", H3VTime(st.sweep_time),
+                                   H3VTime(st.wait_start)), clrViolet);
+      g_panel.Line(StringFormat("  eligible new FVGs: %d (invalid %d), %d drawn", g_view.fvg_total, g_view.fvg_invalid, g_view.fvg_shown), clrGold);
+      if(g_view.ctx.fvg_id != "")
+         g_panel.Line(StringFormat("  reconfirmation FVG: %s [%s - %s] confirmed %s | valid from %s", g_view.ctx.fvg_id,
+                                   DoubleToString(g_view.ctx.fvg_lower, dg), DoubleToString(g_view.ctx.fvg_upper, dg),
+                                   H3VTime(g_view.ctx.fvg_conf), H3VTime(g_view.ctx.valid_from)), clrGold);
+      else
+         g_panel.Line("  reconfirmation FVG: none", clrSilver);
       if(st.pre != "")
-         g_panel.Line("PRE_WICK FVGs (older than the wick, ineligible): " + st.pre, clrSilver);
+         g_panel.Line("  PRE_WICK FVGs (older than the wick, ineligible): " + st.pre, clrSilver);
      }
    g_panel.Line(StringFormat("entry-block flags, REPORTED ONLY (nothing acts on them): HOLD %s (client S3) | SWEEP_WAIT %s (technical proposal)",
                              (H3HoldBlock(st) ? "yes" : "no"), (H3SweepBlock(st) ? "yes" : "no")), clrSilver);
 
    //--- events: history versus new
+   g_panel.Line("--- EVENTS ---", clrGold);
    if(g_hist)
       g_panel.Line(StringFormat("events in the history: %d, %d drawn (%d not drawn: limit, filter or outside the window)",
                                 g_ev.ne, g_view.ev_shown, g_view.ev_hidden), clrSilver);
    else
-      g_panel.Line(StringFormat("events in the history: %d, %d drawn (%d not drawn) | NEW since the baseline: %d | consumer: %s",
+      g_panel.Line(StringFormat("events in the history: %d, %d drawn (%d not drawn) | NEW market events since the baseline: %d | consumer: %s",
                                 g_ev.ne, g_view.ev_shown, g_view.ev_hidden, g_new_total, g_cons_text), clrSilver);
    int listed = 0;
    for(int e = g_ev.ne - 1; e >= 0 && listed < 4; e--)
@@ -849,6 +949,26 @@ void RenderPanel(void)
       g_panel.Line(StringFormat("  %s  bar %s  %s", (is_new ? "[NEW] " : "[hist]"), H3VTime(g_events[e].bar_time),
                                 H3VEventLabel(g_events[e], false)), is_new ? clrLime : clrSilver);
       listed++;
+     }
+
+   //--- historical liquidity (proposal)
+   g_panel.Line("--- PROPOSAL - historical liquidity, not ERL / target / protecting level ---", clrGold);
+   if(!InpShowLiquidity)
+      g_panel.Line("liquidity layer: OFF (input InpShowLiquidity)", clrSilver);
+   else
+     {
+      g_panel.Line(StringFormat("confirmed 2/2 swings not exceeded by a later wick: %d, %d drawn (nearest to the last close first; limit InpLiqMax %d). Fractal 2/2 and this definition are proposals: the client confirmed the concept (N2), not the algorithm",
+                                g_view.liq_total, g_view.liq_shown, MathMax(0, MathMin(50, InpLiqMax))), clrSilver);
+      string rest = g_view.liq_text;
+      int shown_l = 0;
+      while(rest != "" && shown_l < 8)
+        {
+         int bar = StringFind(rest, "|");
+         string one = (bar < 0 ? rest : StringSubstr(rest, 0, bar));
+         rest = (bar < 0 ? "" : StringSubstr(rest, bar + 1));
+         g_panel.Line("  liq " + one, clrLightSlateGray);
+         shown_l++;
+        }
      }
    if(g_view.missing != "")
       g_panel.Line("not located: " + g_view.missing, clrOrange);
