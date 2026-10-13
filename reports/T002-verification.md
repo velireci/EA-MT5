@@ -132,4 +132,22 @@ Verification (mawk): check 15 passes on the real source; a guard confirms `fn_bo
 
 ### Still open (not closed by any of the above)
 Removed from the waiting list on this update: the rerun of the static checks in Codex's environment and the review of `a92b033` (both done, see above).
-Historical check on a weekend as-of time; reload and duplicate objects; Tauro versus TradingView candle and time alignment; the M5/M15 confirmation relation; the policy for targets under 2R. An alternative direction model that keeps the trend until a structure break is only a proposal, not implemented and not validated by the client. T002 is not marked complete.
+Historical check on weekend as-of times (one observed by the owner, section 12; not enough to close it); reload and duplicate objects (visible part of the object list only, section 12; the full list was not checked); Tauro versus TradingView candle and time alignment; the M5/M15 confirmation relation; the policy for targets under 2R. The alternative direction model that keeps the trend until a structure break is now written up as a specification draft (tasks/T003-h4-bias-change.md, based on the client's 2026-10-13 text clarifications); it is not implemented and its mechanical choices are not validated by the client. T002 is not marked complete.
+
+## 12. Owner observations on the historical mode (relayed by Codex, 2026-10-13)
+Attribution: these are the owner's observations in MT5, relayed by Codex. I did not run MT5 or see the screenshots or the object list; nothing is attached to the repository.
+
+| Observation | Detail as relayed |
+|---|---|
+| Weekend as-of test | `AsOfTime = 2026.10.04 12:00` (server time; 2026-10-04 is a Sunday). Last closed H4 candle used: 2026.10.02 20:00 (a Friday). Close 4147.62. |
+| Restart | After restarting, the historical map kept the same results: 70 swings and 53 FVGs. |
+| Duplicate objects | In the visible part of the object list no duplicates were seen. The panel had one label group `pnl_000` to `pnl_015`; the `fvg_` rectangles and `fvgt_` texts are different objects of the same zone, not duplicates. The full list was not checked. |
+| Readability | Some labels overlap the panel and candles. This stays a readability issue. |
+
+What this shows and does not show:
+- At that one weekend as-of time the panel used the last closed H4 candle before the weekend and gave a close, and a restart reproduced the same swing and FVG counts. That is one observation, not a proof that every weekend or gap case behaves correctly.
+- The reload/duplicate check is only partly done (visible part of the list).
+- It does not show that the Tauro candles match the client's TradingView candles, nor that the swing and FVG counts are what the client would mark. The 70 swings and 53 FVGs reflect the proposed rules (no size filter), and the label overlap is a recorded readability issue for a later change.
+
+## 13. Specification draft after the client's clarifications (2026-10-13)
+`tasks/T003-h4-bias-change.md`, `docs/STRATEGY_SPEC.md` and `docs/DECISIONS.md` now separate the client's statements, the earlier authorised decisions, the proposals and the open questions for the H4 direction change (body break, wick blocking, a new FVG after the wick, reconfirmation). The client's screenshots are treated as illustrations; text wins. No code was changed and no T003 test exists. T002's code, tests and tooling are untouched by this step.
