@@ -604,17 +604,16 @@ def sel_before(fa, da, fb, db):
 
 
 def fvg_step(t, bars, fv, p, st, tracks, events):
-    """step (3): FVG eligibility / invalidation / touch for bar t.
-    Returns True when the level was thawed on this bar (RECONFIRMED(INTERNAL) lost its
-    FVG): the derive step is then skipped for this bar, so the re-derivation starts at
-    the FOLLOWING bar (AMBIGUITY 1, task P3/P14)."""
+    """step (3): FVG eligibility / invalidation / touch for bar t (revision 7).
+    RECONFIRMED(INTERNAL) freezes the level known before bar t; when its FVG is lost the
+    level thaws on this bar and the derive step (step 4) of the SAME bar re-derives it
+    (used from bar t+1) unless another FVG is touched on this bar (frozen again)."""
     bar = bars[t]
     open_t = bar.time
     d = st.dir
     ph = st.phase
-    skip_derive = False
     if ph != 'HOLD' and ph != 'SWEEP_WAIT' and ph != 'RECONFIRMED':
-        return False
+        return
     # newly confirmed eligible FVG (candle C = bar t)
     a = t - 2
     if a >= 0:
@@ -642,17 +641,21 @@ def fvg_step(t, bars, fv, p, st, tracks, events):
                                     'fvg=%s;to=%s' % (tr.id, to)))
                 if st.recon_reason == 'INTERNAL':
                     # THAW: the level was frozen by the internal reconfirmation only; the
-                    # wait is open again. Derivation is skipped on THIS bar and resumes at
-                    # the next one (the frozen level still judges the next bar).
+                    # wait is open again. The derive step of THIS bar re-derives the level
+                    # (from the closed bars up to t) for use from bar t+1.
                     st.frozen = False
-                    skip_derive = True
                 st.phase = to
                 st.recon_reason = ''
                 st.rec_id = ''
     if st.phase == 'HOLD' or st.phase == 'SWEEP_WAIT':
         best = None
         bestd = 0.0
+        # AMBIGUITY 20a (revision 7): a touch while NO protecting level is defined is not
+        # recorded (no trustworthy RECONFIRMED(INTERNAL) without a level to freeze); the
+        # bar is not remembered and a later touch with a level can record. HOLD always has one.
         for tr in tracks:
+            if st.phase == 'SWEEP_WAIT' and not st.has_level:
+                break
             if tr.invalid:
                 continue
             f = fv[tr.f]
@@ -666,22 +669,17 @@ def fvg_step(t, bars, fv, p, st, tracks, events):
         if best is not None:
             reason = 'STRUCT' if st.phase == 'HOLD' else 'INTERNAL'
             if reason == 'INTERNAL':
-                # AMBIGUITY 20: the freeze also applies when no level is defined at the touch;
-                # the candidates are cleared at the freeze, so the bar after a thaw raises no
-                # CONTINUATION / INTERNAL event and no sweep (they return at the end of that bar).
                 # FREEZE (P3): the level KNOWN BEFORE the touching candle stays; the derive
                 # step of this bar is skipped (frozen), so a swing confirmed by the touching
-                # candle cannot change the event's level.
+                # candle cannot change the event's level. The continuation / interior
+                # candidates are kept (not used while RECONFIRMED, refreshed at the thaw).
                 st.frozen = True
-                st.has_ext = False
-                st.has_lint = False
             st.phase = 'RECONFIRMED'
             st.recon_reason = reason
             st.rec_id = best.id
             best.recorded = True
             events.append(Event(EV_RECONFIRMED, open_t, best.id,
                                 'fvg=%s;reason=%s' % (best.id, reason)))
-    return skip_derive
 
 
 def derive_step(t, bars, sw, fv, p, st, tracks, events):
@@ -743,8 +741,7 @@ def process_bar(t, bars, sw, fv, p, st, tracks, events):
     else:
         flipped = bias_step(t, bars, sw, fv, p, st, tracks, events)
         if not flipped:
-            if fvg_step(t, bars, fv, p, st, tracks, events):
-                return
+            fvg_step(t, bars, fv, p, st, tracks, events)
     derive_step(t, bars, sw, fv, p, st, tracks, events)
 
 
@@ -1392,6 +1389,72 @@ def sc_bos(k):
     return s.bars()
 
 
+def sc_thaw_family(kind):
+    """Revision 7 scenarios (SELL). Prefix: bear_leg().to(100).to(88) (level 117, interior high
+    105 at bar 29). Bar 33 sweeps the interior high (high 111 > 105, close 95 <= 105). Every
+    kind below keeps bars 0..32 identical."""
+    s = bear_leg().to(100).to(88)
+    two = kind in ('recon_two_fvg', 'recon_two_fvg_ctl')
+    if kind.startswith('recon_nolevel'):
+        # a touch while no protecting level is defined (body close above the new candidate 111)
+        s.bar(111, 90, 95)             # 33 sweep
+        s.bar(92, 86, 88)              # 34
+        s.bar(87, 80, 83)              # 35: FVG [87,90] (A=33, C=35)
+        s.bar(86, 76, 80)              # 36: does not reach the FVG
+        set_c(s, 80)
+        s.to(60)                       # fall, new lower low (low 55 at the last bar)
+        if kind == 'recon_nolevel':
+            s.bar(115, 56, 113)        # closes above 111: candidate level rejected, FVG invalid
+        else:
+            s.bar(110, 56, 109)        # control: stays below 111, the level 111 is defined
+        s.bar(112 if kind == 'recon_nolevel' else 110, 100, 108)
+        s.bar(107, 98, 100)            # A of a new bearish FVG
+        s.bar(99, 90, 92)
+        s.bar(89, 80, 85)              # C: FVG [89,98]
+        s.bar(95, 84, 90)              # touches the new FVG (level undefined / defined)
+        s.pts([88])
+        return s
+    if two:
+        s.bar(111, 90, 95)             # 33 sweep (A of FVG2 [87,90])
+        s.bar(92, 84, 88)              # 34 (A of FVG1)
+        s.bar(87, 78, 82)              # 35: FVG2 = [87,90]
+        s.bar(83, 76, 80)              # 36: FVG1 = [83,84]
+        s.bar(85, 79, 83.5)            # 37: touches FVG1 only (high 85 < 87): RECONFIRMED
+        set_c(s, 80)
+        upper_close = 84
+    else:
+        s.bar(111, 90, 95)             # 33 sweep
+        s.bar(92, 86, 88)              # 34
+        s.bar(87, 80, 83)              # 35: FVG [87,90]
+        s.bar(91, 79, 82)              # 36: touches it (wide bar): RECONFIRMED(INTERNAL), level 117
+        set_c(s, 82)
+        upper_close = 90
+    s.to(60)                           # new lower low (pivot at the last bar, low 55)
+    s.to(80)                           # rally with closes at or below the FVG's upper edge
+    s.bar(95, 80, 84)                  # interior high 95 (swing high)
+    s.bar(90, 78, 80)
+    s.bar(88, 76, 78)
+    # T: closes above the recorded FVG's upper edge (invalidated) -> thaw bar
+    if two:
+        s.bar(93, 80, 88)              # T: also touches FVG2 (close 88 <= 90): frozen again
+    else:
+        s.bar(93, 82, 92)              # T: close 92 > 90
+    # T+1
+    if kind in ('recon_thaw', 'recon_two_fvg', 'recon_two_fvg_ctl'):
+        s.bar(92, 84, 90)
+    elif kind == 'recon_thaw_wick':
+        s.bar(112, 90, 100)            # high above the level re-derived at T (111)
+    elif kind == 'recon_thaw_break':
+        s.bar(114, 90, 113)            # body close above the level re-derived at T (111)
+    elif kind == 'recon_thaw_cont':
+        s.bar(92, 40, 50)              # close below the latest lower low (55): CONTINUATION
+    elif kind == 'recon_thaw_isweep':
+        s.bar(100, 88, 93)             # high above the interior high 95, close below it
+    elif kind == 'recon_thaw_ibreak':
+        s.bar(100, 88, 98)             # close above the interior high 95, below the level
+    return s
+
+
 def sc_bear_sweep(kind):
     s = bear_leg().to(100).to(88)
     if kind == 'sweep_fvg_touch':
@@ -1445,9 +1508,9 @@ def sc_bear_sweep(kind):
         s.bar(80, 68, 75)
         s.bar(100, 80, 96)
         s.pts([94])
-    elif kind in ('recon_later_swing', 'recon_thaw', 'recon_thaw_wick', 'recon_thaw_break'):
-        # FINDING 2 (a)/(b): the touch is on bar 38; a new lower low (pivot 48) is confirmed
-        # long after the reconfirmation and would replace the level (117 -> 100) if unfrozen.
+    elif kind == 'recon_later_swing':
+        # FINDING 2 (a): the touch is on bar 38; a new lower low (pivot 48) is confirmed long
+        # after the reconfirmation and would replace the level (117 -> 100) if unfrozen.
         s.bar(111, 99, 103)
         s.bar(100, 90, 94)
         s.bar(95, 85, 90)
@@ -1455,18 +1518,8 @@ def sc_bear_sweep(kind):
         s.bar(100, 92, 96)
         s.pts([94])
         s.to(60).to(80)
-        if kind != 'recon_later_swing':
-            # (b) rally; the bar below closes above the recorded FVG's upper edge (99): the
-            # recorded FVG is invalidated (thaw bar T); the next bar is T+1
-            s.pts([84, 88, 92])
-            s.bar(100, 90, 99.5)
-            if kind == 'recon_thaw':
-                s.bar(100, 90, 98)           # T+1: nothing special; the level is re-derived here
-                s.pts([94])
-            elif kind == 'recon_thaw_wick':
-                s.bar(118, 96, 98)           # T+1: high above the OLD frozen level 117
-            else:
-                s.bar(121, 96, 119)          # T+1: body close above the OLD frozen level 117
+    elif kind.startswith('recon_thaw') or kind.startswith('recon_nolevel') or kind == 'recon_two_fvg':
+        s = sc_thaw_family(kind)
     return s.bars()
 
 
@@ -1597,7 +1650,9 @@ WICK_KINDS = ('break', 'wick', 'eqclose', 'eqhigh', 'eqboth', 'pre_touched', 'a_
 SWEEP_KINDS = ('sweep_fvg_touch', 'restart', 'wick_instead', 'break_instead', 'int_break',
                'wait_wick', 'wait_break', 'no_level_after_flip',
                'recon_wick', 'recon_break', 'recon_touch_swing', 'recon_later_swing',
-               'recon_thaw', 'recon_thaw_wick', 'recon_thaw_break')
+               'recon_thaw', 'recon_thaw_wick', 'recon_thaw_break', 'recon_thaw_cont',
+               'recon_thaw_isweep', 'recon_thaw_ibreak', 'recon_two_fvg',
+               'recon_nolevel', 'recon_nolevel_ctl')
 E_KINDS = ('cont', 'int_break', 'flip', 'no_level_crash', 'wick_struct', 'sweep_fvg_touch')
 
 _CASES = None
@@ -2415,8 +2470,12 @@ def derive_id_at(c, upto, d):
     return lvl.id if lvl is not None else '-'
 
 
+def bar_idx(c, t):
+    return [i for i in range(c.n_use) if c.bars[i].time == t][0]
+
+
 def test_22_freeze_internal():
-    print('--- 22. FINDING 2: the level is frozen during RECONFIRMED(INTERNAL); thaw and re-derivation from the following bar')
+    print('--- 22. FINDING 2 (revision 7): the level is frozen during RECONFIRMED(INTERNAL); thaw and re-derivation at the end of the thaw bar')
     for pref in ('', 'm_'):
         tag = 'SELL' if pref == '' else 'BUY'
         d0 = BEAR if pref == '' else BULL
@@ -2424,7 +2483,7 @@ def test_22_freeze_internal():
         name = pref + 's_recon_later_swing'
         c = case_by_name(name)
         r = rep_of(name)
-        ri = [i for i in range(c.n_use) if c.bars[i].time == events_of(r, EV_RECONFIRMED)[0].bar_time][0]
+        ri = bar_idx(c, events_of(r, EV_RECONFIRMED)[0].bar_time)
         frozen_id = lv_id_of_key(r.keys[ri - 1])
         check(r.state.phase == 'RECONFIRMED' and r.state.recon_reason == 'INTERNAL' and r.state.frozen
               and lv_id_of_key(r.keys[-1]) == frozen_id and frozen_id != '-',
@@ -2433,46 +2492,54 @@ def test_22_freeze_internal():
               '%s (a): control: a derivation from the same bars WOULD give another level (so the freeze is what keeps it)' % tag)
         check(all(lv_id_of_key(r.keys[i]) == frozen_id for i in range(ri - 1, c.n_use)),
               '%s (a): the level is identical at every bar from the touch to the end' % tag)
-        check(not r.state.has_lint and not r.state.has_ext and EV_INT_SWEEP not in [e.type for e in r.events[ri:]],
-              '%s (a): no interior/continuation candidates and no internal events are derived while frozen' % tag)
-        # (a2) the touching candle itself confirms a swing: it must not change the event's level
+        check(all(e.bar_time <= c.bars[ri].time for e in r.events if e.type in (EV_INT_SWEEP, EV_INT_BREAK, EV_CONTINUATION)),
+              '%s (a): no internal or continuation event is raised while frozen' % tag)
+        # (a2) the touching candle itself confirms a swing
         name = pref + 's_recon_touch_swing'
         c = case_by_name(name)
         r = rep_of(name)
-        ri = [i for i in range(c.n_use) if c.bars[i].time == events_of(r, EV_RECONFIRMED)[0].bar_time][0]
+        ri = bar_idx(c, events_of(r, EV_RECONFIRMED)[0].bar_time)
         before = lv_id_of_key(r.keys[ri - 1])
         check(lv_id_of_key(r.keys[ri]) == before and before != '-' and r.state.frozen,
               '%s (a2): the touching candle confirms a new swing, the level of the event stays the one known before it' % tag)
         check(derive_id_at(c, ri - 1, d0) == before and derive_id_at(c, ri, d0) not in (before, '-'),
               '%s (a2): control: a derivation including the touching candle would give another level' % tag)
-        # (b) the recorded FVG is invalidated: thaw, and the re-derivation starts at the FOLLOWING bar
+        # (b) the recorded FVG is invalidated on T: thaw, the level is re-derived at the END of T and used from T+1
         name = pref + 's_recon_thaw'
         c = case_by_name(name)
         r = rep_of(name)
         lost = events_of(r, EV_RECONF_LOST)
-        ti = [i for i in range(c.n_use) if c.bars[i].time == lost[0].bar_time][0]
+        ti = bar_idx(c, lost[0].bar_time)
         frozen_id = lv_id_of_key(r.keys[ti - 1])
-        new_id = lv_id_of_key(r.keys[ti + 1])
+        new_id = lv_id_of_key(r.keys[ti])
         check(len(lost) == 1 and lost[0].detail.endswith('to=SWEEP_WAIT')
-              and 'PH=SWEEP_WAIT' in r.keys[ti] and 'FRZ=0' in r.keys[ti],
+              and 'PH=SWEEP_WAIT' in r.keys[ti] and 'FRZ=0' in r.keys[ti] and 'PH=RECONFIRMED' in r.keys[ti - 1],
               '%s (b): the invalidated FVG sends RECONFIRMED(INTERNAL) back to SWEEP_WAIT and thaws the level' % tag)
-        check(lv_id_of_key(r.keys[ti]) == frozen_id,
-              '%s (b): on the thaw bar T the level is still the frozen one (no derivation on T)' % tag)
         check(new_id not in (frozen_id, '-') and derive_id_at(c, ti, d0) == new_id and lv_id_of_key(r.keys[-1]) == new_id,
-              '%s (b): at T+1 the level is re-derived from the closed bars (the same level a derivation at T would have given: one bar later)' % tag)
+              '%s (b): the level is re-derived at the end of the thaw bar T (the level a derivation up to T gives) and used from T+1' % tag)
         check(r.state.phase == 'SWEEP_WAIT' and not r.state.frozen and sweep_block(r.state),
-              '%s (b): the wait restarts: SWEEP_WAIT, level thawed, entries-block flag (technical proposal) raised again' % tag)
-        # (b2) the following bar is still judged against the frozen (old) level
+              '%s (b): the wait continues: SWEEP_WAIT, level thawed, entries-block flag (technical proposal) raised again' % tag)
+        # (b2) the following bar is judged against the level re-derived at T
         r = rep_of(pref + 's_recon_thaw_wick')
         w = events_of(r, EV_WICK)
-        check(len(w) == 1 and w[0].ref == frozen_id and w[0].detail.endswith('restart=0') and r.state.phase == 'HOLD'
-              and lv_id_of_key(r.keys[-1]) == frozen_id,
-              '%s (b2): a wick on T+1 is judged against the old frozen level (ref %s), HOLD keeps it' % (tag, frozen_id[:8]))
+        check(len(w) == 1 and w[0].ref == new_id and w[0].detail.endswith('restart=0') and r.state.phase == 'HOLD'
+              and lv_id_of_key(r.keys[-1]) == new_id,
+              '%s (b2): a wick on T+1 is judged against the level re-derived at the end of T, HOLD keeps it' % tag)
         r = rep_of(pref + 's_recon_thaw_break')
         fl = events_of(r, EV_FLIP)
-        check(len(fl) == 1 and fl[0].ref == frozen_id and dir_name(r.state.dir) == dir_name(-d0),
-              '%s (b2): a body close on T+1 beyond the old frozen level flips the bias' % tag)
-        # (c) wick / body break during RECONFIRMED(INTERNAL): the structural logic wins
+        check(len(fl) == 1 and fl[0].ref == new_id and dir_name(r.state.dir) == dir_name(-d0),
+              '%s (b2): a body close on T+1 beyond the level re-derived at T flips the bias' % tag)
+        # (b3) no event lost on T+1 after a thaw
+        for kname, etype, label in (('cont', EV_CONTINUATION, 'CONTINUATION'), ('isweep', EV_INT_SWEEP, 'INTERNAL_SWEEP'),
+                                    ('ibreak', EV_INT_BREAK, 'INTERNAL_BREAK')):
+            name = pref + 's_recon_thaw_' + kname
+            c = case_by_name(name)
+            r = rep_of(name)
+            late = [e for e in r.events if e.type == etype and e.bar_time == c.bars[c.n_use - 1].time]
+            ti = bar_idx(c, events_of(r, EV_RECONF_LOST)[0].bar_time)
+            check(len(late) == 1 and ti == c.n_use - 2 and r.state.dir == d0,
+                  '%s (b3): %s is still raised on T+1 after the thaw (no event lost)' % (tag, label))
+        # (c) wick / body break during RECONFIRMED(INTERNAL)
         name = pref + 's_recon_wick'
         c = case_by_name(name)
         r = rep_of(name)
@@ -2490,6 +2557,43 @@ def test_22_freeze_internal():
         check(len(fl) == 1 and fl[0].ref == lv_id_of_key(prev_key) and 'PH=RECONFIRMED' in prev_key and 'RSN=INTERNAL' in prev_key
               and EV_RECONF_LOST not in types_of(r) and dir_name(r.state.dir) == dir_name(-d0),
               '%s (c): a body close beyond the frozen level during RECONFIRMED(INTERNAL) flips the bias (priority before reconfirmation)' % tag)
+        # (d) invalidation of the recorded FVG and a touch of ANOTHER FVG on the same bar
+        name = pref + 's_recon_two_fvg'
+        c = case_by_name(name)
+        r = rep_of(name)
+        lost = events_of(r, EV_RECONF_LOST)
+        rec = events_of(r, EV_RECONFIRMED)
+        ti = bar_idx(c, lost[0].bar_time)
+        frozen_id = lv_id_of_key(r.keys[ti - 1])
+        check(len(lost) == 1 and len(rec) == 2 and rec[1].bar_time == lost[0].bar_time and rec[1].ref != lost[0].ref
+              and r.state.phase == 'RECONFIRMED' and r.state.recon_reason == 'INTERNAL' and r.state.rec_id == rec[1].ref,
+              '%s (d): the recorded FVG is invalidated and another one is touched on the same bar: RECONFIRMED(INTERNAL) again with the other FVG' % tag)
+        check(r.state.frozen and all(lv_id_of_key(r.keys[i]) == frozen_id for i in range(ti - 1, c.n_use)) and frozen_id != '-',
+              '%s (d): the level stays frozen at the one known before the bar T' % tag)
+        check(derive_id_at(c, ti, d0) not in (frozen_id, '-'),
+              '%s (d): control: a derivation up to T would have given another level' % tag)
+        # (e) AMBIGUITY 20a: no recorded reconfirmation while no protecting level is defined
+        name = pref + 's_recon_nolevel'
+        c = case_by_name(name)
+        r = rep_of(name)
+        tb = c.n_use - 2
+        touched = False
+        sw_, _ = t2.find_swings(c.bars, c.n_use, 2, 2, PERIOD)
+        for f in t2.find_fvgs(c.bars, c.n_use, PERIOD):
+            tr_ = [x for x in r.tracks if x.id == f.id]
+            if tr_ and not tr_[0].invalid and f.index_a + 3 <= tb and c.bars[tb].low <= f.upper and c.bars[tb].high >= f.lower:
+                touched = True
+        check(touched and 'LV=-' in r.keys[tb - 1] and 'PH=SWEEP_WAIT' in r.keys[tb - 1],
+              '%s (e): a valid eligible FVG is touched while the state is SWEEP_WAIT and no protecting level is defined' % tag)
+        check(EV_RECONFIRMED not in types_of(r) and r.state.phase == 'SWEEP_WAIT' and not r.state.frozen and not r.state.has_level
+              and not any(x.recorded for x in r.tracks),
+              '%s (e): that touch is not recorded: no RECONFIRMED, nothing frozen, the wait continues (technical proposal)' % tag)
+        name = pref + 's_recon_nolevel_ctl'
+        c = case_by_name(name)
+        r = rep_of(name)
+        rec = events_of(r, EV_RECONFIRMED)
+        check(len(rec) == 1 and rec[0].bar_time == c.bars[c.n_use - 2].time and r.state.frozen and r.state.has_level,
+              '%s (e): control: the same touch with a defined level is recorded as RECONFIRMED(INTERNAL) and freezes the level' % tag)
         # the structural reconfirmation keeps freezing and falls back to HOLD, not to a thaw
         r = rep_of(pref + 'w_invalid_after_reconf')
         check(r.state.phase == 'HOLD' and r.state.frozen and EV_RECONF_LOST in types_of(r),

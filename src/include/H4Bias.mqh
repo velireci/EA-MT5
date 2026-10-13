@@ -25,8 +25,9 @@
 //+------------------------------------------------------------------+
 //| AMBIGUITY n: marks every place where the task text is unclear and |
 //| the minimal reading was taken (listed in the T003 report):       |
-//|  1 RECONFIRMED(INTERNAL) freezes the level (rev. 6, P3); thaw and |
-//|  re-derivation from the following bar when its FVG is lost; 2     |
+//|  1 RECONFIRMED(INTERNAL) freezes the level (P3); when its FVG is  |
+//|  lost the level thaws and is re-derived at the end of that bar    |
+//|  (used from the next; rev. 7); 2                                  |
 //|  touches only in HOLD/SWEEP_WAIT; 3 which touched FVG is          |
 //|  recorded; 4 no continuation/internal events on a wick bar or in  |
 //|  HOLD/RECONFIRMED; 5 anchor: the references, located by EXISTING  |
@@ -37,10 +38,8 @@
 //|  'defined'; 11 ties; 12 'the low before it'; 13 HH/LL candidate;  |
 //|  14 sweep-wait touch start; 15 flip bar scan; 16 retroactive scan |
 //|  range; 17 CONFLICT unreachable; 18 NONE_WICK; 19 wick in         |
-//|  SWEEP_WAIT freezes the then current level; 20 (rev. 6) freeze   |
-//|  details: frozen even without a defined level, candidates        |
-//|  cleared at the freeze, so the thaw's following bar raises no    |
-//|  continuation/internal event.                                    |
+//|  SWEEP_WAIT freezes the then current level; 20 (rev. 7) a touch   |
+//|  while no protecting level is defined is NOT recorded (20a).     |
 //+------------------------------------------------------------------+
 #ifndef VELO_H4_BIAS_MQH
 #define VELO_H4_BIAS_MQH
@@ -1166,19 +1165,18 @@ bool H3BiasStep(const int t, const MqlRates &bars[], const SH3Params &p, const S
    return(false);
   }
 
-//--- step (3): FVG eligibility / invalidation / touch for bar t.
-//--- Returns true when the level was THAWED on this bar (RECONFIRMED(INTERNAL) lost its FVG):
-//--- the derive step is then skipped for this bar, so the re-derivation starts at the
-//--- FOLLOWING bar (AMBIGUITY 1, task P3/P14, technical proposal).
-bool H3FvgStep(const int t, const MqlRates &bars[], const SH4Fvg &fv[], const int nf,
+//--- step (3): FVG eligibility / invalidation / touch for bar t (revision 7).
+//--- RECONFIRMED(INTERNAL) freezes the level known before bar t; when its FVG is lost the level
+//--- thaws on this bar and the derive step (4) of the SAME bar re-derives it (used from bar
+//--- t+1) unless another FVG is touched on this bar (frozen again). AMBIGUITY 1, P3/P14.
+void H3FvgStep(const int t, const MqlRates &bars[], const SH4Fvg &fv[], const int nf,
                SH3State &st, SH3Track &tracks[], int &nt, SH3Event &events[], int &ne)
   {
    datetime open_t = bars[t].time;
    int d  = st.dir;
    int ph = st.phase;
-   bool skip_derive = false;
    if(ph != H3_PH_HOLD && ph != H3_PH_SWEEP_WAIT && ph != H3_PH_RECONFIRMED)
-      return(false);
+      return;
    //--- AMBIGUITY 2: touches are evaluated only while the state is HOLD or SWEEP_WAIT; a touch
    //--- during RECONFIRMED is not remembered. After RECONF_LOST the fall-back and a new touch
    //--- may happen on the same bar (order: invalidate, fall back, then touch).
@@ -1231,10 +1229,8 @@ bool H3FvgStep(const int t, const MqlRates &bars[], const SH4Fvg &fv[], const in
             if(st.recon_reason == H3_RR_INTERNAL)
               {
                //--- THAW: the level was frozen by the internal reconfirmation only. The derive
-               //--- step is skipped on THIS bar and resumes on the next one; the frozen level
-               //--- still judges the next bar (break / wick checks).
-               st.frozen   = false;
-               skip_derive = true;
+               //--- step of THIS bar re-derives it from the closed bars up to t (used from t+1).
+               st.frozen = false;
               }
             st.phase        = to_ph;
             st.recon_reason = H3_RR_NONE;
@@ -1250,6 +1246,11 @@ bool H3FvgStep(const int t, const MqlRates &bars[], const SH4Fvg &fv[], const in
       double bestd = 0.0;
       for(int q = 0; q < nt; q++)
         {
+         //--- AMBIGUITY 20a (rev. 7): a touch while NO protecting level is defined is not
+         //--- recorded (no trustworthy RECONFIRMED(INTERNAL) without a level to freeze); a later
+         //--- touch with a level can record. HOLD always has a level.
+         if(st.phase == H3_PH_SWEEP_WAIT && !st.has_level)
+            break;
          if(tracks[q].invalid)
             continue;
          int g = tracks[q].f;
@@ -1272,16 +1273,10 @@ bool H3FvgStep(const int t, const MqlRates &bars[], const SH4Fvg &fv[], const in
          //--- touch the level KNOWN BEFORE the touching candle is frozen: this bar's derive step
          //--- is skipped (frozen), so a swing confirmed by the touching candle cannot change it.
          int reason = (st.phase == H3_PH_HOLD ? H3_RR_STRUCT : H3_RR_INTERNAL);
-         //--- AMBIGUITY 20: the freeze also applies when no level is defined at the touch (then
-         //--- nothing can flip until the thaw); the continuation / interior candidates are cleared
-         //--- at the freeze, so the bar after a thaw raises no CONTINUATION / INTERNAL event and
-         //--- no sweep (the candidates return at the end of that bar).
+         //--- the continuation / interior candidates are kept (unused while RECONFIRMED, refreshed
+         //--- by the derive step of the thaw bar), so no event is lost on the bar after a thaw.
          if(reason == H3_RR_INTERNAL)
-           {
-            st.frozen   = true;
-            st.has_ext  = false;
-            st.has_lint = false;
-           }
+            st.frozen = true;
          st.phase        = H3_PH_RECONFIRMED;
          st.recon_reason = reason;
          st.rec_id       = tracks[best].id;
@@ -1290,7 +1285,6 @@ bool H3FvgStep(const int t, const MqlRates &bars[], const SH4Fvg &fv[], const in
                     "fvg=" + tracks[best].id + ";reason=" + H3ReconReasonName(reason));
         }
      }
-   return(skip_derive);
   }
 
 //--- step (4): candidates for the NEXT bar from the prefix including bar t.
@@ -1384,8 +1378,7 @@ void H3ProcessBar(const int t, const MqlRates &bars[], const SH4Swing &sw[], con
       bool flipped = H3BiasStep(t, bars, p, fv, nf, st, tracks, nt, events, ne);
       if(!flipped)
         {
-         if(H3FvgStep(t, bars, fv, nf, st, tracks, nt, events, ne))
-            return;
+         H3FvgStep(t, bars, fv, nf, st, tracks, nt, events, ne);
         }
      }
    H3DeriveStep(t, bars, sw, ns, p, fv, nf, st, tracks, nt, events, ne);
