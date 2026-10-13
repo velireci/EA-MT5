@@ -10,3 +10,6 @@ reports/runtime/
 # Client material (inputs/, docs/reference/) IS tracked. It belongs only in the
 # private repository velireci/EA-MT5. Never add a public remote to this working
 # copy and never push this branch to one. See docs/STATE.md.
+
+__pycache__/
+*.pyc

@@ -1,16 +1,18 @@
 # Current project state
 
-Updated: 2026-10-07 (Europe/Tirane)
+> T002 (branch `claude/t002-h4-map`, draft PR velireci/EA-MT5#2 against the T001 branch, base head `56c9570`): H4 map visual prototype, NOT complete. Evidence by source, tested code `97ce7b4`: Codex compiled `XauUsdH4Map.mq5` and `T002_LogicTest.mq5` with 0 errors, 0 warnings (relayed); the owner ran `T002_LogicTest` in MT5: 208 passed, 0 failed (relayed); the owner ran the historical mode at AsOfTime 2026.10.05 12:00:00 server time (HISTORICAL REVIEW, last candle 08:00-12:00, close 4166.59, MIXED) and at 2026.10.04 12:00 (a Sunday: last candle 2026.10.02 20:00, close 4147.62; after a restart the same 70 swings and 53 FVGs; no duplicates in the visible part of the object list, full list not checked; some labels overlap the panel and candles) - all relayed by Codex, screenshots not attached, not run by me. I ran Python model tests 197/197 and the static checks; Codex verified the check-15 fix in `a92b033` (relayed). Still open for T002: more weekend/gap as-of cases, full duplicate-object check after reload, label readability, Tauro vs TradingView candle alignment. Direction rule (swing 2/2) unchanged and PROPOSED. See reports/T002-verification.md sections 11-13. PR #1 not merged.
 
-- Phase: T001 foundation implemented; compiled by Codex; MT5 runtime partially observed by the owner. Awaiting the owner's closure decision.
-- Current task: tasks/T001-foundation.md. PR velireci/EA-MT5#1 into `main` is open and NOT merged. Tested version: `763227d494115126a801d7e9cebe48a49977eb76`. Do not merge and do not start T002 until the owner decides.
-- Branch: `claude/amazing-darwin-icpcjd`. No agent owns an active edit; commits after `763227d` are documentation only.
+Updated: 2026-10-13 (Europe/Tirane)
+
+- Phase: T001 foundation compiled by Codex and partly observed in MT5 (PR #1 open); T002 H4 map prototype compiled and partly observed (PR #2 draft); T003 H4 direction-change specification drafted (revision 5) from the client's 2026-10-13 text clarifications and BUY example (including the closing statement E6), with Codex's remarks applied (reviews of 5dc75fe and 769e2f8: level timing, wick timestamps, one flip trigger, one history mechanism, internal liquidity, seed-versus-break precedence) (documents only, not implemented). Awaiting Codex's review of the specification and the owner's decisions.
+- Current task: documents only: tasks/T003-h4-bias-change.md (DRAFT rev. 5), docs/STRATEGY_SPEC.md and docs/DECISIONS.md separate client statements (S1-S6, BUY example E1-E6), earlier authorised decisions, proposals (P1-P14) and open questions (F1-F8). PR velireci/EA-MT5#1 (T001, `main`) is open and NOT merged; tested version `763227d494115126a801d7e9cebe48a49977eb76`. T003 is NOT started; nothing in it is implemented or tested, and neither T002 nor T003 is complete.
+- Branch: `claude/t002-h4-map` (PR #2). No agent owns an active edit; the T001 branch `claude/amazing-darwin-icpcjd` is unchanged.
 - Source: inputs/client-E27N93/pergjigjet.json and associated TXT/photos.
 - Strategy review completed; no strategy logic implemented and none invented.
 - Client approval: broad questionnaire answers supplied; disputed/undefined rules remain open.
-- Current strategy dependency: Q01-Q04 (direction, H4 zone, return, M15 confirmation). Not required to close T001.
-- Next owner action: decide whether to close T001 with the gaps listed under Verification status, or ask for the extra tests; merging PR #1 is the owner's call.
-- Next developer action: none for T001 until that decision. T002 not started.
+- Current strategy dependency: Q01-Q04. Client clarifications of 2026-10-13 (S1-S6, BUY example E1-E6) are in DECISIONS.md; E6 adds BUY-side evidence for new H4 FVG -> return/touch -> M15 break (entry at the M15 FVG). Screenshots are illustrations (not stored in the repo); text takes priority; no price or BOS count is a rule; the example's target (last HH) is not a universal rule; internal liquidity is not the structural level. Still open: M5 role, policy below 2R.
+- Next owner action: have Codex review tasks/T003-h4-bias-change.md rev. 5; decide or defer F1-F8 (exact time definition of the new FVG after the wick, M5/M15, policy below 2R, positions already open, ERL selection and reconfirmation validity, whether the intrabar block proposed by Codex is wanted, whether entries are blocked while the state is LIMITED_BY_HISTORY (technical proposal), how interior liquidity is identified and whether entries are blocked during the internal wait); supply the candles the client marked for the section-10 visual comparison; decide about PR #1 and PR #2.
+- Next developer action: none until Codex's review of the T003 specification and the owner's go. No MQL5, `src/` or `tools/` change was made in this documentation step.
 
 ## Files added in T001
 - `src/XauUsdFoundation.mq5` — main EA. OnInit/OnDeinit/OnTick/OnTimer, configurable magic (stored, unused), symbol resolution, status logging on change only, chart panel.
