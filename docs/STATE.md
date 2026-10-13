@@ -1,20 +1,44 @@
 # Current project state
 
-> T002 (branch `claude/t002-h4-map`, draft PR velireci/EA-MT5#2 against the T001 branch, base head `56c9570`): H4 map visual prototype, NOT complete. Evidence by source, tested code `97ce7b4`: Codex compiled `XauUsdH4Map.mq5` and `T002_LogicTest.mq5` with 0 errors, 0 warnings (relayed); the owner ran `T002_LogicTest` in MT5: 208 passed, 0 failed (relayed); the owner ran the historical mode at AsOfTime 2026.10.05 12:00:00 server time (HISTORICAL REVIEW, last candle 08:00-12:00, close 4166.59, MIXED) and at 2026.10.04 12:00 (a Sunday: last candle 2026.10.02 20:00, close 4147.62; after a restart the same 70 swings and 53 FVGs; no duplicates in the visible part of the object list, full list not checked; some labels overlap the panel and candles) - all relayed by Codex, screenshots not attached, not run by me. I ran Python model tests 197/197 and the static checks; Codex verified the check-15 fix in `a92b033` (relayed). Still open for T002: more weekend/gap as-of cases, full duplicate-object check after reload, label readability, Tauro vs TradingView candle alignment. Direction rule (swing 2/2) unchanged and PROPOSED. See reports/T002-verification.md sections 11-13. PR #1 not merged.
-
-> T003 first limited round (branch `claude/t003-h4-bias` from the T002 head dd571f6; draft PR against the T002 branch): pure logic `src/include/H4Bias.mqh`, MQL5 test script `src/tests/T003_LogicTest.mq5`, Python model `tests/t003_reference_test.py`, `tools/t003-static-checks.sh`; no existing file changed. UNCOMPILED; the MQL5 script NOT run; Python model tests 188 passed, 0 failed, 5 deferred (tests 9, 18, 20, drawing/panel, M5/M15 are DEFERRED, not passed); static checks PASS (mine). The builder's C++-translation run (166 passed) is agent-reported supplementary evidence, not MetaEditor, not run by me. Open: 19 ambiguities marked in the code and 5 specification contradictions (CONFLICT is unreachable) - see reports/T003-verification.md. All rules are proposals awaiting the client's visual validation. Awaiting Codex's compile and review.
-
 Updated: 2026-10-13 (Europe/Tirane)
 
-- Phase: T001 foundation compiled by Codex and partly observed in MT5 (PR #1 open); T002 H4 map prototype compiled and partly observed (PR #2 draft); T003 H4 direction-change specification drafted (revision 5) from the client's 2026-10-13 text clarifications and BUY example (including the closing statement E6), with Codex's remarks applied (reviews of 5dc75fe and 769e2f8: level timing, wick timestamps, one flip trigger, one history mechanism, internal liquidity, seed-versus-break precedence) (documents only, not implemented). Awaiting Codex's review of the specification and the owner's decisions.
-- Current task: T003 first limited round (pure logic and tests) is implemented but UNCOMPILED and unrun in MT5; the specification is tasks/T003-h4-bias-change.md (rev. 5); PR velireci/EA-MT5#1 (T001, `main`) is open and NOT merged (tested `763227d494115126a801d7e9cebe48a49977eb76`); PR #2 (T002) is a draft. T002 and T003 are not complete. Not implemented: visual EA, intrabar overlay P12, target P13, M5/M15, orders, positions.
-- Branch: `claude/t002-h4-map` (PR #2). No agent owns an active edit; the T001 branch `claude/amazing-darwin-icpcjd` is unchanged.
-- Source: inputs/client-E27N93/pergjigjet.json and associated TXT/photos.
-- Strategy review completed; no strategy logic implemented and none invented.
-- Client approval: broad questionnaire answers supplied; disputed/undefined rules remain open.
-- Current strategy dependency: Q01-Q04. Client clarifications of 2026-10-13 (S1-S6, BUY example E1-E6) are in DECISIONS.md; E6 adds BUY-side evidence for new H4 FVG -> return/touch -> M15 break (entry at the M15 FVG). Screenshots are illustrations (not stored in the repo); text takes priority; no price or BOS count is a rule; the example's target (last HH) is not a universal rule; internal liquidity is not the structural level. Still open: M5 role, policy below 2R.
-- Next owner action: have Codex review tasks/T003-h4-bias-change.md rev. 5; decide or defer F1-F8 (exact time definition of the new FVG after the wick, M5/M15, policy below 2R, positions already open, ERL selection and reconfirmation validity, whether the intrabar block proposed by Codex is wanted, whether entries are blocked while the state is LIMITED_BY_HISTORY (technical proposal), how interior liquidity is identified and whether entries are blocked during the internal wait); supply the candles the client marked for the section-10 visual comparison; decide about PR #1 and PR #2.
-- Next developer action: none until Codex compiles `H4Bias.mqh` and `T003_LogicTest.mq5` and reviews the ambiguity list; then, on the owner's go, the visual EA, overlay and target in later rounds. No MQL5, `src/` or `tools/` file of T001/T002 was changed.
+## Resume here
+- Next Codex step: review and compile T003 at the verified SHA `72b2557` (PR #3, branch `claude/t003-h4-bias`): compile `src/include/H4Bias.mqh` and `src/tests/T003_LogicTest.mq5` in MetaEditor, run the script in MT5, review the 19 `AMBIGUITY` markers and the specification contradictions in `reports/T003-verification.md` (notably: CONFLICT is unreachable under the current candidate definitions).
+- The owner is waiting on the log of the first NEW H4 candle in LIVE for the technical closure of T002 (see the T002 state below).
+- Do not start: the visual T003 EA, the intrabar overlay P12, the target P13, M5/M15, orders or position handling. No merge of PR #1, #2 or #3.
+
+## Branches and PRs (verified from the GitHub API and git on 2026-10-13)
+- PR #1 (T001): branch `claude/amazing-darwin-icpcjd`, head `56c9570`, base `main`, open, NOT merged. Tested version `763227d`.
+- PR #2 (T002), draft: branch `claude/t002-h4-map`, head `dd571f6`, base the T001 branch. Commit `6a8c0c6` (T002_SetupScan.mq5 and docs/T002-setup-scan.md) is an ancestor of this head, so the SetupScan IS delivered in PR #2 (its body already says so; no correction needed). Tested EA code is `97ce7b4`; later commits are docs, one tools fix (check 15) and the scan script.
+- PR #3 (T003), draft: branch `claude/t003-h4-bias`, head `72b2557` (no newer head), base `claude/t002-h4-map` (`dd571f6`).
+- `main` has moved to `91091d2` ("Delete jessy", the unrelated pre-existing file; not done by this agent). The T001/T002/T003 branches still contain `jessy`. PR #1 may need `main` merged in when the owner decides about it; nothing was done.
+- This handoff was committed on the T003 branch only (a descendant of the T002 branch), to avoid STATE.md conflicts between stacked PRs; the STATE.md on the T002 branch is older.
+
+## T002 state (no strategy rule is confirmed: all H4 rules are PROPOSALS awaiting the client's visual validation)
+Documented evidence. Items marked (relayed) come from Codex or the owner, not from runs of mine; no logs or screenshots are in the repository.
+- Compilation of `XauUsdH4Map.mq5` and `T002_LogicTest.mq5` at `97ce7b4`: 0 errors, 0 warnings (Codex, relayed).
+- `T002_LogicTest` in MT5: 208 passed, 0 failed (owner, relayed).
+- Python model tests: 197 passed, 0 failed (mine; also by Codex on `a92b033`, relayed). Static checks T002 PASS, including check 15 and its negative mutations; the check-15 fix was verified in the Codex environment where it had failed (mine; Codex, relayed).
+- `T002_SetupScan.mq5` at `6a8c0c6`: compiled 0/0 (Codex, relayed); run by the owner: 529 active moments in 147 runs (relayed).
+- EA historical mode at AsOfTime 2026.10.06 00:00 (server time) reproduced a scan setup: BEARISH, interval 4103.67-4226.45, IRL FRESH 4144.02-4150.84, ERL 4103.67 UNTOUCHED; the owner checked the FVG bounds and the 2/2 swing low at 4103.67 manually (relayed).
+- Weekend as-of case (2026.10.04 12:00, last candle 2026.10.02 20:00, close 4147.62; same 70 swings and 53 FVGs after a restart) and remove/re-attach: object lists before and after matched and a manual line remained (relayed).
+Pending: a log showing the map rebuilt ONCE on a new H4 candle in LIVE. The log of 2026.10.13 20:07:52 (relayed) shows a clear and a recovery from DESYNC but analysed the 16:00 candle again, so it is NOT evidence of the new-candle rebuild.
+Out of T002 scope: M5/M15 and the 2R policy. Declared limits: Tauro versus TradingView candle and time alignment is not verified; the client's validation is pending; label readability; the 12 interpretations in reports/T002-verification.md section 5. T002 is NOT closed. See reports/T002-verification.md and the PR #2 body.
+
+## T003 state (PR #3; proposals, not confirmed strategy)
+- Specification: tasks/T003-h4-bias-change.md revision 5 (client statements S1-S6 and BUY example E1-E6 kept apart from proposals P1-P14). Client statements are in docs/DECISIONS.md.
+- Implemented, first limited round only: pure logic `src/include/H4Bias.mqh`, MQL5 test script `src/tests/T003_LogicTest.mq5`, Python model `tests/t003_reference_test.py`, `tools/t003-static-checks.sh`. No T001/T002 file changed. Not implemented: visual EA, intrabar overlay P12, target P13, M5/M15, orders, positions; tests 9, 18, 20 and the drawing tests are DEFERRED (printed as DEFERRED, never PASS).
+- Reported results: Python model tests 188 passed, 0 failed, 5 deferred; T003/T002/T001 static checks PASS (mine). The builder's C++-translation run (166 passed) is agent-reported supplementary evidence, not MetaEditor, not run by me.
+- Pending: MetaEditor compilation, the MT5 run of the script and Codex's review. The 19 interpretations (`AMBIGUITY n` markers in the code) are listed in reports/T003-verification.md section 5, the contradictions in section 6.
+
+## Open decisions and next owner actions
+- Have Codex review T003 and answer or defer F1-F8 (see tasks/T003-h4-bias-change.md section 8): exact time definition of the new FVG after the wick, M5/M15, policy below 2R, positions already open, ERL selection and reconfirmation validity, the intrabar block proposed by Codex, entries while LIMITED_BY_HISTORY (technical proposal), interior liquidity.
+- Supply the candles the client marked for the section-10 visual comparison; send the LIVE new-candle log for T002; decide about PR #1, PR #2, PR #3 and the moved `main`.
+- Client screenshots are illustrations (not stored in the repository); text clarifications take priority; no price or BOS count is a rule.
+
+## Basics
+- Source: inputs/client-E27N93/pergjigjet.json and associated TXT/photos. No strategy logic was invented; disputed or undefined rules remain open (Q01-Q12).
+- Next developer action: none until Codex compiles and reviews T003 and the owner gives the go for the later rounds. No agent owns an active edit.
 
 ## Files added in T001
 - `src/XauUsdFoundation.mq5` — main EA. OnInit/OnDeinit/OnTick/OnTimer, configurable magic (stored, unused), symbol resolution, status logging on change only, chart panel.
@@ -46,7 +70,7 @@ T001 code `763227d` compiled clean in MetaEditor (Codex) and was observed on a d
 - MetaEditor: used by Codex; not present in the development container.
 - MT5 test terminal: MetaQuotes-Demo, XAUUSD, EUR account, RETAIL_HEDGING. MT5 build number not recorded.
 - Target broker: Tauro (client wrote XAUUSD.r and a USD account). NOT confirmed: symbol name, digits, tick size/value, contract size, volume min/step, stops level, netting vs hedging. The demo's EUR differs from the client's stated USD; this matters for sizing (Q08).
-- Git: branch `claude/amazing-darwin-icpcjd`, tracks `ea-mt5` (velireci/EA-MT5).
+- Git: the working copy is on branch `claude/t003-h4-bias` (tracks `ea-mt5`, velireci/EA-MT5); the other branches are `claude/amazing-darwin-icpcjd` (T001) and `claude/t002-h4-map` (T002).
 
 ## Repository
 The project lives in `velireci/EA-MT5` (PRIVATE, verified 2026-10-07 via the GitHub API). It is the only remote of this working copy, and branch `claude/amazing-darwin-icpcjd` tracks it. The default branch is `main` (set by the owner).
@@ -56,4 +80,4 @@ The project lives in `velireci/EA-MT5` (PRIVATE, verified 2026-10-07 via the Git
 History note: the project started in `velireci/velo`, which was public. The T001 code commit was pushed there before EA-MT5 existed; no client submission and no photos ever reached it. The owner deleted that repository on 2026-10-07. Its earlier commits (`c8038fd` to `235993a`, including the unrelated `MQL5/Experts/MA_Crossover_EA.mq5` and `jessy`) survive as ancestors of this branch in EA-MT5, so nothing was lost.
 
 ## Pre-existing files not part of this project
-`MQL5/Experts/MA_Crossover_EA.mq5` and `jessy` were in the repository before this project. `MA_Crossover_EA.mq5` is an unrelated EA that does place real trades (MA crossover). It was not modified and must not be confused with `src/XauUsdFoundation.mq5`.
+`MQL5/Experts/MA_Crossover_EA.mq5` and `jessy` were in the repository before this project (`jessy` has since been deleted on `main`, commit `91091d2`, not by this agent). `MA_Crossover_EA.mq5` is an unrelated EA that does place real trades (MA crossover). It was not modified and must not be confused with `src/XauUsdFoundation.mq5`.
