@@ -1,0 +1,804 @@
+//+------------------------------------------------------------------+
+//| H4BiasDrawer.mqh                                                 |
+//|                                                                  |
+//| T003 visual layer - chart objects and the status panel for the   |
+//| PROPOSED H4 bias logic (H4Bias.mqh). Draws only: it reads no     |
+//| series, no price feed and calls no trading function.             |
+//|                                                                  |
+//| EVERYTHING DRAWN HERE IS A PROPOSAL (tasks/T003-h4-bias-change.  |
+//| md), awaiting the client's visual validation. It is NOT a        |
+//| confirmed client rule and NOT a trading signal.                  |
+//|                                                                  |
+//| Object naming: every object starts with the prefix velo_t003_    |
+//| and its name is derived from a stable logic ID (absolute times), |
+//| so a redraw or a reload never produces duplicates. The prefix    |
+//| cannot collide with velo_t001_ or velo_t002_ (they differ at the |
+//| seventh character). Only objects with the T003 prefix are ever   |
+//| deleted: never an empty prefix, never another task's prefix,     |
+//| never a manual object. The panel uses the sub-prefix             |
+//| velo_t003_pnl_, which ClearMap() leaves alone.                   |
+//|                                                                  |
+//| Not compiled or run in this environment (no MetaEditor).         |
+//+------------------------------------------------------------------+
+#ifndef VELO_H4_BIAS_DRAWER_MQH
+#define VELO_H4_BIAS_DRAWER_MQH
+
+#include "H4Bias.mqh"
+
+#define H3V_PREFIX        "velo_t003_"
+#define H3V_PANEL_PREFIX  "velo_t003_pnl_"
+
+//--- corner of the panel (computed from the chart size; the labels always use the left-upper corner)
+#define H3V_PNL_TOP_LEFT      0
+#define H3V_PNL_TOP_RIGHT     1
+#define H3V_PNL_BOTTOM_LEFT   2
+#define H3V_PNL_BOTTOM_RIGHT  3
+
+//--- what the last Draw() put on the chart (for the panel); no handle to any object
+struct SH3View
+  {
+   int               fvg_total;       // eligible FVG tracks of the current wait
+   int               fvg_invalid;
+   int               fvg_shown;
+   int               ev_total;        // events of the replay (history)
+   int               ev_shown;
+   int               ev_hidden;       // not drawn: over the limit, filtered, or outside the window
+   int               t2_cur;          // H4_DIR_* of T002 at the last closed bar
+   int               t2_prev;         // H4_DIR_* before the current run, -1 when unknown
+   datetime          t2_since;        // open time of the first bar of the current run
+   bool              t2_exact;        // false: the run reaches the start of the examined bars
+   bool              t2_consistent;   // the recomputed T002 direction equals the one in the state
+   string            pivots_text;
+   string            missing;         // anything that could not be located (never invented)
+  };
+
+void H3VViewInit(SH3View &v)
+  {
+   v.fvg_total     = 0;
+   v.fvg_invalid   = 0;
+   v.fvg_shown     = 0;
+   v.ev_total      = 0;
+   v.ev_shown      = 0;
+   v.ev_hidden     = 0;
+   v.t2_cur        = H4_DIR_UNKNOWN;
+   v.t2_prev       = -1;
+   v.t2_since      = 0;
+   v.t2_exact      = false;
+   v.t2_consistent = true;
+   v.pivots_text   = "";
+   v.missing       = "";
+  }
+
+//+------------------------------------------------------------------+
+//| pure helpers (no chart access)                                   |
+//+------------------------------------------------------------------+
+string H3VTime(const datetime t)
+  {
+   if(t <= 0)
+      return("-");
+   return(TimeToString(t, TIME_DATE | TIME_MINUTES));
+  }
+
+//--- object-name safe text: letters, digits and underscore only
+string H3VSanitize(const string s)
+  {
+   string out = "";
+   int len = StringLen(s);
+   for(int i = 0; i < len; i++)
+     {
+      ushort c = StringGetCharacter(s, i);
+      bool ok = ((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_');
+      if(ok)
+         out += ShortToString(c);
+      else
+         out += "_";
+     }
+   return(out);
+  }
+
+//--- "yyyymmddhhmm" (the H4TimeStamp format) back to a time value; 0 when malformed
+datetime H3VStampToTime(const string stamp)
+  {
+   if(StringLen(stamp) != 12)
+      return(0);
+   for(int i = 0; i < 12; i++)
+     {
+      ushort c = StringGetCharacter(stamp, i);
+      if(c < '0' || c > '9')
+         return(0);
+     }
+   MqlDateTime dt;
+   dt.year        = (int)StringToInteger(StringSubstr(stamp, 0, 4));
+   dt.mon         = (int)StringToInteger(StringSubstr(stamp, 4, 2));
+   dt.day         = (int)StringToInteger(StringSubstr(stamp, 6, 2));
+   dt.hour        = (int)StringToInteger(StringSubstr(stamp, 8, 2));
+   dt.min         = (int)StringToInteger(StringSubstr(stamp, 10, 2));
+   dt.sec         = 0;
+   dt.day_of_week = 0;
+   dt.day_of_year = 0;
+   return(StructToTime(dt));
+  }
+
+//--- value of key in "k1=v1;k2=v2" (key must start the text or follow a ';'); "" when absent
+string H3VDetailValue(const string detail, const string key)
+  {
+   string needle = key + "=";
+   int nl = StringLen(needle);
+   int from = 0;
+   for(int guard = 0; guard < 32; guard++)
+     {
+      int p = StringFind(detail, needle, from);
+      if(p < 0)
+         return("");
+      if(p == 0 || StringGetCharacter(detail, p - 1) == ';')
+        {
+         int e = StringFind(detail, ";", p);
+         if(e < 0)
+            e = StringLen(detail);
+         return(StringSubstr(detail, p + nl, e - p - nl));
+        }
+      from = p + 1;
+     }
+   return("");
+  }
+
+//--- short chart label of an event; is_new marks an event reported after the baseline
+string H3VEventLabel(const SH3Event &e, const bool is_new)
+  {
+   string s = (is_new ? ">> NEW " : "");
+   s += H3EventName(e.type);
+   string dir = H3VDetailValue(e.detail, "dir");
+   if(e.type == H3_EV_FLIP)
+      s += " " + H3VDetailValue(e.detail, "from") + "->" + dir;
+   else
+      if(e.type == H3_EV_BREAK_SET || e.type == H3_EV_SEED)
+         s += " " + dir;
+      else
+         if(e.type == H3_EV_WICK)
+           {
+            s += " " + dir;
+            if(H3VDetailValue(e.detail, "retro") == "1")
+               s += " retro";
+           }
+   return(s);
+  }
+
+color H3VEventColor(const int type)
+  {
+   if(type == H3_EV_FLIP || type == H3_EV_BREAK_SET || type == H3_EV_SEED || type == H3_EV_CONFLICT)
+      return(clrGold);
+   if(type == H3_EV_WICK || type == H3_EV_NONE_WICK)
+      return(clrOrange);
+   if(type == H3_EV_RECONFIRMED || type == H3_EV_RECONF_LOST)
+      return(clrAqua);
+   if(type == H3_EV_INT_SWEEP || type == H3_EV_INT_BREAK)
+      return(clrViolet);
+   return(clrSilver);
+  }
+
+bool H3VIdInList(const string id, const string &ids[], const int n)
+  {
+   for(int i = 0; i < n; i++)
+      if(ids[i] == id)
+         return(true);
+   return(false);
+  }
+
+//--- the phase with its reason, in words (a description of the replayed state, not a decision)
+string H3VPhaseReason(const SH3State &st)
+  {
+   if(st.dir == H3_NONE)
+      return("no bias (" + H3NoneReasonName(st.none_reason) + ")");
+   if(st.phase == H3_PH_HOLD)
+      return("HOLD: a wick crossed the frozen protecting level without a body close beyond it; HOLD from detected_at " +
+             H3VTime(st.wk_det));
+   if(st.phase == H3_PH_SWEEP_WAIT)
+      return("SWEEP_WAIT: internal liquidity swept at " + H3VTime(st.sweep_time) +
+             "; waiting for an eligible new FVG to be touched (technical proposal)");
+   if(st.phase == H3_PH_RECONFIRMED)
+     {
+      if(st.recon_reason == H3_RR_INTERNAL)
+         return("RECONFIRMED (INTERNAL): eligible FVG " + st.rec_id + " touched after the internal sweep");
+      return("RECONFIRMED (STRUCT): eligible FVG " + st.rec_id + " touched after the structural wick");
+     }
+   return("ACTIVE: protecting level " + (st.has_level ? "defined" : "NOT defined") + ", origin " + H3OriginName(st.origin));
+  }
+
+//--- the swing with this pivot time, or -1
+int H3VFindSwing(const SH4Swing &sw[], const int ns, const datetime pivot_time)
+  {
+   for(int i = 0; i < ns; i++)
+      if(sw[i].pivot_time == pivot_time)
+         return(i);
+   return(-1);
+  }
+
+//--- T002 direction over the examined bars: the current run (since the first bar whose close gave
+//--- the same direction) and the direction before it. Same derivation as the replay's t2dir.
+void H3VT2Run(const MqlRates &bars[], const int nw, const SH4Swing &sw[], const int ns, const int right,
+              const int warm, const string state_t2dir, SH3View &v)
+  {
+   v.t2_cur   = H4_DIR_UNKNOWN;
+   v.t2_prev  = -1;
+   v.t2_since = 0;
+   v.t2_exact = false;
+   if(nw < 1)
+      return;
+   v.t2_cur = H4DeriveDirection(sw, H3KnownCount(sw, ns, right, nw - 1));
+   v.t2_consistent = (H4DirName(v.t2_cur) == state_t2dir);
+   int first = nw - 1;
+   int stop = (warm < nw - 1 ? warm : nw - 1);
+   for(int t = nw - 2; t >= stop; t--)
+     {
+      int d = H4DeriveDirection(sw, H3KnownCount(sw, ns, right, t));
+      if(d != v.t2_cur)
+        {
+         v.t2_prev  = d;
+         v.t2_exact = true;
+         break;
+        }
+      first = t;
+     }
+   v.t2_since = bars[first].time;
+  }
+
+//+------------------------------------------------------------------+
+//| the chart objects                                                |
+//+------------------------------------------------------------------+
+class CH3BiasDrawer
+  {
+private:
+   string            m_prefix;
+   string            m_panel_prefix;
+   long              m_chart;
+   int               m_font;
+   color             m_clr_bear;
+   color             m_clr_bull;
+   color             m_clr_dim;
+   color             m_clr_level;
+
+   bool              Ensure(const string name, const ENUM_OBJECT type)
+     {
+      if(ObjectFind(m_chart, name) >= 0)
+         return(true);
+      if(!ObjectCreate(m_chart, name, type, 0, 0, 0))
+        {
+         ResetLastError();
+         return(false);
+        }
+      ObjectSetInteger(m_chart, name, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(m_chart, name, OBJPROP_HIDDEN, true);
+      return(true);
+     }
+
+   void              Put(const string name, const int idx, const datetime t, const double p)
+     {
+      ObjectSetInteger(m_chart, name, OBJPROP_TIME, idx, t);
+      ObjectSetDouble(m_chart, name, OBJPROP_PRICE, idx, p);
+     }
+
+   void              Segment(const string name, const datetime t1, const double p1,
+                             const datetime t2, const double p2, const color clr,
+                             const int width, const ENUM_LINE_STYLE style)
+     {
+      if(!Ensure(name, OBJ_TREND))
+         return;
+      Put(name, 0, t1, p1);
+      Put(name, 1, t2, p2);
+      ObjectSetInteger(m_chart, name, OBJPROP_COLOR, clr);
+      ObjectSetInteger(m_chart, name, OBJPROP_WIDTH, width);
+      ObjectSetInteger(m_chart, name, OBJPROP_STYLE, style);
+      ObjectSetInteger(m_chart, name, OBJPROP_RAY_RIGHT, false);
+      ObjectSetInteger(m_chart, name, OBJPROP_BACK, false);
+     }
+
+   void              Note(const string name, const datetime t, const double p, const string text,
+                          const color clr, const ENUM_ANCHOR_POINT anchor, const int fontsize)
+     {
+      if(!Ensure(name, OBJ_TEXT))
+         return;
+      Put(name, 0, t, p);
+      ObjectSetString(m_chart, name, OBJPROP_TEXT, text);
+      ObjectSetString(m_chart, name, OBJPROP_FONT, "Arial");
+      ObjectSetInteger(m_chart, name, OBJPROP_FONTSIZE, fontsize);
+      ObjectSetInteger(m_chart, name, OBJPROP_COLOR, clr);
+      ObjectSetInteger(m_chart, name, OBJPROP_ANCHOR, anchor);
+     }
+
+   void              Rect(const string name, const datetime t1, const double p1,
+                          const datetime t2, const double p2, const color clr,
+                          const int width, const bool fill, const ENUM_LINE_STYLE style)
+     {
+      if(!Ensure(name, OBJ_RECTANGLE))
+         return;
+      Put(name, 0, t1, p1);
+      Put(name, 1, t2, p2);
+      ObjectSetInteger(m_chart, name, OBJPROP_COLOR, clr);
+      ObjectSetInteger(m_chart, name, OBJPROP_WIDTH, width);
+      ObjectSetInteger(m_chart, name, OBJPROP_STYLE, style);
+      ObjectSetInteger(m_chart, name, OBJPROP_FILL, fill);
+      ObjectSetInteger(m_chart, name, OBJPROP_BACK, true);
+     }
+
+   //--- text mark at a confirmed swing; the text carries the confirmation time
+   string            Pivot(const SH4Swing &sw[], const int ns, const datetime pivot_time, const string tag,
+                           const color clr, SH3View &v)
+     {
+      int k = H3VFindSwing(sw, ns, pivot_time);
+      if(k < 0)
+        {
+         v.missing += (v.missing != "" ? "; " : "") + tag + " pivot " + H3VTime(pivot_time) + " not among the swings";
+         return(tag + " pivot " + H3VTime(pivot_time) + " (swing not found)");
+        }
+      string txt = StringFormat("%s %s %s  known %s", tag, (sw[k].is_high ? "SH" : "SL"),
+                                DoubleToString(sw[k].price, _Digits), H3VTime(sw[k].confirm_time));
+      Note(m_prefix + "pv_" + H3VSanitize(tag) + "_" + H4TimeStamp(pivot_time), pivot_time, sw[k].price, txt, clr,
+           (sw[k].is_high ? ANCHOR_LOWER : ANCHOR_UPPER), m_font);
+      return(StringFormat("%s %s %s pivot %s known %s", tag, (sw[k].is_high ? "SH" : "SL"),
+                          DoubleToString(sw[k].price, _Digits), H3VTime(pivot_time), H3VTime(sw[k].confirm_time)));
+     }
+
+public:
+                     CH3BiasDrawer(void)
+     {
+      m_prefix       = H3V_PREFIX;
+      m_panel_prefix = H3V_PANEL_PREFIX;
+      m_chart        = 0;
+      m_font         = 8;
+      m_clr_bear     = clrTomato;
+      m_clr_bull     = clrDodgerBlue;
+      m_clr_dim      = clrDimGray;
+      m_clr_level    = clrOrange;
+     }
+
+   string            PanelPrefix(void) const { return(m_panel_prefix); }
+
+   void              Init(const color bear, const color bull, const color level, const int font_size)
+     {
+      m_chart     = ChartID();
+      m_clr_bear  = bear;
+      m_clr_bull  = bull;
+      m_clr_level = level;
+      m_font      = (font_size < 6 ? 6 : (font_size > 20 ? 20 : font_size));
+      ClearAll();
+     }
+
+   //--- Delete EVERY object of this task (map and panel). Prefix only, and the prefix is never empty.
+   void              ClearAll(void)
+     {
+      ObjectsDeleteAll(m_chart, m_prefix);
+     }
+
+   //--- Delete the map objects but keep the panel (sub-prefix velo_t003_pnl_).
+   void              ClearMap(void)
+     {
+      for(int i = ObjectsTotal(m_chart, 0, -1) - 1; i >= 0; i--)
+        {
+         string name = ObjectName(m_chart, i, 0, -1);
+         if(StringFind(name, m_prefix) != 0)
+            continue;
+         if(StringFind(name, m_panel_prefix) == 0)
+            continue;
+         ObjectDelete(m_chart, name);
+        }
+     }
+
+   void              Reset(void)
+     {
+      ClearMap();
+      ChartRedraw(m_chart);
+     }
+
+   //--- Redraw the whole T003 map from one RELIABLE evaluation. bars[0..n-1] are the closed bars the
+   //--- evaluation was given; the examined window is the last ev.r_eff of them (replay A), from which the
+   //--- swings and FVG geometry are recomputed with the same T002 functions. When the evaluation is not
+   //--- reliable nothing proposal-derived is drawn (the panel reports the state).
+   void              Draw(const MqlRates &bars[], const int n, const SH3Params &p, const SH3Eval &ev,
+                          const SH3Track &tracks[], const SH3Event &events[],
+                          const string &new_ids[], const int n_new,
+                          const int max_events, const int max_fvgs,
+                          const bool show_nonmarket, const bool show_invalid, SH3View &v)
+     {
+      ClearMap();
+      H3VViewInit(v);
+      v.ev_total  = ev.ne;
+      v.fvg_total = ev.nt;
+      if(!ev.reliable || !ev.has_state || n < 1 || ev.r_eff < 1)
+        {
+         ChartRedraw(m_chart);
+         return;
+        }
+      int w0 = n - ev.r_eff;
+      if(w0 < 0)
+         w0 = 0;
+      int nw = n - w0;
+      MqlRates win[];
+      ArrayResize(win, nw);
+      ArrayCopy(win, bars, 0, w0, nw);
+      SH4Swing sw[];
+      SH4Fvg fv[];
+      int amb = 0;
+      int ns = H4FindSwings(win, nw, p.left, p.right, p.period, sw, amb);
+      int nf = H4FindFvgs(win, nw, p.period, fv);
+      datetime x_end = win[nw - 1].time + (datetime)(p.period * 6);
+      SH3State st;
+      H3StateCopy(ev.st, st);                   // field-wise copy: the struct holds strings
+
+      H3VT2Run(win, nw, sw, ns, p.right, H3WarmUp(p), st.t2dir, v);
+
+      //--- the average bar range, used to stack labels
+      double rsum = 0.0;
+      int rcnt = 0;
+      for(int b = nw - 1; b >= 0 && rcnt < 30; b--)
+        {
+         rsum += (win[b].high - win[b].low);
+         rcnt++;
+        }
+      double step = (rcnt > 0 ? rsum / rcnt * 0.6 : 0.0);
+
+      //--- 1. protecting level and the pivots it was selected from
+      if(st.dir != H3_NONE && st.has_level)
+        {
+         color lc = (st.dir == H3_BEAR ? m_clr_bear : m_clr_bull);
+         string frz = (st.frozen ? " FROZEN" : "");
+         Segment(m_prefix + "lvl_" + H3VSanitize(st.lv_id), st.lv_pivot, st.lv_price, x_end, st.lv_price, lc, 2,
+                 st.frozen ? STYLE_DASH : STYLE_SOLID);
+         Note(m_prefix + "lvl_lbl_" + H3VSanitize(st.lv_id), x_end, st.lv_price,
+              StringFormat("PROTECTING LEVEL (proposal) %s%s  known %s", DoubleToString(st.lv_price, _Digits), frz,
+                           H3VTime(st.lv_known)),
+              lc, ANCHOR_RIGHT_LOWER, m_font);
+         string t1 = Pivot(sw, ns, st.lv_pivot, "S", lc, v);
+         string t2 = Pivot(sw, ns, st.lv_ext, (st.dir == H3_BEAR ? "LL" : "HH"), m_clr_level, v);
+         string t3 = Pivot(sw, ns, st.lv_prev, (st.dir == H3_BEAR ? "prevLL" : "prevHH"), m_clr_level, v);
+         v.pivots_text = t1 + " | " + t2 + " | " + t3;
+        }
+      //--- interior liquidity candidate (technical proposal P14); the time is part of its ID
+      if(st.dir != H3_NONE && st.has_lint)
+        {
+         datetime ti = H3VStampToTime(StringSubstr(st.li_id, 2, 12));
+         if(ti > 0)
+           {
+            Segment(m_prefix + "lint_" + H3VSanitize(st.li_id), ti, st.li_price, x_end, st.li_price, m_clr_dim, 1, STYLE_DOT);
+            Note(m_prefix + "lint_lbl_" + H3VSanitize(st.li_id), x_end, st.li_price,
+                 StringFormat("internal liquidity (proposal) %s%s", DoubleToString(st.li_price, _Digits),
+                              (st.li_consumed ? " CONSUMED" : "")),
+                 m_clr_dim, ANCHOR_RIGHT_UPPER, m_font);
+           }
+         else
+            v.missing += (v.missing != "" ? "; " : "") + "interior level time not parsable from " + st.li_id;
+        }
+
+      //--- 2. the wick and the internal sweep, with all their timestamps
+      if(st.dir != H3_NONE && st.has_wick)
+        {
+         int iw = H3BarIndexByTime(win, nw, st.wk_src);
+         if(iw >= 0)
+           {
+            double wp = (st.dir == H3_BEAR ? win[iw].high : win[iw].low);
+            Note(m_prefix + "wick_" + H4TimeStamp(st.wk_src), st.wk_src, wp,
+                 StringFormat("WICK source_wick_time %s | known %s | detected_at %s%s", H3VTime(st.wk_src),
+                              H3VTime(st.wk_known), H3VTime(st.wk_det), (st.wk_retro ? " RETROACTIVE" : "")),
+                 clrOrange, (st.dir == H3_BEAR ? ANCHOR_LOWER : ANCHOR_UPPER), m_font);
+            if(st.wk_det > 0)
+               Note(m_prefix + "det_" + H4TimeStamp(st.wk_det), st.wk_det, (st.has_level ? st.lv_price : wp),
+                    "detected_at", clrOrange, (st.dir == H3_BEAR ? ANCHOR_LEFT_LOWER : ANCHOR_LEFT_UPPER), m_font);
+           }
+         else
+            v.missing += (v.missing != "" ? "; " : "") + "wick bar " + H3VTime(st.wk_src) + " not in the examined bars";
+        }
+      if(st.dir != H3_NONE && st.sweep_time != 0)
+        {
+         int isw = H3BarIndexByTime(win, nw, st.sweep_time);
+         if(isw >= 0)
+           {
+            double sp = (st.dir == H3_BEAR ? win[isw].high : win[isw].low);
+            Note(m_prefix + "sweep_" + H4TimeStamp(st.sweep_time), st.sweep_time, sp,
+                 StringFormat("INTERNAL SWEEP (proposal) bar %s | wait from %s", H3VTime(st.sweep_time),
+                              H3VTime(st.wait_start)),
+                 clrViolet, (st.dir == H3_BEAR ? ANCHOR_LOWER : ANCHOR_UPPER), m_font);
+           }
+         else
+            v.missing += (v.missing != "" ? "; " : "") + "sweep bar " + H3VTime(st.sweep_time) + " not in the examined bars";
+        }
+
+      //--- 3. eligible new FVGs (most recent first up to the limit) and the reconfirmation FVG
+      int nt = ev.nt;
+      bool chosen[];
+      ArrayResize(chosen, nt);
+      int shown = 0;
+      for(int i = 0; i < nt; i++)
+        {
+         chosen[i] = false;
+         if(tracks[i].invalid)
+            v.fvg_invalid++;
+        }
+      for(int i2 = nt - 1; i2 >= 0 && shown < max_fvgs; i2--)
+        {
+         if(tracks[i2].invalid && !show_invalid)
+            continue;
+         chosen[i2] = true;
+         shown++;
+        }
+      if(st.rec_id != "")
+         for(int i3 = 0; i3 < nt; i3++)
+            if(tracks[i3].id == st.rec_id)
+               chosen[i3] = true;
+      for(int i4 = 0; i4 < nt; i4++)
+        {
+         if(!chosen[i4])
+            continue;
+         int fk = -1;
+         for(int q = 0; q < nf; q++)
+            if(fv[q].id == tracks[i4].id)
+              {
+               fk = q;
+               break;
+              }
+         if(fk < 0)
+           {
+            v.missing += (v.missing != "" ? "; " : "") + "FVG " + tracks[i4].id + " geometry not found";
+            continue;
+           }
+         bool is_rec = (st.rec_id != "" && tracks[i4].id == st.rec_id);
+         color fc = (tracks[i4].invalid ? m_clr_dim : (fv[fk].bullish ? m_clr_bull : m_clr_bear));
+         string status = (tracks[i4].invalid ? "INVALID" : (tracks[i4].recorded ? "TOUCHED" : "FRESH"));
+         if(is_rec)
+            Rect(m_prefix + "fvg_" + fv[fk].id, fv[fk].time_a, fv[fk].upper, x_end, fv[fk].lower, clrGold, 3, true, STYLE_SOLID);
+         else
+            Rect(m_prefix + "fvg_" + fv[fk].id, fv[fk].time_a, fv[fk].upper, x_end, fv[fk].lower, fc, 1, false,
+                 tracks[i4].invalid ? STYLE_DOT : STYLE_SOLID);
+         string lbl = StringFormat("%s eligible FVG (proposal) %s %s%s", (fv[fk].bullish ? "bull" : "bear"), fv[fk].id,
+                                   status, (is_rec ? "  RECONFIRMATION FVG" : ""));
+         Note(m_prefix + "fvgt_" + fv[fk].id, fv[fk].time_a, fv[fk].upper, lbl, (is_rec ? clrGold : fc),
+              ANCHOR_LEFT_LOWER, m_font);
+         v.fvg_shown++;
+        }
+
+      //--- 4. the most recent events, history versus new
+      int drawn = 0;
+      datetime drawn_bars[];
+      ArrayResize(drawn_bars, 0);
+      for(int e = ev.ne - 1; e >= 0; e--)
+        {
+         if(!events[e].market && !show_nonmarket)
+           {
+            v.ev_hidden++;
+            continue;
+           }
+         if(drawn >= max_events)
+           {
+            v.ev_hidden++;
+            continue;
+           }
+         int ib = H3BarIndexByTime(win, nw, events[e].bar_time);
+         if(ib < 0)
+           {
+            v.ev_hidden++;
+            continue;
+           }
+         int stack = 0;
+         for(int s = 0; s < drawn; s++)
+            if(drawn_bars[s] == events[e].bar_time)
+               stack++;
+         ArrayResize(drawn_bars, drawn + 1);
+         drawn_bars[drawn] = events[e].bar_time;
+         bool is_new = H3VIdInList(H3EventId(events[e].type, events[e].bar_time, events[e].ref), new_ids, n_new);
+         Note(m_prefix + "ev_" + H3VSanitize(H3EventId(events[e].type, events[e].bar_time, events[e].ref)),
+              events[e].bar_time, win[ib].high + step * (stack + 1), H3VEventLabel(events[e], is_new),
+              (is_new ? clrLime : H3VEventColor(events[e].type)), ANCHOR_LOWER, (is_new ? m_font + 2 : m_font));
+         drawn++;
+        }
+      v.ev_shown = drawn;
+      ChartRedraw(m_chart);
+     }
+  };
+
+//+------------------------------------------------------------------+
+//| the status panel: a background rectangle plus one label per line |
+//+------------------------------------------------------------------+
+class CH3Panel
+  {
+private:
+   string            m_prefix;
+   string            m_bg;
+   long              m_chart;
+   bool              m_enabled;
+   int               m_corner;
+   int               m_font;
+   int               m_lh;
+   double            m_cw;
+   int               m_pad;
+   int               m_margin;
+   color             m_bgclr;
+   string            m_lines[];
+   color             m_clrs[];
+   int               m_n;
+   int               m_created;
+
+   string            LabelName(const int i) const
+     {
+      return(StringFormat("%s%03d", m_prefix, i));
+     }
+
+   int               MaxChars(void) const
+     {
+      long w = ChartGetInteger(m_chart, CHART_WIDTH_IN_PIXELS);
+      int mc = (int)((w * 0.5 - 2.0 * m_pad) / m_cw);
+      if(mc < 40)
+         mc = 40;
+      if(mc > 160)
+         mc = 160;
+      return(mc);
+     }
+
+   void              Push(const string text, const color clr)
+     {
+      ArrayResize(m_lines, m_n + 1, 32);
+      ArrayResize(m_clrs, m_n + 1, 32);
+      m_lines[m_n] = text;
+      m_clrs[m_n]  = clr;
+      m_n++;
+     }
+
+public:
+                     CH3Panel(void)
+     {
+      m_prefix  = H3V_PANEL_PREFIX;
+      m_bg      = H3V_PANEL_PREFIX + "bg";
+      m_chart   = 0;
+      m_enabled = false;
+      m_corner  = H3V_PNL_TOP_LEFT;
+      m_font    = 9;
+      m_lh      = 16;
+      m_cw      = 7.0;
+      m_pad     = 6;
+      m_margin  = 8;
+      m_bgclr   = C'16,20,28';
+      m_n       = 0;
+      m_created = 0;
+     }
+
+   void              Init(const bool enabled, const int corner, const int font_size, const color bg)
+     {
+      m_chart   = ChartID();
+      m_enabled = enabled;
+      m_corner  = corner;
+      m_font    = (font_size < 6 ? 6 : (font_size > 24 ? 24 : font_size));
+      m_lh      = (int)(m_font * 1.8);
+      m_cw      = m_font * 0.78;
+      m_bgclr   = bg;
+      m_n       = 0;
+      m_created = 0;
+      ObjectsDeleteAll(m_chart, m_prefix);        // panel sub-prefix only
+     }
+
+   void              Begin(void)
+     {
+      m_n = 0;
+     }
+
+   //--- a long line is wrapped at spaces to the panel width; continuation lines are indented
+   void              Line(const string text, const color clr)
+     {
+      if(!m_enabled)
+         return;
+      int mc = MaxChars();
+      string rest = text;
+      bool first = true;
+      for(int guard = 0; guard < 12; guard++)
+        {
+         int avail = (first ? mc : mc - 2);
+         if(StringLen(rest) <= avail)
+           {
+            Push((first ? "" : "  ") + rest, clr);
+            return;
+           }
+         int cut = -1;
+         for(int i = avail; i > avail / 2; i--)
+            if(StringGetCharacter(rest, i) == ' ')
+              {
+               cut = i;
+               break;
+              }
+         if(cut < 0)
+            cut = avail;
+         Push((first ? "" : "  ") + StringSubstr(rest, 0, cut), clr);
+         rest = StringSubstr(rest, cut);
+         while(StringLen(rest) > 0 && StringGetCharacter(rest, 0) == ' ')
+            rest = StringSubstr(rest, 1);
+         first = false;
+        }
+      Push("  " + rest, clr);
+     }
+
+   void              End(void)
+     {
+      if(!m_enabled)
+         return;
+      int maxlen = 1;
+      for(int i = 0; i < m_n; i++)
+         if(StringLen(m_lines[i]) > maxlen)
+            maxlen = StringLen(m_lines[i]);
+      int w = (int)(maxlen * m_cw) + 2 * m_pad;
+      int h = m_n * m_lh + 2 * m_pad;
+      int cw = (int)ChartGetInteger(m_chart, CHART_WIDTH_IN_PIXELS);
+      int ch = (int)ChartGetInteger(m_chart, CHART_HEIGHT_IN_PIXELS);
+      int x = m_margin;
+      int y = m_margin;
+      if(m_corner == H3V_PNL_TOP_RIGHT || m_corner == H3V_PNL_BOTTOM_RIGHT)
+         x = cw - w - m_margin;
+      if(m_corner == H3V_PNL_BOTTOM_LEFT || m_corner == H3V_PNL_BOTTOM_RIGHT)
+         y = ch - h - m_margin;
+      if(x < 0)
+         x = 0;
+      if(y < 0)
+         y = 0;
+      //--- the background must sit BELOW the labels: if it had to be created again, recreate the labels after it
+      if(ObjectFind(m_chart, m_bg) < 0)
+        {
+         for(int k = 0; k < m_created; k++)
+            ObjectDelete(m_chart, LabelName(k));
+         m_created = 0;
+         if(ObjectCreate(m_chart, m_bg, OBJ_RECTANGLE_LABEL, 0, 0, 0))
+           {
+            ObjectSetInteger(m_chart, m_bg, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+            ObjectSetInteger(m_chart, m_bg, OBJPROP_SELECTABLE, false);
+            ObjectSetInteger(m_chart, m_bg, OBJPROP_HIDDEN, true);
+            ObjectSetInteger(m_chart, m_bg, OBJPROP_BACK, false);
+            ObjectSetInteger(m_chart, m_bg, OBJPROP_BORDER_TYPE, BORDER_FLAT);
+           }
+         else
+            ResetLastError();
+        }
+      ObjectSetInteger(m_chart, m_bg, OBJPROP_XDISTANCE, x);
+      ObjectSetInteger(m_chart, m_bg, OBJPROP_YDISTANCE, y);
+      ObjectSetInteger(m_chart, m_bg, OBJPROP_XSIZE, w);
+      ObjectSetInteger(m_chart, m_bg, OBJPROP_YSIZE, h);
+      ObjectSetInteger(m_chart, m_bg, OBJPROP_BGCOLOR, m_bgclr);
+      ObjectSetInteger(m_chart, m_bg, OBJPROP_COLOR, clrDimGray);
+      for(int j = 0; j < m_n; j++)
+        {
+         string name = LabelName(j);
+         if(ObjectFind(m_chart, name) < 0)
+           {
+            if(!ObjectCreate(m_chart, name, OBJ_LABEL, 0, 0, 0))
+              {
+               ResetLastError();
+               continue;
+              }
+            ObjectSetInteger(m_chart, name, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+            ObjectSetInteger(m_chart, name, OBJPROP_ANCHOR, ANCHOR_LEFT_UPPER);
+            ObjectSetInteger(m_chart, name, OBJPROP_SELECTABLE, false);
+            ObjectSetInteger(m_chart, name, OBJPROP_HIDDEN, true);
+            ObjectSetInteger(m_chart, name, OBJPROP_BACK, false);
+            ObjectSetString(m_chart, name, OBJPROP_FONT, "Consolas");
+            if(j + 1 > m_created)
+               m_created = j + 1;
+           }
+         ObjectSetInteger(m_chart, name, OBJPROP_FONTSIZE, m_font);
+         ObjectSetInteger(m_chart, name, OBJPROP_XDISTANCE, x + m_pad);
+         ObjectSetInteger(m_chart, name, OBJPROP_YDISTANCE, y + m_pad + j * m_lh);
+         ObjectSetString(m_chart, name, OBJPROP_TEXT, m_lines[j]);
+         ObjectSetInteger(m_chart, name, OBJPROP_COLOR, m_clrs[j]);
+        }
+      for(int r = m_n; r < m_created; r++)
+        {
+         string nm2 = LabelName(r);
+         if(ObjectFind(m_chart, nm2) >= 0)
+            ObjectDelete(m_chart, nm2);
+        }
+      if(m_created > m_n)
+         m_created = m_n;
+      ChartRedraw(m_chart);
+     }
+
+   void              Destroy(void)
+     {
+      ObjectsDeleteAll(m_chart, m_prefix);        // panel sub-prefix only
+      m_n = 0;
+      m_created = 0;
+      ChartRedraw(m_chart);
+     }
+  };
+
+#endif // VELO_H4_BIAS_DRAWER_MQH

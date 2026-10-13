@@ -3,15 +3,16 @@
 Updated: 2026-10-13 (Europe/Tirane)
 
 ## Resume here
-- T003 revision 7 is in the WORKING TREE of branch `claude/t003-h4-bias` (PR #3), NOT committed or pushed: two review findings of `72b2557` fixed (anchor by existing bars; level frozen during RECONFIRMED(INTERNAL); on thaw the level is re-derived at the end of the thaw bar T and used from T+1; a touch without a defined level is not recorded; no event lost on T+1). Owner-relayed for `72b2557` only: Codex compiled 0/0 and the owner ran 166 passed, 0 failed, 5 deferred; that does not cover the corrected code. Revision 7 MetaEditor compile and MT5 run: UNVERIFIED.
-- Next step: the parent reviews and commits revision 7; then Codex compiles `src/include/H4Bias.mqh` and `src/tests/T003_LogicTest.mq5` (static expectation 262 passed, 0 failed, 5 deferred, not a result), runs it in MT5 and reviews the 20 `AMBIGUITY` markers and the contradictions in `reports/T003-verification.md` (notably: CONFLICT is unreachable under the current candidate definitions).
+- Codex compiles and reviews `src/XauUsdH4Bias.mq5` (+ `src/include/H4BiasDrawer.mqh`), the T003 visual EA; the owner then observes it against the client's examples (task section 10; instructions in `docs/T003-visual-ea.md`; send back the compile log, Experts log and screenshots). The new files are in the WORKING TREE of `claude/t003-h4-bias` (on top of `62a0747`), NOT committed or pushed.
+- T003 logic at `62a0747` (revision 7), relayed (not my runs): Codex compiled `T003_LogicTest.mq5` with `H4Bias.mqh`: 0 errors, 0 warnings; the owner ran it in MT5: 262 passed, 0 failed, 5 deferred. Deferred are not passes; the tests do not prove agreement with the client's strategy.
+- Still to review (Codex): the 20 `AMBIGUITY` markers and the contradictions in `reports/T003-verification.md` (notably CONFLICT is unreachable).
 - The owner is waiting on the log of the first NEW H4 candle in LIVE for the technical closure of T002 (see the T002 state below).
-- Do not start: the visual T003 EA, the intrabar overlay P12, the target P13, M5/M15, orders or position handling. No merge of PR #1, #2 or #3.
+- Do not start: the intrabar overlay P12, the target P13, M5/M15, orders or position handling. No merge of PR #1, #2 or #3.
 
 ## Branches and PRs (verified from the GitHub API and git on 2026-10-13)
 - PR #1 (T001): branch `claude/amazing-darwin-icpcjd`, head `56c9570`, base `main`, open, NOT merged. Tested version `763227d`.
 - PR #2 (T002), draft: branch `claude/t002-h4-map`, head `dd571f6`, base the T001 branch. Commit `6a8c0c6` (T002_SetupScan.mq5 and docs/T002-setup-scan.md) is an ancestor of this head, so the SetupScan IS delivered in PR #2 (its body already says so; no correction needed). Tested EA code is `97ce7b4`; later commits are docs, one tools fix (check 15) and the scan script.
-- PR #3 (T003), draft: branch `claude/t003-h4-bias`, head `88cf608` (code tested by Codex/owner at `72b2557`; revision 6 committed in `88cf608`; revision 7 changes are uncommitted in the working tree), base `claude/t002-h4-map` (`dd571f6`).
+- PR #3 (T003), draft: branch `claude/t003-h4-bias`, head `62a0747` (revision 7, tested by Codex/owner as relayed above; the visual EA files are uncommitted in the working tree), base `claude/t002-h4-map` (`dd571f6`).
 - `main` has moved to `91091d2` ("Delete jessy", the unrelated pre-existing file; not done by this agent). The T001/T002/T003 branches still contain `jessy`. PR #1 may need `main` merged in when the owner decides about it; nothing was done.
 - This handoff was committed on the T003 branch only (a descendant of the T002 branch), to avoid STATE.md conflicts between stacked PRs; the STATE.md on the T002 branch is older.
 
@@ -28,9 +29,10 @@ Out of T002 scope: M5/M15 and the 2R policy. Declared limits: Tauro versus Tradi
 
 ## T003 state (PR #3; proposals, not confirmed strategy)
 - Specification: tasks/T003-h4-bias-change.md revision 7 (client statements S1-S6 and BUY example E1-E6 kept apart from proposals P1-P14). Client statements are in docs/DECISIONS.md.
-- Implemented, first limited round only: pure logic `src/include/H4Bias.mqh`, MQL5 test script `src/tests/T003_LogicTest.mq5`, Python model `tests/t003_reference_test.py`, `tools/t003-static-checks.sh`. No T001/T002 file changed. Not implemented: visual EA, intrabar overlay P12, target P13, M5/M15, orders, positions; tests 9, 18, 20 and the drawing tests are DEFERRED (printed as DEFERRED, never PASS).
-- Revision 7 results (mine, this environment): Python model tests 256 passed, 0 failed, 5 deferred; T003 static checks PASS (64 PASS lines, new check 12b and negative controls 13s/13t); T002 and T001 static checks PASS, T002 model tests 197 passed. These are model and static evidence only.
-- Pending: MetaEditor compilation and MT5 run of the revision 7 code (UNVERIFIED) and Codex's review. The 20 interpretations (`AMBIGUITY n` markers; 1, 5, 19, 20 changed in revisions 6 and 7) are in reports/T003-verification.md section 5, the contradictions in section 6. The freeze/thaw rule and the no-level rule are technical proposals in the task file (P14), not a client statement.
+- Implemented: pure logic `src/include/H4Bias.mqh`, test script `src/tests/T003_LogicTest.mq5`, Python model `tests/t003_reference_test.py`, `tools/t003-static-checks.sh`; NEW and uncommitted: visual EA `src/XauUsdH4Bias.mq5`, drawer `src/include/H4BiasDrawer.mqh`, `tools/t003-visual-check.py`, `tools/t003-visual-static-checks.sh`, `docs/T003-visual-ea.md`. No T001/T002 file and no `H4Bias.mqh` change. The visual EA has no trading API, no overlay P12, no target P13, no M5/M15; prefix `velo_t003_`.
+- Results (mine, this environment, static/model only): visual static checks PASS (61 PASS lines, 29 negative controls); T003 static PASS (64); T002 static PASS (59); T001 static PASS (24); Python T003 model 256 passed, 0 failed, 5 deferred; T002 model 197 passed, 0 failed.
+- UNVERIFIED: MetaEditor compilation of the visual EA, its chart behaviour (live and historical), panel readability, first-rebuild time; there are no behavioural tests of the drawing code. DEFERRED test groups: 9, 18, 20, drawing tests, M5/M15.
+- The 20 interpretations (`AMBIGUITY n`) are in reports/T003-verification.md section 5, the contradictions in section 6, the visual EA section 9. The freeze/thaw and no-level rules are technical proposals (P14), not client statements.
 
 ## Open decisions and next owner actions
 - Have Codex review T003 and answer or defer F1-F8 (see tasks/T003-h4-bias-change.md section 8): exact time definition of the new FVG after the wick, M5/M15, policy below 2R, positions already open, ERL selection and reconfirmation validity, the intrabar block proposed by Codex, entries while LIMITED_BY_HISTORY (technical proposal), interior liquidity.
@@ -39,7 +41,7 @@ Out of T002 scope: M5/M15 and the 2R policy. Declared limits: Tauro versus Tradi
 
 ## Basics
 - Source: inputs/client-E27N93/pergjigjet.json and associated TXT/photos. No strategy logic was invented; disputed or undefined rules remain open (Q01-Q12).
-- Next developer action: none until the parent commits revision 7, Codex compiles and reviews T003 and the owner gives the go for the later rounds.
+- Next developer action: none until the parent commits the visual EA, Codex compiles and reviews it and the owner reports the chart observation.
 
 ## Files added in T001
 - `src/XauUsdFoundation.mq5` — main EA. OnInit/OnDeinit/OnTick/OnTimer, configurable magic (stored, unused), symbol resolution, status logging on change only, chart panel.
