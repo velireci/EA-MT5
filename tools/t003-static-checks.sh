@@ -184,12 +184,16 @@ check_unmodified() {
   local repo="$1"; shift
   git -C "$repo" diff --quiet HEAD -- "$@" 2>/dev/null
 }
-EXISTING=$(git ls-files)
+# The T003-owned files are legitimately edited in the working tree before they are committed
+# (the four code files, the T003 task/report, the hand-updated STATE). Every OTHER tracked file
+# must be identical to HEAD; the base-commit comparison below covers all code paths of T001/T002.
+T003_OWNED='^(src/include/H4Bias\.mqh|src/tests/T003_LogicTest\.mq5|tests/t003_reference_test\.py|tools/t003-static-checks\.sh|tasks/T003-h4-bias-change\.md|reports/T003-verification\.md|docs/STATE\.md)$'
+EXISTING=$(git ls-files | grep -vE "$T003_OWNED")
 tracked_new=0
 if check_unmodified . $EXISTING; then
-  echo "  PASS: every tracked file is identical to HEAD (git diff --quiet HEAD)"
+  echo "  PASS: every tracked file except the T003-owned ones (code, task, report, STATE) is identical to HEAD (git diff --quiet HEAD)"
 else
-  echo "  FAIL: a tracked file differs from HEAD:"; git diff --stat HEAD | tail -5; FAIL=1
+  echo "  FAIL: a tracked file other than the T003-owned ones differs from HEAD:"; git diff --stat HEAD -- $EXISTING | tail -5; FAIL=1
 fi
 if git cat-file -e dd571f6 2>/dev/null; then
   if git diff --quiet dd571f6 -- $(git ls-tree -r --name-only dd571f6 -- src tools tests) 2>/dev/null; then
@@ -202,6 +206,35 @@ else
 fi
 echo "  INFO: new (untracked) files: $(git ls-files --others --exclude-standard | tr '\n' ' ')"
 echo "  INFO: the parent still verifies the final change set against the base commit"
+
+echo "=== CHECK 12b: FINDING 1 and FINDING 2 are present in the MQL5 logic (static reading, not a test) ==="
+# anchor: located by existing bars (index search + Left bars before it), never by time arithmetic
+anchor_ok() {
+  local f="$1" b
+  b=$(fn_body "$f" 'datetime H3AnchorTime(')
+  [ -n "$b" ] || { echo "    H3AnchorTime body not found"; return 1; }
+  echo "$b" | grep -q 'H3BarIndexByTime(' || { echo "    H3AnchorTime does not locate the reference in the series"; return 1; }
+  echo "$b" | grep -q 'bars\[ix - p.left\]\.time' || { echo "    H3AnchorTime does not take the Left existing bars before the reference"; return 1; }
+  echo "$b" | grep -qE 'period' && { echo "    H3AnchorTime uses period arithmetic"; return 1; }
+  strip_comments "$f" | grep -q 'H3AnchorTime(repA.st, p, bars_all, n_avail, ev.anchor_missing)' || { echo "    H3Evaluate does not pass the bar series to H3AnchorTime"; return 1; }
+  strip_comments "$f" | grep -q 'ANCHOR_HISTORY_MISSING' || { echo "    no ANCHOR_HISTORY_MISSING reason"; return 1; }
+  return 0
+}
+out=$(anchor_ok $HDR) && echo "  PASS: H3AnchorTime searches the reference by absolute time in the series, uses the Left existing bars before it, has no period arithmetic; H3Evaluate passes the series; missing history has its own reason" || { echo "$out"; echo "  FAIL: FINDING 1 pattern"; FAIL=1; }
+# freeze/thaw: touch of an internal wait freezes, loss thaws and skips the derive step of that bar
+freeze_ok() {
+  local f="$1" b pb
+  b=$(fn_body "$f" 'bool H3FvgStep(')
+  [ -n "$b" ] || { echo "    H3FvgStep body not found"; return 1; }
+  echo "$b" | grep -qE 'st\.frozen +=+ +true' || { echo "    H3FvgStep never freezes"; return 1; }
+  echo "$b" | grep -qE 'st\.frozen +=+ +false' || { echo "    H3FvgStep never thaws"; return 1; }
+  echo "$b" | grep -q 'skip_derive = true' || { echo "    thaw does not skip the derive step of its bar"; return 1; }
+  echo "$b" | grep -q 'return(skip_derive)' || { echo "    H3FvgStep does not return the skip flag"; return 1; }
+  pb=$(fn_body "$f" 'void H3ProcessBar(')
+  echo "$pb" | grep -q 'if(H3FvgStep(' || { echo "    H3ProcessBar ignores the skip flag"; return 1; }
+  return 0
+}
+out=$(freeze_ok $HDR) && echo "  PASS: H3FvgStep freezes at the internal touch, thaws on loss and skips that bar's derive step; H3ProcessBar honours it" || { echo "$out"; echo "  FAIL: FINDING 2 pattern"; FAIL=1; }
 
 echo "=== CHECK 13: negative controls (every checker must actually detect its problem, for the intended reason) ==="
 NEG=$(mktemp -d)
@@ -283,6 +316,27 @@ cc2=$(grep -c '^      case [0-9]*:' "$NEG/cnt.n"); decl2=$(grep -oE '#define T3_
 # 13r: fewer than 5 DEFERRED lines must be detected
 printf '  DEFERRED (not implemented in this round): a\n' > "$NEG/d5.txt"
 [ "$(grep -c 'DEFERRED (not implemented in this round)' "$NEG/d5.txt")" -lt 5 ] && echo "  PASS 13r: too few DEFERRED lines would be detected" || { echo "  FAIL 13r"; FAIL=1; }
+# 13s: the FINDING 1 / FINDING 2 pattern checks must detect their own removal
+sed 's/ix = H3BarIndexByTime(bars, n, refs\[i\])/ix = 0/' "$NEG/h.mqh" > "$NEG/s1.mqh"
+o=$(anchor_ok "$NEG/s1.mqh") && { echo "  FAIL 13s: an anchor that does not locate the reference by time was NOT detected"; FAIL=1; } || { echo "$o" | grep -q 'does not locate the reference' && echo "  PASS 13s: anchor without the series search detected (intended reason)" || { echo "  FAIL 13s: other reason: $o"; FAIL=1; }; }
+sed 's/datetime c = bars\[ix - p.left\].time;/datetime c = refs[i] - (datetime)(p.left * p.period);/' "$NEG/h.mqh" > "$NEG/s2.mqh"
+o=$(anchor_ok "$NEG/s2.mqh") && { echo "  FAIL 13s: period arithmetic in the anchor was NOT detected"; FAIL=1; } || { echo "$o" | grep -qE 'Left existing bars|period arithmetic' && echo "  PASS 13s: time arithmetic instead of existing bars detected (intended reason)" || { echo "  FAIL 13s: other reason: $o"; FAIL=1; }; }
+sed 's/skip_derive = true;/skip_derive = false;/' "$NEG/h.mqh" > "$NEG/s3.mqh"
+o=$(freeze_ok "$NEG/s3.mqh") && { echo "  FAIL 13s: a thaw without the skip was NOT detected"; FAIL=1; } || { echo "$o" | grep -q 'does not skip' && echo "  PASS 13s: thaw without skipping the derive step detected (intended reason)" || { echo "  FAIL 13s: other reason: $o"; FAIL=1; }; }
+sed 's/st.frozen   = true;/st.frozen   = false;/' "$NEG/h.mqh" > "$NEG/s4.mqh"
+o=$(freeze_ok "$NEG/s4.mqh") && { echo "  FAIL 13s: removal of the freeze was NOT detected"; FAIL=1; } || { echo "$o" | grep -q 'never freezes' && echo "  PASS 13s: removed freeze detected (intended reason)" || { echo "  FAIL 13s: other reason: $o"; FAIL=1; }; }
+# 13t: mutated MODELS must make the Python run fail, for the intended reason
+mutate_py() { # mutate_py SED_EXPR EXPECTED_FAILED_LABEL_REGEX LABEL
+  mkdir -p "$NEG/pm" && cp tests/t002_reference_test.py "$NEG/pm/" && sed "$1" $PYT > "$NEG/pm/t003_reference_test.py"
+  if cmp -s "$NEG/pm/t003_reference_test.py" $PYT; then echo "  FAIL 13t ($3): the mutation did not change the model (vacuous)"; FAIL=1; return; fi
+  ( cd "$NEG/pm" && python3 t003_reference_test.py > out.txt 2>&1 ); local rcx=$?
+  if [ $rcx -ne 0 ] && grep -qE "FAILED: .*$2" "$NEG/pm/out.txt"; then echo "  PASS 13t: $3 -> the Python run fails (intended check: $2)"; else echo "  FAIL 13t ($3): not detected for the intended reason (rc=$rcx)"; FAIL=1; fi
+}
+mutate_py 's/^                st\.frozen = True$/                st.frozen = False/' '\(a\): ' 'no freeze at the internal touch'
+mutate_py 's/^                    skip_derive = True$/                    skip_derive = False/' '\(b\): ' 'no skipped derivation on the thaw bar'
+mutate_py 's/^                    st\.frozen = False$/                    st.frozen = True/' '\(b\): ' 'no thaw when the FVG is lost'
+mutate_py 's/        c = bars\[i - p\.left\]\.time/        c = r - p.left * p.period/' '(weekend gap|history gap)' 'anchor by time arithmetic instead of existing bars'
+mutate_py "s/        if i < p\.left:/        if False:/" 'window start' 'no missing-history report when fewer than Left bars exist'
 rm -rf "$NEG"
 
 echo "=== RESULT ==="

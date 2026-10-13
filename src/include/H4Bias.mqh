@@ -25,15 +25,22 @@
 //+------------------------------------------------------------------+
 //| AMBIGUITY n: marks every place where the task text is unclear and |
 //| the minimal reading was taken (listed in the T003 report):       |
-//|  1 RECONFIRMED(INTERNAL) is not frozen; 2 touches only in HOLD/   |
-//|  SWEEP_WAIT; 3 which touched FVG is recorded; 4 no continuation/ |
-//|  internal events on a wick bar or in HOLD/RECONFIRMED; 5 anchor;  |
-//|  6 flag for NONE / seeded HOLD; 7 consumer gap; 8 internal events |
-//|  need a level; 9 A/B compares events from B's trusted region; 10  |
-//|  seed 'defined'; 11 ties; 12 'the low before it'; 13 HH/LL        |
-//|  candidate; 14 sweep-wait touch start; 15 flip bar scan; 16       |
-//|  retroactive scan range; 17 CONFLICT unreachable; 18 NONE_WICK;   |
-//|  19 wick in RECONFIRMED(INTERNAL).                               |
+//|  1 RECONFIRMED(INTERNAL) freezes the level (rev. 6, P3); thaw and |
+//|  re-derivation from the following bar when its FVG is lost; 2     |
+//|  touches only in HOLD/SWEEP_WAIT; 3 which touched FVG is          |
+//|  recorded; 4 no continuation/internal events on a wick bar or in  |
+//|  HOLD/RECONFIRMED; 5 anchor: the references, located by EXISTING  |
+//|  bars (Left bars before each, never time arithmetic), missing     |
+//|  history -> LIMITED_BY_HISTORY, nothing invented (rev. 6); 6 flag |
+//|  for NONE / seeded HOLD; 7 consumer gap; 8 internal events need a |
+//|  level; 9 A/B compares events from B's trusted region; 10 seed    |
+//|  'defined'; 11 ties; 12 'the low before it'; 13 HH/LL candidate;  |
+//|  14 sweep-wait touch start; 15 flip bar scan; 16 retroactive scan |
+//|  range; 17 CONFLICT unreachable; 18 NONE_WICK; 19 wick in         |
+//|  SWEEP_WAIT freezes the then current level; 20 (rev. 6) freeze   |
+//|  details: frozen even without a defined level, candidates        |
+//|  cleared at the freeze, so the thaw's following bar raises no    |
+//|  continuation/internal event.                                    |
 //+------------------------------------------------------------------+
 #ifndef VELO_H4_BIAS_MQH
 #define VELO_H4_BIAS_MQH
@@ -206,6 +213,7 @@ struct SH3Eval
    datetime          last_time;
    datetime          trusted_from;
    datetime          anchor;
+   string            anchor_missing;   // "" or why the history lacks a bar the anchor needs
    bool              prev_ok;
    string            cause;
    SH3State          st;
@@ -1066,8 +1074,8 @@ void H3DoFlip(const int t, const MqlRates &bars[], const SH3Params &p, SH3State 
   }
 
 //--- common part of every HOLD start (wick at t, restart, retroactive).
-//--- AMBIGUITY 19: a wick during RECONFIRMED(INTERNAL) or SWEEP_WAIT starts HOLD with the
-//--- then current level frozen (the level was not frozen before).
+//--- AMBIGUITY 19: a wick during SWEEP_WAIT starts HOLD with the then current level frozen (it
+//--- was not frozen before). A wick during RECONFIRMED already meets a frozen level.
 void H3StartHold(const int t, const MqlRates &bars[], const SH3Params &p, const SH4Fvg &fv[], const int nf,
                  SH3State &st, SH3Track &tracks[], int &nt, const datetime wk_src, const datetime wk_det,
                  const bool retro)
@@ -1158,15 +1166,19 @@ bool H3BiasStep(const int t, const MqlRates &bars[], const SH3Params &p, const S
    return(false);
   }
 
-//--- step (3): FVG eligibility / invalidation / touch for bar t
-void H3FvgStep(const int t, const MqlRates &bars[], const SH4Fvg &fv[], const int nf,
+//--- step (3): FVG eligibility / invalidation / touch for bar t.
+//--- Returns true when the level was THAWED on this bar (RECONFIRMED(INTERNAL) lost its FVG):
+//--- the derive step is then skipped for this bar, so the re-derivation starts at the
+//--- FOLLOWING bar (AMBIGUITY 1, task P3/P14, technical proposal).
+bool H3FvgStep(const int t, const MqlRates &bars[], const SH4Fvg &fv[], const int nf,
                SH3State &st, SH3Track &tracks[], int &nt, SH3Event &events[], int &ne)
   {
    datetime open_t = bars[t].time;
    int d  = st.dir;
    int ph = st.phase;
+   bool skip_derive = false;
    if(ph != H3_PH_HOLD && ph != H3_PH_SWEEP_WAIT && ph != H3_PH_RECONFIRMED)
-      return;
+      return(false);
    //--- AMBIGUITY 2: touches are evaluated only while the state is HOLD or SWEEP_WAIT; a touch
    //--- during RECONFIRMED is not remembered. After RECONF_LOST the fall-back and a new touch
    //--- may happen on the same bar (order: invalidate, fall back, then touch).
@@ -1216,6 +1228,14 @@ void H3FvgStep(const int t, const MqlRates &bars[], const SH4Fvg &fv[], const in
             int to_ph = (st.recon_reason == H3_RR_STRUCT ? H3_PH_HOLD : H3_PH_SWEEP_WAIT);
             H3AddEvent(events, ne, H3_EV_RECONF_LOST, open_t, tracks[m].id,
                        "fvg=" + tracks[m].id + ";to=" + H3PhaseName(to_ph));
+            if(st.recon_reason == H3_RR_INTERNAL)
+              {
+               //--- THAW: the level was frozen by the internal reconfirmation only. The derive
+               //--- step is skipped on THIS bar and resumes on the next one; the frozen level
+               //--- still judges the next bar (break / wick checks).
+               st.frozen   = false;
+               skip_derive = true;
+              }
             st.phase        = to_ph;
             st.recon_reason = H3_RR_NONE;
             st.rec_id       = "";
@@ -1247,9 +1267,21 @@ void H3FvgStep(const int t, const MqlRates &bars[], const SH4Fvg &fv[], const in
         }
       if(best >= 0)
         {
-         //--- AMBIGUITY 1: RECONFIRMED(INTERNAL) keeps deriving the level (P3 says "frozen during
-         //--- HOLD and RECONFIRMED", but P14 says a sweep wait freezes no level).
+         //--- AMBIGUITY 1 (rev. 6): P3 says the level is frozen during HOLD and RECONFIRMED, also
+         //--- when the reason is INTERNAL; SWEEP_WAIT keeps updating it (P14 proposal). At the
+         //--- touch the level KNOWN BEFORE the touching candle is frozen: this bar's derive step
+         //--- is skipped (frozen), so a swing confirmed by the touching candle cannot change it.
          int reason = (st.phase == H3_PH_HOLD ? H3_RR_STRUCT : H3_RR_INTERNAL);
+         //--- AMBIGUITY 20: the freeze also applies when no level is defined at the touch (then
+         //--- nothing can flip until the thaw); the continuation / interior candidates are cleared
+         //--- at the freeze, so the bar after a thaw raises no CONTINUATION / INTERNAL event and
+         //--- no sweep (the candidates return at the end of that bar).
+         if(reason == H3_RR_INTERNAL)
+           {
+            st.frozen   = true;
+            st.has_ext  = false;
+            st.has_lint = false;
+           }
          st.phase        = H3_PH_RECONFIRMED;
          st.recon_reason = reason;
          st.rec_id       = tracks[best].id;
@@ -1258,6 +1290,7 @@ void H3FvgStep(const int t, const MqlRates &bars[], const SH4Fvg &fv[], const in
                     "fvg=" + tracks[best].id + ";reason=" + H3ReconReasonName(reason));
         }
      }
+   return(skip_derive);
   }
 
 //--- step (4): candidates for the NEXT bar from the prefix including bar t.
@@ -1350,7 +1383,10 @@ void H3ProcessBar(const int t, const MqlRates &bars[], const SH4Swing &sw[], con
      {
       bool flipped = H3BiasStep(t, bars, p, fv, nf, st, tracks, nt, events, ne);
       if(!flipped)
-         H3FvgStep(t, bars, fv, nf, st, tracks, nt, events, ne);
+        {
+         if(H3FvgStep(t, bars, fv, nf, st, tracks, nt, events, ne))
+            return;
+        }
      }
    H3DeriveStep(t, bars, sw, ns, p, fv, nf, st, tracks, nt, events, ne);
   }
@@ -1427,54 +1463,121 @@ void H3Replay(const MqlRates &bars[], const int n, const SH3Params &p, SH3Rep &r
    rep.last_time = bars[n - 1].time;
   }
 
-//--- earliest bar time the state depends on (0 = not applicable).
-//--- AMBIGUITY 5: min over the absolute times the state needs. HOLD / frozen RECONFIRMED: the
-//--- source wick and the frozen level's pivots (origin ignored, literal task text). Otherwise:
-//--- the origin reference (break bar / broken candidate pivots / seed swings), the current
-//--- level's pivots and the sweep time. The bars that confirm a pivot are read as the 'left'
-//--- bars before it, so the anchor is moved back by left * period.
-datetime H3AnchorTime(const SH3State &st, const SH3Params &p)
+//--- index of the bar that OPENS at exactly t in bars[0..n-1] (chronological), or -1
+int H3BarIndexByTime(const MqlRates &bars[], const int n, const datetime t)
   {
+   int lo = 0;
+   int hi = n - 1;
+   while(lo <= hi)
+     {
+      int mid = (lo + hi) / 2;
+      if(bars[mid].time == t)
+         return(mid);
+      if(bars[mid].time < t)
+         lo = mid + 1;
+      else
+         hi = mid - 1;
+     }
+   return(-1);
+  }
+
+//--- AMBIGUITY 5: the absolute reference times the state depends on. Frozen states (HOLD,
+//--- RECONFIRMED): the source wick, the frozen level's pivots (only if a level exists) and the
+//--- sweep that started an internal wait (0 in HOLD); the origin is ignored (literal task text).
+//--- Otherwise: the origin reference, the level's pivots (if any) and the sweep.
+int H3AnchorRefs(const SH3State &st, datetime &refs[])
+  {
+   ArrayResize(refs, 0);
    if(st.dir == H3_NONE)
       return(0);
-   datetime refs[];
-   int nr = 0;
-   ArrayResize(refs, 0);
+   datetime lst[];
+   int na = 0;
+   ArrayResize(lst, 6);
    if(st.frozen)
      {
-      ArrayResize(refs, 4);
-      refs[0] = st.wk_src;
-      refs[1] = st.lv_pivot;
-      refs[2] = st.lv_ext;
-      refs[3] = st.lv_prev;
-      nr = 4;
+      if(st.has_wick)
+        {
+         lst[na] = st.wk_src;
+         na++;
+        }
+      if(st.has_level)
+        {
+         lst[na] = st.lv_pivot;
+         na++;
+         lst[na] = st.lv_ext;
+         na++;
+         lst[na] = st.lv_prev;
+         na++;
+        }
+      lst[na] = st.sweep_time;
+      na++;
      }
    else
      {
-      ArrayResize(refs, 5);
-      refs[0] = st.origin_ref;
-      nr = 1;
+      lst[na] = st.origin_ref;
+      na++;
       if(st.has_level)
         {
-         refs[1] = st.lv_pivot;
-         refs[2] = st.lv_ext;
-         refs[3] = st.lv_prev;
-         nr = 4;
+         lst[na] = st.lv_pivot;
+         na++;
+         lst[na] = st.lv_ext;
+         na++;
+         lst[na] = st.lv_prev;
+         na++;
         }
       if(st.sweep_time != 0)
         {
-         refs[nr] = st.sweep_time;
+         lst[na] = st.sweep_time;
+         na++;
+        }
+     }
+   int nr = 0;
+   for(int i = 0; i < na; i++)
+     {
+      if(lst[i] != 0)
+        {
+         ArrayResize(refs, nr + 1);
+         refs[nr] = lst[i];
          nr++;
         }
      }
+   return(nr);
+  }
+
+//--- FINDING 1: earliest bar time the state depends on, by EXISTING bars. Each reference is
+//--- located by its absolute open time in the chronological series bars[0..n-1]; the bars that
+//--- confirm it are the p.left EXISTING bars before it (index based), converted back to the
+//--- absolute open time of that bar. Weekends and holes in the history never give a time that
+//--- is not a bar. Returns 0 (not applicable) for NONE or without references. When the series
+//--- lacks a needed bar (reference not found, or fewer than p.left bars before it) the result
+//--- is 0 and 'missing' says why: nothing is substituted or invented.
+datetime H3AnchorTime(const SH3State &st, const SH3Params &p, const MqlRates &bars[], const int n,
+                      string &missing)
+  {
+   missing = "";
+   if(st.dir == H3_NONE)
+      return(0);
+   datetime refs[];
+   int nr = H3AnchorRefs(st, refs);
    datetime a = 0;
    for(int i = 0; i < nr; i++)
      {
-      if(refs[i] != 0 && (a == 0 || refs[i] < a))
-         a = refs[i];
+      int ix = H3BarIndexByTime(bars, n, refs[i]);
+      if(ix < 0)
+        {
+         missing = "ANCHOR_REF_NOT_IN_SERIES " + H4TimeStamp(refs[i]);
+         return(0);
+        }
+      if(ix < p.left)
+        {
+         missing = "ANCHOR_NEEDS_" + IntegerToString(p.left) + "_BARS_BEFORE " + H4TimeStamp(refs[i]);
+         return(0);
+        }
+      datetime c = bars[ix - p.left].time;
+      if(a == 0 || c < a)
+         a = c;
      }
-   long al = (long)a - (long)p.left * (long)p.period;
-   return((datetime)al);
+   return(a);
   }
 
 //--- P11 (ii)/(iii): why a rebuild is not reliable ("" = reliable). evA/evB are the
@@ -1482,7 +1585,7 @@ datetime H3AnchorTime(const SH3State &st, const SH3Params &p)
 //--- AMBIGUITY 9: events before B's trusted region (its first non-warm-up bar) are not
 //--- compared; an event is compared by its full text (type, bar time, reference, details).
 string H3AbReasons(const string keyA, const string keyB, const string evA, const string evB,
-                   const int dirA, const datetime anchorA, const datetime trustedA)
+                   const int dirA, const datetime anchorA, const datetime trustedA, const string anchorMissing)
   {
    string why = "";
    if(keyA != keyB)
@@ -1493,12 +1596,19 @@ string H3AbReasons(const string keyA, const string keyB, const string evA, const
          why += "+";
       why += "AB_EVENT_DIFF";
      }
-   if(dirA != H3_NONE && anchorA < trustedA)
+   if(dirA != H3_NONE && anchorMissing != "")
      {
       if(why != "")
          why += "+";
-      why += "ANCHOR_IN_WARMUP";
+      why += "ANCHOR_HISTORY_MISSING";
      }
+   else
+      if(dirA != H3_NONE && anchorA < trustedA)
+        {
+         if(why != "")
+            why += "+";
+         why += "ANCHOR_IN_WARMUP";
+        }
    return(why);
   }
 
@@ -1537,6 +1647,7 @@ void H3Evaluate(const MqlRates &bars_all[], const int n_avail, const SH3Params &
    ev.last_time    = 0;
    ev.trusted_from = 0;
    ev.anchor       = 0;
+   ev.anchor_missing = "";
    ev.prev_ok      = false;
    ev.cause        = "";
    ev.nt           = 0;
@@ -1594,9 +1705,12 @@ void H3Evaluate(const MqlRates &bars_all[], const int n_avail, const SH3Params &
    datetime trusted_a = winA[ev.warm].time;
    string keyA = H3StateKey(repA.st, trA, repA.nt);
    string keyB = H3StateKey(repB.st, trB, repB.nt);
-   ev.anchor = H3AnchorTime(repA.st, p);
+   //--- the anchor is located in the FULL available series (not only in window A)
+   ev.anchor = H3AnchorTime(repA.st, p, bars_all, n_avail, ev.anchor_missing);
    string why = H3AbReasons(keyA, keyB, H3EventsText(evA, repA.ne, trusted_b), H3EventsText(evB, repB.ne, trusted_b),
-                            repA.st.dir, ev.anchor, trusted_a);
+                            repA.st.dir, ev.anchor, trusted_a, ev.anchor_missing);
+   if(ev.anchor_missing != "")
+      ev.note += (ev.note != "" ? ";" : "") + "missing history: " + ev.anchor_missing;
    ev.has_state    = true;
    ev.key          = keyA;
    ev.key_prev     = repA.key_before_last;
@@ -1663,7 +1777,7 @@ string H3EvalText(const SH3Eval &ev, const SH3Track &tracks[], const SH3Event &e
    string s = "EVAL;FLAG=" + H3FlagName(ev.flag) + ";REASON=" + ev.reason + ";DIR=" + H3ReportedDirection(ev) +
               ";DEPTHS=req:" + IntegerToString(ev.r_req) + ",eff:" + IntegerToString(ev.r_eff) +
               ",b:" + IntegerToString(ev.b_depth) + ",warm:" + IntegerToString(ev.warm) +
-              ",chk:" + IntegerToString(ev.chk) + ";NOTE=" + (ev.note != "" ? ev.note : "-");
+              ",chk:" + IntegerToString(ev.chk) + ";ANCH=" + H3Tx(ev.anchor) + ";NOTE=" + (ev.note != "" ? ev.note : "-");
    if(ev.reliable)
       s += ";ST=" + H3StateText(ev.st, tracks, ev.nt) + ";EV=" + H3EventsText(events, ev.ne, 0);
    else

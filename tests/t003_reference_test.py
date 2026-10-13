@@ -17,7 +17,7 @@ IMPORTANT - what this file proves and what it does not:
 
 Every place where the task text is unclear is marked "AMBIGUITY n" in
 src/include/H4Bias.mqh (list in its header); this model takes the same reading.
-(AMBIGUITY 10 and 11 are also marked below.)
+(AMBIGUITY 1, 5, 10, 11, 20 are also marked below.)
 
 T002 code is reused unchanged (tests/t002_reference_test.py: swings, FVGs,
 direction). Window indexes are used inside the replay only; identities,
@@ -604,13 +604,17 @@ def sel_before(fa, da, fb, db):
 
 
 def fvg_step(t, bars, fv, p, st, tracks, events):
-    """step (3): FVG eligibility / invalidation / touch for bar t"""
+    """step (3): FVG eligibility / invalidation / touch for bar t.
+    Returns True when the level was thawed on this bar (RECONFIRMED(INTERNAL) lost its
+    FVG): the derive step is then skipped for this bar, so the re-derivation starts at
+    the FOLLOWING bar (AMBIGUITY 1, task P3/P14)."""
     bar = bars[t]
     open_t = bar.time
     d = st.dir
     ph = st.phase
+    skip_derive = False
     if ph != 'HOLD' and ph != 'SWEEP_WAIT' and ph != 'RECONFIRMED':
-        return
+        return False
     # newly confirmed eligible FVG (candle C = bar t)
     a = t - 2
     if a >= 0:
@@ -636,6 +640,12 @@ def fvg_step(t, bars, fv, p, st, tracks, events):
                 to = 'HOLD' if st.recon_reason == 'STRUCT' else 'SWEEP_WAIT'
                 events.append(Event(EV_RECONF_LOST, open_t, tr.id,
                                     'fvg=%s;to=%s' % (tr.id, to)))
+                if st.recon_reason == 'INTERNAL':
+                    # THAW: the level was frozen by the internal reconfirmation only; the
+                    # wait is open again. Derivation is skipped on THIS bar and resumes at
+                    # the next one (the frozen level still judges the next bar).
+                    st.frozen = False
+                    skip_derive = True
                 st.phase = to
                 st.recon_reason = ''
                 st.rec_id = ''
@@ -655,12 +665,23 @@ def fvg_step(t, bars, fv, p, st, tracks, events):
                     bestd = dd
         if best is not None:
             reason = 'STRUCT' if st.phase == 'HOLD' else 'INTERNAL'
+            if reason == 'INTERNAL':
+                # AMBIGUITY 20: the freeze also applies when no level is defined at the touch;
+                # the candidates are cleared at the freeze, so the bar after a thaw raises no
+                # CONTINUATION / INTERNAL event and no sweep (they return at the end of that bar).
+                # FREEZE (P3): the level KNOWN BEFORE the touching candle stays; the derive
+                # step of this bar is skipped (frozen), so a swing confirmed by the touching
+                # candle cannot change the event's level.
+                st.frozen = True
+                st.has_ext = False
+                st.has_lint = False
             st.phase = 'RECONFIRMED'
             st.recon_reason = reason
             st.rec_id = best.id
             best.recorded = True
             events.append(Event(EV_RECONFIRMED, open_t, best.id,
                                 'fvg=%s;reason=%s' % (best.id, reason)))
+    return skip_derive
 
 
 def derive_step(t, bars, sw, fv, p, st, tracks, events):
@@ -722,7 +743,8 @@ def process_bar(t, bars, sw, fv, p, st, tracks, events):
     else:
         flipped = bias_step(t, bars, sw, fv, p, st, tracks, events)
         if not flipped:
-            fvg_step(t, bars, fv, p, st, tracks, events)
+            if fvg_step(t, bars, fv, p, st, tracks, events):
+                return
     derive_step(t, bars, sw, fv, p, st, tracks, events)
 
 
@@ -774,24 +796,62 @@ def replay(bars, n, p):
     return rep
 
 
-def anchor_time(st, p):
-    """earliest bar time the state depends on (0 = not applicable)"""
-    if st.dir == 0:
-        return 0
+def bar_index_by_time(bars, n, t):
+    """index of the bar that OPENS at exactly t in bars[0..n-1] (chronological), or -1"""
+    lo = 0
+    hi = n - 1
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        if bars[mid].time == t:
+            return mid
+        if bars[mid].time < t:
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    return -1
+
+
+def anchor_refs(st):
+    """absolute reference times the state depends on (AMBIGUITY 5). Frozen states (HOLD,
+    RECONFIRMED): the source wick, the frozen level's pivots (if a level exists) and the
+    sweep that started an internal wait (RECONFIRMED(INTERNAL) only); origin ignored."""
     refs = []
     if st.frozen:
-        refs = [st.wk_src, st.lv_pivot, st.lv_ext, st.lv_prev]
+        refs = [st.wk_src] if st.has_wick else []
+        if st.has_level:
+            refs += [st.lv_pivot, st.lv_ext, st.lv_prev]
+        refs.append(st.sweep_time)
     else:
         refs = [st.origin_ref]
         if st.has_level:
             refs += [st.lv_pivot, st.lv_ext, st.lv_prev]
         if st.sweep_time != 0:
             refs.append(st.sweep_time)
+    return [r for r in refs if r != 0]
+
+
+def anchor_time(st, p, bars, n):
+    """FINDING 1: earliest bar time the state depends on, by EXISTING bars.
+    Each reference is located by its absolute open time in the chronological series
+    bars[0..n-1]; the bars that confirm it are the p.left EXISTING bars before it (index
+    based, converted back to the absolute open time of that bar). Weekends and holes
+    in the history therefore never produce a time that is not a bar.
+    Returns (anchor, missing): anchor = 0 when not applicable (NONE, no reference) or
+    when the history lacks a needed bar; missing = '' or the reason (reference not found
+    in the series / fewer than left bars before it). Nothing is ever fabricated."""
+    if st.dir == 0:
+        return 0, ''
     a = 0
-    for r in refs:
-        if r != 0 and (a == 0 or r < a):
-            a = r
-    return a - p.left * p.period
+    for r in anchor_refs(st):
+        i = bar_index_by_time(bars, n, r)
+        if i < 0:
+            return 0, 'ANCHOR_REF_NOT_IN_SERIES %s' % ts(r)
+        if i < p.left:
+            return 0, 'ANCHOR_NEEDS_%d_BARS_BEFORE %s' % (p.left, ts(r))
+        c = bars[i - p.left].time
+        if a == 0 or c < a:
+            a = c
+    return a, ''
 
 
 def events_text(events, t_from):
@@ -818,15 +878,18 @@ class Eval(object):
     pass
 
 
-def ab_reasons(key_a, key_b, ev_text_a, ev_text_b, dir_a, anchor_a, trusted_a):
+def ab_reasons(key_a, key_b, ev_text_a, ev_text_b, dir_a, anchor_a, trusted_a, anchor_missing=''):
     """P11 (ii)/(iii): why a rebuild is not reliable ('' = reliable).
-    ev_text_* are the events dated inside B's trusted region only."""
+    ev_text_* are the events dated inside B's trusted region only.
+    anchor_missing != '': the history lacks a bar the anchor needs (FINDING 1)."""
     why = []
     if key_a != key_b:
         why.append('AB_STATE_DIFF')
     if ev_text_a != ev_text_b:
         why.append('AB_EVENT_DIFF')
-    if dir_a != 0 and anchor_a < trusted_a:
+    if dir_a != 0 and anchor_missing != '':
+        why.append('ANCHOR_HISTORY_MISSING')
+    elif dir_a != 0 and anchor_a < trusted_a:
         why.append('ANCHOR_IN_WARMUP')
     return '+'.join(why)
 
@@ -860,6 +923,7 @@ def evaluate(bars_all, n_avail, p):
     ev.prev_ok = False
     ev.cause = ''
     ev.anchor = 0
+    ev.anchor_missing = ''
     ev.n_avail = n_avail
     ev.trusted_from = 0
     notes = []
@@ -887,9 +951,12 @@ def evaluate(bars_all, n_avail, p):
     trA = winA[ev.warm].time
     keyA = state_key(repA.state, repA.tracks)
     keyB = state_key(repB.state, repB.tracks)
-    ev.anchor = anchor_time(repA.state, p)
+    # the anchor is located in the FULL available series (not only in window A)
+    ev.anchor, ev.anchor_missing = anchor_time(repA.state, p, bars_all, n_avail)
     why = ab_reasons(keyA, keyB, events_text(repA.events, trB), events_text(repB.events, trB),
-                     repA.state.dir, ev.anchor, trA)
+                     repA.state.dir, ev.anchor, trA, ev.anchor_missing)
+    if ev.anchor_missing != '':
+        ev.note = (ev.note + ';' if ev.note else '') + 'missing history: ' + ev.anchor_missing
     ev.state = repA.state
     ev.tracks = repA.tracks
     ev.key = keyA
@@ -918,9 +985,9 @@ def reported_direction(ev):
 
 
 def eval_text(ev):
-    s = 'EVAL;FLAG=%s;REASON=%s;DIR=%s;DEPTHS=req:%d,eff:%d,b:%d,warm:%d,chk:%d;NOTE=%s' % (
+    s = 'EVAL;FLAG=%s;REASON=%s;DIR=%s;DEPTHS=req:%d,eff:%d,b:%d,warm:%d,chk:%d;ANCH=%s;NOTE=%s' % (
         ev.flag, ev.reason, reported_direction(ev), ev.r_req, ev.r_eff, ev.b_depth,
-        ev.warm, ev.chk, ev.note if ev.note else '-')
+        ev.warm, ev.chk, tx(ev.anchor), ev.note if ev.note else '-')
     if ev.reliable:
         s += ';ST=%s;EV=%s' % (state_text(ev.state, ev.tracks), events_text(ev.events, 0))
     elif ev.state is not None:
@@ -1355,6 +1422,51 @@ def sc_bear_sweep(kind):
         s.bar(121, 100, 119)
         set_c(s, 119)
         s.pts([110, 104, 98, 92, 86])
+    elif kind in ('recon_wick', 'recon_break'):
+        # FINDING 2 (c): the same sweep -> FVG -> touch as sweep_fvg_touch, then a wick
+        # (high 120 > 117, close 108) / a body break (close 119 > 117) during RECONFIRMED(INTERNAL)
+        s.bar(111, 99, 103)
+        s.bar(100, 90, 94)
+        s.bar(95, 85, 90)
+        s.pts([88, 86])
+        s.bar(100, 92, 96)
+        s.pts([94])
+        if kind == 'recon_wick':
+            s.bar(120, 100, 108)
+        else:
+            s.bar(121, 100, 119)
+    elif kind == 'recon_touch_swing':
+        # FINDING 2 (a): bar 38 touches the FVG AND confirms a new lower low (pivot at 36,
+        # confirmed by the touching candle). The level known before the touch (117) stays.
+        s.bar(111, 99, 103)
+        s.bar(100, 90, 94)
+        s.bar(95, 85, 90)
+        s.bar(90, 60, 65)
+        s.bar(80, 68, 75)
+        s.bar(100, 80, 96)
+        s.pts([94])
+    elif kind in ('recon_later_swing', 'recon_thaw', 'recon_thaw_wick', 'recon_thaw_break'):
+        # FINDING 2 (a)/(b): the touch is on bar 38; a new lower low (pivot 48) is confirmed
+        # long after the reconfirmation and would replace the level (117 -> 100) if unfrozen.
+        s.bar(111, 99, 103)
+        s.bar(100, 90, 94)
+        s.bar(95, 85, 90)
+        s.pts([88, 86])
+        s.bar(100, 92, 96)
+        s.pts([94])
+        s.to(60).to(80)
+        if kind != 'recon_later_swing':
+            # (b) rally; the bar below closes above the recorded FVG's upper edge (99): the
+            # recorded FVG is invalidated (thaw bar T); the next bar is T+1
+            s.pts([84, 88, 92])
+            s.bar(100, 90, 99.5)
+            if kind == 'recon_thaw':
+                s.bar(100, 90, 98)           # T+1: nothing special; the level is re-derived here
+                s.pts([94])
+            elif kind == 'recon_thaw_wick':
+                s.bar(118, 96, 98)           # T+1: high above the OLD frozen level 117
+            else:
+                s.bar(121, 96, 119)          # T+1: body close above the OLD frozen level 117
     return s.bars()
 
 
@@ -1443,6 +1555,21 @@ def sc_consumer_series():
 
 
 # ----------------------------------------------------------- case table ----
+def retime(bars, slots):
+    """same prices, new open times: slots[i] = number of 4h periods after T0 (strictly increasing).
+    Used for weekend and history-gap cases (FINDING 1)."""
+    assert len(slots) == len(bars)
+    return [Bar(T0 + slots[i] * PERIOD, b.high, b.low, b.close) for i, b in enumerate(bars)]
+
+
+def weekend_slots(n, start_pos):
+    """H4 bars Monday..Friday (6 per day = 30 per week) with the weekend missing:
+    trading position p = start_pos + i maps to week (p // 30) * 42 + p % 30 slots after
+    Monday 00:00 (T0 is a Monday). The last bar of a week opens Friday 20:00, the next
+    one Monday 00:00 (12 empty slots in between)."""
+    return [((start_pos + i) // 30) * 42 + (start_pos + i) % 30 for i in range(n)]
+
+
 class Case(object):
     def __init__(self, name, kind, bars, lookback=20, rebuild=1000, hard_cap=5000, n_use=None):
         self.name = name
@@ -1468,7 +1595,9 @@ WICK_KINDS = ('break', 'wick', 'eqclose', 'eqhigh', 'eqboth', 'pre_touched', 'a_
               'a_before_wick', 'invalid_same_bar', 'second_wick_hold', 'second_wick_reconf',
               'invalid_before_touch', 'invalid_after_reconf', 'break_in_hold', 'break_in_reconf')
 SWEEP_KINDS = ('sweep_fvg_touch', 'restart', 'wick_instead', 'break_instead', 'int_break',
-               'wait_wick', 'wait_break', 'no_level_after_flip')
+               'wait_wick', 'wait_break', 'no_level_after_flip',
+               'recon_wick', 'recon_break', 'recon_touch_swing', 'recon_later_swing',
+               'recon_thaw', 'recon_thaw_wick', 'recon_thaw_break')
 E_KINDS = ('cont', 'int_break', 'flip', 'no_level_crash', 'wick_struct', 'sweep_fvg_touch')
 
 _CASES = None
@@ -1529,6 +1658,10 @@ def build_cases():
     add('p16c_anchor_warmup', b, 'E', rebuild=len(b))
     b = sc16_event_only()
     add('p16e_event_only_diff', b, 'E', rebuild=len(b))
+    # FINDING 1: anchor by existing bars (same prices as p16a_converged_break, other open times)
+    b = sc16_converged_break()
+    add('f1_weekend_gap', retime(b, weekend_slots(len(b), 4)), 'E', rebuild=len(b))
+    add('f1_history_gap', retime(b, [i + (3 if i >= 26 else 0) for i in range(len(b))]), 'E', rebuild=len(b))
     b = sc16_limit()
     add('p16d_limit_r60', b, 'E', rebuild=60)
     add('p16d_limit_r140', b, 'E', rebuild=140)
@@ -2267,6 +2400,185 @@ def test_19_internal_liquidity():
     check(not bad, 'every INTERNAL_SWEEP / INTERNAL_BREAK was raised with a defined protecting level %s' % bad)
 
 
+def lv_of_key(key):
+    return key.split(';LV=')[1].split(';')[0]
+
+
+def lv_id_of_key(key):
+    return lv_of_key(key).split('@')[0]
+
+
+def derive_id_at(c, upto, d):
+    """id of the protecting level a derivation from the closed prefix bars[0..upto] would give"""
+    sw, _ = t2.find_swings(c.bars, c.n_use, 2, 2, PERIOD)
+    lvl, ex, lint = derive_level(sw, known_count(sw, 2, upto), d)
+    return lvl.id if lvl is not None else '-'
+
+
+def test_22_freeze_internal():
+    print('--- 22. FINDING 2: the level is frozen during RECONFIRMED(INTERNAL); thaw and re-derivation from the following bar')
+    for pref in ('', 'm_'):
+        tag = 'SELL' if pref == '' else 'BUY'
+        d0 = BEAR if pref == '' else BULL
+        # (a) a swing confirmed long after the reconfirmation must not change the level
+        name = pref + 's_recon_later_swing'
+        c = case_by_name(name)
+        r = rep_of(name)
+        ri = [i for i in range(c.n_use) if c.bars[i].time == events_of(r, EV_RECONFIRMED)[0].bar_time][0]
+        frozen_id = lv_id_of_key(r.keys[ri - 1])
+        check(r.state.phase == 'RECONFIRMED' and r.state.recon_reason == 'INTERNAL' and r.state.frozen
+              and lv_id_of_key(r.keys[-1]) == frozen_id and frozen_id != '-',
+              '%s (a): RECONFIRMED(INTERNAL) freezes the level that was known before the touch (FRZ=1) to the end of the case' % tag)
+        check(derive_id_at(c, c.n_use - 1, d0) not in (frozen_id, '-'),
+              '%s (a): control: a derivation from the same bars WOULD give another level (so the freeze is what keeps it)' % tag)
+        check(all(lv_id_of_key(r.keys[i]) == frozen_id for i in range(ri - 1, c.n_use)),
+              '%s (a): the level is identical at every bar from the touch to the end' % tag)
+        check(not r.state.has_lint and not r.state.has_ext and EV_INT_SWEEP not in [e.type for e in r.events[ri:]],
+              '%s (a): no interior/continuation candidates and no internal events are derived while frozen' % tag)
+        # (a2) the touching candle itself confirms a swing: it must not change the event's level
+        name = pref + 's_recon_touch_swing'
+        c = case_by_name(name)
+        r = rep_of(name)
+        ri = [i for i in range(c.n_use) if c.bars[i].time == events_of(r, EV_RECONFIRMED)[0].bar_time][0]
+        before = lv_id_of_key(r.keys[ri - 1])
+        check(lv_id_of_key(r.keys[ri]) == before and before != '-' and r.state.frozen,
+              '%s (a2): the touching candle confirms a new swing, the level of the event stays the one known before it' % tag)
+        check(derive_id_at(c, ri - 1, d0) == before and derive_id_at(c, ri, d0) not in (before, '-'),
+              '%s (a2): control: a derivation including the touching candle would give another level' % tag)
+        # (b) the recorded FVG is invalidated: thaw, and the re-derivation starts at the FOLLOWING bar
+        name = pref + 's_recon_thaw'
+        c = case_by_name(name)
+        r = rep_of(name)
+        lost = events_of(r, EV_RECONF_LOST)
+        ti = [i for i in range(c.n_use) if c.bars[i].time == lost[0].bar_time][0]
+        frozen_id = lv_id_of_key(r.keys[ti - 1])
+        new_id = lv_id_of_key(r.keys[ti + 1])
+        check(len(lost) == 1 and lost[0].detail.endswith('to=SWEEP_WAIT')
+              and 'PH=SWEEP_WAIT' in r.keys[ti] and 'FRZ=0' in r.keys[ti],
+              '%s (b): the invalidated FVG sends RECONFIRMED(INTERNAL) back to SWEEP_WAIT and thaws the level' % tag)
+        check(lv_id_of_key(r.keys[ti]) == frozen_id,
+              '%s (b): on the thaw bar T the level is still the frozen one (no derivation on T)' % tag)
+        check(new_id not in (frozen_id, '-') and derive_id_at(c, ti, d0) == new_id and lv_id_of_key(r.keys[-1]) == new_id,
+              '%s (b): at T+1 the level is re-derived from the closed bars (the same level a derivation at T would have given: one bar later)' % tag)
+        check(r.state.phase == 'SWEEP_WAIT' and not r.state.frozen and sweep_block(r.state),
+              '%s (b): the wait restarts: SWEEP_WAIT, level thawed, entries-block flag (technical proposal) raised again' % tag)
+        # (b2) the following bar is still judged against the frozen (old) level
+        r = rep_of(pref + 's_recon_thaw_wick')
+        w = events_of(r, EV_WICK)
+        check(len(w) == 1 and w[0].ref == frozen_id and w[0].detail.endswith('restart=0') and r.state.phase == 'HOLD'
+              and lv_id_of_key(r.keys[-1]) == frozen_id,
+              '%s (b2): a wick on T+1 is judged against the old frozen level (ref %s), HOLD keeps it' % (tag, frozen_id[:8]))
+        r = rep_of(pref + 's_recon_thaw_break')
+        fl = events_of(r, EV_FLIP)
+        check(len(fl) == 1 and fl[0].ref == frozen_id and dir_name(r.state.dir) == dir_name(-d0),
+              '%s (b2): a body close on T+1 beyond the old frozen level flips the bias' % tag)
+        # (c) wick / body break during RECONFIRMED(INTERNAL): the structural logic wins
+        name = pref + 's_recon_wick'
+        c = case_by_name(name)
+        r = rep_of(name)
+        w = events_of(r, EV_WICK)
+        prev_key = r.keys[c.n_use - 2]
+        check(len(w) == 1 and w[0].detail.endswith('restart=1') and r.state.phase == 'HOLD' and r.state.frozen
+              and 'PH=RECONFIRMED' in prev_key and 'RSN=INTERNAL' in prev_key
+              and lv_id_of_key(r.keys[-1]) == lv_id_of_key(prev_key) and r.state.sweep_time == 0 and not r.state.rec_id,
+              '%s (c): a wick through the frozen level during RECONFIRMED(INTERNAL) starts HOLD (restart) with the same level' % tag)
+        name = pref + 's_recon_break'
+        c = case_by_name(name)
+        r = rep_of(name)
+        fl = events_of(r, EV_FLIP)
+        prev_key = r.keys[c.n_use - 2]
+        check(len(fl) == 1 and fl[0].ref == lv_id_of_key(prev_key) and 'PH=RECONFIRMED' in prev_key and 'RSN=INTERNAL' in prev_key
+              and EV_RECONF_LOST not in types_of(r) and dir_name(r.state.dir) == dir_name(-d0),
+              '%s (c): a body close beyond the frozen level during RECONFIRMED(INTERNAL) flips the bias (priority before reconfirmation)' % tag)
+        # the structural reconfirmation keeps freezing and falls back to HOLD, not to a thaw
+        r = rep_of(pref + 'w_invalid_after_reconf')
+        check(r.state.phase == 'HOLD' and r.state.frozen and EV_RECONF_LOST in types_of(r),
+              '%s: a structural RECONFIRMED lost to FVG invalidation returns to HOLD and stays frozen (no thaw)' % tag)
+
+
+def test_23_anchor_by_bars():
+    print('--- 23. FINDING 1: anchor located by EXISTING bars (weekend, history gap, window start)')
+    base = case_by_name('p16a_converged_break')
+    e0 = evaluate(base.bars, base.n_use, base.params())
+    refs0 = anchor_refs(e0.state)
+    r0 = min(refs0)
+    check(e0.reliable and e0.anchor == r0 - 2 * PERIOD,
+          'contiguous series: the anchor equals the old arithmetic result (2 existing bars before the earliest reference)')
+    for nm, label in (('f1_weekend_gap', 'weekend gap'), ('f1_history_gap', 'history gap (3 missing bars)')):
+        c = case_by_name(nm)
+        e = evaluate(c.bars, c.n_use, c.params())
+        times = [b.time for b in c.bars]
+        rmin = min(anchor_refs(e.state))
+        i = bar_index_by_time(c.bars, c.n_use, rmin)
+        old = rmin - 2 * PERIOD
+        check(e.reliable and e.anchor == c.bars[i - 2].time and e.anchor in times and e.anchor_missing == '',
+              '%s: the anchor is the open time of the 2nd EXISTING bar before the reference' % label)
+        check(old not in times and e.anchor != old,
+              '%s: control: the old arithmetic result (reference minus 2 periods) is not a bar of the series' % label)
+        check([x.type for x in e.events] == [x.type for x in e0.events] and e.flag == e0.flag and dir_name(e.state.dir) == dir_name(e0.state.dir),
+              '%s: same structure and events as the contiguous series (only the absolute times differ)' % label)
+    # window start: a reference with exactly Left bars before it, one bar fewer, and the very first bar
+    p = Params(left=2)
+    bars = [Bar(T0 + i * PERIOD, 110.0, 100.0, 105.0) for i in range(10)]
+    st = St()
+    st.dir = BULL
+    st.origin_ref = bars[2].time
+    a, miss = anchor_time(st, p, bars, 10)
+    check(a == bars[0].time and miss == '', 'window start: a reference with exactly Left bars before it anchors at the first bar')
+    st.origin_ref = bars[1].time
+    a, miss = anchor_time(st, p, bars, 10)
+    check(a == 0 and miss.startswith('ANCHOR_NEEDS_2_BARS_BEFORE'), 'window start: one bar fewer than Left: missing history reported, no time fabricated (anchor 0)')
+    st.origin_ref = bars[0].time
+    a, miss = anchor_time(st, p, bars, 10)
+    check(a == 0 and miss.startswith('ANCHOR_NEEDS_2_BARS_BEFORE'), 'window start: a reference at the very first bar: missing history')
+    # a reference that is not a bar of the series (missing bar): reported, not substituted
+    st.origin_ref = bars[5].time + 3600
+    a, miss = anchor_time(st, p, bars, 10)
+    check(a == 0 and miss.startswith('ANCHOR_REF_NOT_IN_SERIES'), 'a reference that is not in the series: missing history reported, no time fabricated')
+    hole = bars[:4] + bars[5:]
+    st.origin_ref = bars[4].time
+    a, miss = anchor_time(st, p, hole, 9)
+    check(a == 0 and miss.startswith('ANCHOR_REF_NOT_IN_SERIES'), 'history gap on the reference bar itself: the reference is missing, reported')
+    # one missing bar before the reference: Left EXISTING bars are used, the hole is skipped
+    st.origin_ref = bars[6].time
+    a, miss = anchor_time(st, p, hole, 9)
+    check(a == bars[3].time and miss == '', 'a hole before the reference: the Left existing bars are used (the missing slot is skipped)')
+    # several references: the earliest anchor wins, one missing reference makes the whole anchor missing
+    st.origin_ref = bars[8].time
+    st.has_level = True
+    st.lv_pivot = bars[6].time
+    st.lv_ext = bars[7].time
+    st.lv_prev = bars[3].time
+    a, miss = anchor_time(st, p, bars, 10)
+    check(a == bars[1].time and miss == '', 'several references: the earliest anchor wins')
+    st.lv_prev = bars[1].time
+    a, miss = anchor_time(st, p, bars, 10)
+    check(a == 0 and miss != '', 'several references: one reference without Left bars before it makes the anchor missing (never partial)')
+    # which references count
+    r = rep_of('s_recon_later_swing')
+    refs = anchor_refs(r.state)
+    check(r.state.sweep_time in refs and r.state.lv_pivot in refs and r.state.origin_ref not in refs and r.state.wk_src not in refs,
+          'frozen RECONFIRMED(INTERNAL): the references are the sweep and the frozen level pivots (origin ignored, as for HOLD)')
+    r = rep_of('w_wick')
+    refs = anchor_refs(r.state)
+    check(r.state.wk_src in refs and r.state.lv_pivot in refs and r.state.origin_ref not in refs and 0 not in refs,
+          'HOLD: the references are the source wick and the frozen level pivots (origin ignored)')
+    r = rep_of('s_recon_thaw')
+    refs = anchor_refs(r.state)
+    check(r.state.origin_ref in refs and r.state.sweep_time in refs and r.state.lv_pivot in refs,
+          'thawed SWEEP_WAIT (not frozen): the references are the origin, the level pivots and the sweep')
+    # the reliability rule
+    check(ab_reasons('K', 'K', 'E', 'E', BULL, 0, 50, 'ANCHOR_NEEDS_2_BARS_BEFORE x') == 'ANCHOR_HISTORY_MISSING',
+          'missing anchor history: LIMITED_BY_HISTORY with its own reason (not reported as a warm-up case)')
+    check(ab_reasons('K1', 'K2', 'E', 'E', BULL, 0, 50, 'm') == 'AB_STATE_DIFF+ANCHOR_HISTORY_MISSING',
+          'missing anchor history combines with the other reasons in the fixed order')
+    check(ab_reasons('K', 'K', 'E', 'E', 0, 0, 50, 'm') == '', 'NONE has no anchor: missing-history text cannot make it LIMITED')
+    c = case_by_name('p16c_anchor_warmup')
+    e = evaluate(c.bars, c.n_use, c.params())
+    check(not e.reliable and e.reason == 'ANCHOR_IN_WARMUP' and e.anchor == c.bars[0].time and e.anchor_missing == '',
+          'reference close to the start of the series (Left bars exist): the anchor is the first bar and the case is LIMITED by the warm-up rule')
+
+
 def test_21_no_fixed_count():
     print('--- 21. no fixed BOS count')
     levels = []
@@ -2397,7 +2709,15 @@ def emit_mql():
             out.append('         expected += "%s";' % part)
         first = (c.bars[0].time - T0) // PERIOD
         assert T0 + first * PERIOD == c.bars[0].time
-        out.append('         T3FillBars(d, %d, %d, bars);' % (len(c.bars), first))
+        slots = [(b.time - T0) // PERIOD for b in c.bars]
+        for b, sl in zip(c.bars, slots):
+            assert T0 + sl * PERIOD == b.time
+        if slots == list(range(first, first + len(c.bars))):
+            out.append('         T3FillBars(d, %d, %d, bars);' % (len(c.bars), first))
+        else:
+            # open times with holes (weekend / missing history): explicit 4h slot numbers
+            out.append('         int sl[] = {%s};' % ','.join(str(x) for x in slots))
+            out.append('         T3FillBarsAt(d, %d, sl, bars);' % len(c.bars))
         out.append('         n = %d;' % c.n_use)
         out.append('         break;')
         out.append('        }')
@@ -2432,6 +2752,8 @@ def main():
     test_17_depth_and_window()
     test_19_internal_liquidity()
     test_21_no_fixed_count()
+    test_22_freeze_internal()
+    test_23_anchor_by_bars()
     test_ids_and_windows()
     test_consumer()
     test_deferred()
