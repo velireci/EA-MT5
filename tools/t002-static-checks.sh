@@ -215,18 +215,21 @@ printf 'string t = "no more on server"; bool b = H4RefreshDue(1, 2, 3);\n' > "$T
 strip_comments "$TMPD/stale.mqh" | grep -qE 'no more on server|H4RefreshDue' && echo "  PASS 14f: stale claim / H4RefreshDue detected" || { echo "  FAIL 14f: stale logic not detected"; FAIL=1; }
 
 echo "=== CHECK 15: historical review wiring (single copy helper, no live price, static map) ==="
-# fn_body FILE REGEX -> stripped source of the function whose definition line matches REGEX
-# (definitions end with a line of exactly two spaces and a closing brace, as in the EA)
-fn_body() { strip_comments "$1" | awk -v re="$2" '$0 ~ re {p=1} p{print} p&&/^  }$/{exit}'; }
+# fn_body FILE PREFIX -> stripped source of the function whose DEFINITION line starts with the
+# literal text PREFIX (prototypes, which end with ';', are skipped). The prefix is matched with
+# index() and handed over through the environment: `awk -v` would process backslash escapes in a
+# regex (gawk warns about "\(" and silently turns it into "("), so no regex crosses awk -v here.
+# Definitions end with a line of exactly two spaces and a closing brace, as in the EA.
+fn_body() { strip_comments "$1" | FN_PREFIX="$2" awk 'index($0, ENVIRON["FN_PREFIX"]) == 1 && $0 !~ /;[ \t]*$/ {p=1} p{print} p&&/^  }$/{exit}'; }
 # check_hist_wiring FILE -> prints violations, returns 0 when the wiring is intact
 check_hist_wiring() {
   local f="$1" bad=0 s cl rb hp rp po b fn
   s=$(strip_comments "$f")
-  cl=$(fn_body "$f" '^int CopyClosedSet\(.*\)$')
-  rb=$(fn_body "$f" '^bool RecomputeMap\(void\)$')
-  hp=$(fn_body "$f" '^bool HistoryProbe\(void\)$')
-  rp=$(fn_body "$f" '^void RefreshPrice\(.*\)$')
-  po=$(fn_body "$f" '^void Poll\(void\)$')
+  cl=$(fn_body "$f" 'int CopyClosedSet(')
+  rb=$(fn_body "$f" 'bool RecomputeMap(void)')
+  hp=$(fn_body "$f" 'bool HistoryProbe(void)')
+  rp=$(fn_body "$f" 'void RefreshPrice(')
+  po=$(fn_body "$f" 'void Poll(void)')
   [ -n "$cl" ] && [ -n "$rb" ] && [ -n "$hp" ] && [ -n "$rp" ] && [ -n "$po" ] || { echo "    function body not found"; return 1; }
   # a) exactly two CopyRates calls in the whole EA, both inside CopyClosedSet
   [ "$(echo "$s" | grep -c 'CopyRates(')" = "2" ] && [ "$(echo "$cl" | grep -c 'CopyRates(')" = "2" ] || { echo "    CopyRates must appear exactly twice, both in CopyClosedSet"; bad=1; }
@@ -251,18 +254,22 @@ check_hist_wiring() {
 }
 out=$(check_hist_wiring $EA) && echo "  PASS $EA: one copy helper (CopyClosedSet) for RecomputeMap and HistoryProbe; bid read only when !g_hist; new bars gated by H4NewBarForLife" || { echo "$out"; echo "  FAIL historical wiring in $EA"; FAIL=1; }
 grep -q '^input datetime[[:space:]]*InpAsOfTime[[:space:]]*=[[:space:]]*0;' $EA && grep -q 'NOT UTC, NOT TradingView' $EA && echo "  PASS InpAsOfTime input present (default 0) with the broker/server time warning" || { echo "  FAIL InpAsOfTime input or its time-base warning missing"; FAIL=1; }
-# negative controls: each mutation of the EA must be detected
+# every function body the wiring check depends on must be found (no vacuous pass)
+for sig in 'int CopyClosedSet(' 'bool RecomputeMap(void)' 'bool HistoryProbe(void)' 'void RefreshPrice(' 'void Poll(void)'; do
+  [ -n "$(fn_body $EA "$sig")" ] && echo "  PASS fn_body finds '$sig'" || { echo "  FAIL fn_body does not find '$sig'"; FAIL=1; }
+done
+# negative controls: each mutation of the EA must be detected, for the intended reason
 NEG15=$(mktemp -d)
 sed 's/int got = CopyClosedSet(g_bars, oldest, newest_ok);/int got = CopyRates(g_symbol, PERIOD_H4, 1, g_lookback, g_bars);/' $EA > "$NEG15/m1.mq5"
-check_hist_wiring "$NEG15/m1.mq5" >/dev/null && { echo "  FAIL 15a: a second CopyRates in RecomputeMap was NOT detected"; FAIL=1; } || echo "  PASS 15a: separate CopyRates in RecomputeMap detected"
+o15=$(check_hist_wiring "$NEG15/m1.mq5"); r15=$?; { [ $r15 -ne 0 ] && echo "$o15" | grep -q "CopyRates must appear exactly twice\|RecomputeMap/HistoryProbe must call CopyClosedSet\|RecomputeMap/HistoryProbe must not call CopyRates" && ! echo "$o15" | grep -q "function body not found"; } && echo "  PASS 15a: separate CopyRates in RecomputeMap detected (failed for the intended reason)" || { echo "  FAIL 15a: a second CopyRates in RecomputeMap, or it failed for another reason: $o15"; FAIL=1; }
 sed 's/if(!g_hist) .*$/if(true)/' $EA > "$NEG15/m2.mq5"
-check_hist_wiring "$NEG15/m2.mq5" >/dev/null && { echo "  FAIL 15b: unguarded bid read was NOT detected"; FAIL=1; } || echo "  PASS 15b: bid read without the !g_hist guard detected"
+o15=$(check_hist_wiring "$NEG15/m2.mq5"); r15=$?; { [ $r15 -ne 0 ] && echo "$o15" | grep -q "the bid read is not guarded by !g_hist" && ! echo "$o15" | grep -q "function body not found"; } && echo "  PASS 15b: bid read without the !g_hist guard detected (failed for the intended reason)" || { echo "  FAIL 15b: unguarded bid read, or it failed for another reason: $o15"; FAIL=1; }
 sed 's/H4NewBarForLife(g_hist, new_bar)/new_bar/' $EA > "$NEG15/m3.mq5"
-check_hist_wiring "$NEG15/m3.mq5" >/dev/null && { echo "  FAIL 15c: raw new_bar in Poll was NOT detected"; FAIL=1; } || echo "  PASS 15c: raw new_bar passed to the lifecycle detected"
+o15=$(check_hist_wiring "$NEG15/m3.mq5"); r15=$?; { [ $r15 -ne 0 ] && echo "$o15" | grep -q "Poll must pass H4NewBarForLife" && ! echo "$o15" | grep -q "function body not found"; } && echo "  PASS 15c: raw new_bar passed to the lifecycle detected (failed for the intended reason)" || { echo "  FAIL 15c: raw new_bar in Poll, or it failed for another reason: $o15"; FAIL=1; }
 sed 's/double bid = 0.0;/double bid = 0.0; datetime tc = TimeCurrent();/' $EA > "$NEG15/m4.mq5"
-check_hist_wiring "$NEG15/m4.mq5" >/dev/null && { echo "  FAIL 15d: TimeCurrent in the EA was NOT detected"; FAIL=1; } || echo "  PASS 15d: clock API in the EA detected"
+o15=$(check_hist_wiring "$NEG15/m4.mq5"); r15=$?; { [ $r15 -ne 0 ] && echo "$o15" | grep -q "live price / clock API in the EA" && ! echo "$o15" | grep -q "function body not found"; } && echo "  PASS 15d: clock API in the EA detected (failed for the intended reason)" || { echo "  FAIL 15d: TimeCurrent in the EA, or it failed for another reason: $o15"; FAIL=1; }
 sed 's/H4SelectionPrice(g_hist, g_bars\[g_n - 1\].close, bid, g_price)/bid/' $EA > "$NEG15/m5.mq5"
-check_hist_wiring "$NEG15/m5.mq5" >/dev/null && { echo "  FAIL 15e: price not taken from H4SelectionPrice was NOT detected"; FAIL=1; } || echo "  PASS 15e: price bypassing H4SelectionPrice detected"
+o15=$(check_hist_wiring "$NEG15/m5.mq5"); r15=$?; { [ $r15 -ne 0 ] && echo "$o15" | grep -q "RefreshPrice must take its price from H4SelectionPrice" && ! echo "$o15" | grep -q "function body not found"; } && echo "  PASS 15e: price bypassing H4SelectionPrice detected (failed for the intended reason)" || { echo "  FAIL 15e: price not taken from H4SelectionPrice, or it failed for another reason: $o15"; FAIL=1; }
 rm -rf "$NEG15"
 
 echo "=== RESULT ==="

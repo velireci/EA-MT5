@@ -5,13 +5,13 @@ Branch `claude/t002-h4-map`, based on the T001 head `56c9570` (PR velireci/EA-MT
 ## 1. Evidence, by kind
 | Evidence | Status | Who/what |
 |---|---|---|
-| MQL5 compilation of `XauUsdH4Map.mq5` and `T002_LogicTest.mq5` | `44fddaa` and `9aeb8f7`: **0 errors, 0 warnings** (Codex, MetaEditor). After review round 2 (section 9) and the historical mode (section 10): **UNVERIFIED** | No MetaEditor in my environment. The 0/0 covers `44fddaa` only; the T001 compile says nothing about this code. |
+| MQL5 compilation of `XauUsdH4Map.mq5` and `T002_LogicTest.mq5` | `44fddaa`, `9aeb8f7` and `97ce7b4`: **0 errors, 0 warnings** for both files (Codex, MetaEditor; relayed). Anything after `97ce7b4` (the static-check fix in section 11 touches no MQL5): not applicable | No MetaEditor in my environment. The 0/0 covers `44fddaa` only; the T001 compile says nothing about this code. |
 | Python reference model tests (`tests/t002_reference_test.py`) | PASS, 65 passed / 0 failed | Run by the implementing agent and again by me. They verify the ALGORITHM MODEL, not the MQL5 source. |
 | Static checks (`tools/t002-static-checks.sh`) | PASS, exit 0 | Run by the agent and by me; includes negative controls (injected `OrderSend`/`MqlTradeRequest`/`CTrade`/`PositionClose`, unbalanced parentheses, format-string mismatch, altered generated data) all detected. Not a compilation. |
 | T001 static checks and T001 files | unchanged / PASS | `git diff 56c9570 -- <T001 files>` is empty; `tools/t001-static-checks.sh` still passes. |
-| MQL5 logic test script `src/tests/T002_LogicTest.mq5` | WRITTEN, NOT RUN | Compares the MQL5 logic with strings produced by the Python model on the same 31 cases. Only a run in MT5 shows that the two agree. |
-| Drawing, panel, reload without duplicates | NOT OBSERVED | Owner check in MT5 (section 4). |
-| Codex review | round 1 on `44fddaa` (5 findings, section 8); round 2 on `9aeb8f7` (2 findings, section 9); round 3 pending | |
+| MQL5 logic test script `src/tests/T002_LogicTest.mq5` | **208 passed, 0 failed** on `97ce7b4` in MT5 (owner, relayed; not run by me; his log is not attached) | Compares the MQL5 logic with strings produced by the Python model. The count differs from the Python 197 because the script has its own checks. |
+| Drawing, panel, reload without duplicates | Historical-mode panel observed once (section 11); reload/duplicate objects and the rest NOT observed | Owner checks in MT5 (section 4). |
+| Codex review | round 1 on `44fddaa` (5 findings), round 2 on `9aeb8f7` (2 findings), `97ce7b4` compiled 0/0; one local finding on check 15 (section 11); review of the fix pending | |
 
 ## 2. What the Python tests cover (65 checks)
 Unconfirmed swing; equal highs/lows; ambiguous outside bar; MIXED (equal and expanding) and UNKNOWN; missing interval (no preceding high, H<=L, bullish mirror); bullish and bearish FVG, including Low(C)==High(A) forming none; touch without invalidation; invalidation by close, equality not invalidating (both types); ERL taken (equality, touch before it was knowable, never restored); SELL ordering, price inside a zone, overlap/newer-first, ID tie-break, BUY mirror; no look-ahead (3 series, every prefix from 8 bars, compared with the full analysis restricted to what was knowable at T, plus a poison test with garbage bars after the prefix); ID uniqueness and determinism.
@@ -109,3 +109,25 @@ AsOfTime is the time of the MT5 chart's own time axis (broker/server time). Trad
 3. Check the direction evidence against the H4 candles: the four swings must be real 2/2 pivots, and each swing's confirmation time two H4 candles after its pivot must be at or before the as-of time.
 4. Repeat with an as-of time on a weekend or just before an H4 close, and with one earlier than the loaded history (expect the explicit insufficient-history text and no stale drawings).
 5. Compare with the client's screenshot, noting the time-zone/candle-alignment caveat above. Send the Experts log and screenshots.
+
+## 11. Evidence on `97ce7b4` and the check-15 fix
+Sources are kept apart; items marked (relayed) come from the owner/Codex in conversation, with no raw log or screenshot attached to the repository.
+
+| Evidence | Result | Source |
+|---|---|---|
+| Compilation of `XauUsdH4Map.mq5` and `T002_LogicTest.mq5` at `97ce7b4` | 0 errors, 0 warnings, both | Codex, MetaEditor (relayed) |
+| `T002_LogicTest` script in MT5 at `97ce7b4` | 208 passed, 0 failed | Owner (relayed); I did not run it |
+| Historical mode in MT5: `AsOfTime = 2026.10.05 12:00:00` (server time) | Screenshots show HISTORICAL REVIEW, last closed candle 08:00-12:00, close 4166.59, direction MIXED | Owner (relayed); I did not see the screenshots |
+| Python model tests | 197 passed, 0 failed (rerun by me after the fix below) | Claude Code; model only |
+| Static checks T002 / T001 | PASS / PASS after the fix below | Claude Code |
+| Static check 15 in Codex's local environment | FAILED with regex warnings from awk | Codex (relayed) |
+
+What the owner's historical observation does and does not show: at that single as-of time the panel used the right last closed candle and price and reported MIXED. It does not show that MIXED is the desirable answer for the client's example, nor that Tauro candles match the client's TradingView candles. The direction rule (swing 2/2, two highs and two lows) is unchanged and remains a proposal.
+
+### Check 15 failure: cause and fix
+Cause: `fn_body` in `tools/t002-static-checks.sh` passed a regex through `awk -v re=...`. awk processes backslash escapes in `-v` values; gawk warns that `\(` is not a known escape and drops the backslash, so `^bool RecomputeMap\(void\)$` became a group that never matches the source line. The function body then comes back empty and the check reports "function body not found" (or fails vacuously). My environment has mawk, which keeps the backslash, so I could not see gawk's warning here; I reproduced the mechanism by feeding the backslash-stripped regex: 0 lines found against 31 for the real function. I did not run gawk.
+Fix: `fn_body` now takes a literal prefix, matches it with `index()` and hands it over through the environment (`ENVIRON`), so no regex crosses `awk -v`; prototypes (lines ending in `;`) are skipped. No MQL5 file changed.
+Verification (mawk): check 15 passes on the real source; a guard confirms `fn_body` finds all five functions (no vacuous pass); each of the five negative mutations (15a-15e) now must fail for the intended message, and a failure with "function body not found" does not count. The whole script exits 0; the T001 script exits 0. Not verified: the script under gawk/Git-for-Windows bash; Codex should rerun it there.
+
+### Still open (not closed by any of the above)
+Historical check on a weekend as-of time; reload and duplicate objects; Tauro versus TradingView candle and time alignment; the M5/M15 confirmation relation; the policy for targets under 2R. An alternative direction model that keeps the trend until a structure break is only a proposal, not implemented and not validated by the client. T002 is not marked complete.
