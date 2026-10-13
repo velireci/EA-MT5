@@ -192,10 +192,10 @@ else
   echo "  FAIL: a tracked file differs from HEAD:"; git diff --stat HEAD | tail -5; FAIL=1
 fi
 if git cat-file -e dd571f6 2>/dev/null; then
-  if git diff --quiet dd571f6 -- $(git ls-tree -r --name-only dd571f6) 2>/dev/null; then
-    echo "  PASS: every file that exists at base commit dd571f6 is identical to it (working tree)"
+  if git diff --quiet dd571f6 -- $(git ls-tree -r --name-only dd571f6 -- src tools tests) 2>/dev/null; then
+    echo "  PASS: every code file (src, tools, tests) that exists at base commit dd571f6 is identical to it (working tree); docs, reports and tasks are excluded because they are updated by hand"
   else
-    echo "  FAIL: a file of base commit dd571f6 differs in the working tree"; git diff --stat dd571f6 | tail -5; FAIL=1
+    echo "  FAIL: a code file (src, tools, tests) of base commit dd571f6 differs in the working tree"; git diff --stat dd571f6 | tail -5; FAIL=1
   fi
 else
   echo "  INFO: base commit dd571f6 not available here; the parent must verify against it"
