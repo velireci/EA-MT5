@@ -3,13 +3,13 @@
 Updated: 2026-10-13 (Europe/Tirane)
 
 ## Resume here
-- T003 visual EA at `abd4c1b`: compiled by Codex (0/0, relayed). The owner's first observation (relayed): XAUUSD H4 live (R 1000) and as-of 2026.10.06 00:00 (1000 and 2000 bars) are all LIMITED_BY_HISTORY with `AB_STATE_DIFF+AB_EVENT_DIFF+ANCHOR_IN_WARMUP`.
-- DIAGNOSTICS ROUND (working tree on top of `abd4c1b`, NOT committed, NOT compiled): the EA logs `T003 DIAG1..DIAG8` when LIMITED (`InpDiagnostics`), can export the closed-bar set to `MQL5/Files/velo_t003_diag_<symbol>_<last bar>.csv` (`InpExportCandles`, default off) and `tests/t003_replay_csv.py` replays that CSV in the Python model. A TrackChanges reporting defect (GAP / RE-DERIVATION shown as market changes) is fixed. Analysis: reports/T003-verification.md section 10.
-- T003 logic at `62a0747` (revision 7), relayed (not my runs): Codex compiled `T003_LogicTest.mq5` with `H4Bias.mqh`: 0 errors, 0 warnings; the owner ran it in MT5: 262 passed, 0 failed, 5 deferred. Deferred are not passes; the tests do not prove agreement with the client's strategy.
-- NEXT ACTION: Codex compiles the diagnostics round; the owner runs the EA with `InpExportCandles = true` on the LIMITED case and sends the CSV, the Experts log (`T003 DIAG`, `T003 EXPORT`) and a panel screenshot; then `python3 tests/t003_replay_csv.py <csv>` (see docs/T003-visual-ea.md sections 7 and 9).
-- Still to review (Codex): the 20 `AMBIGUITY` markers and the contradictions in `reports/T003-verification.md` (notably CONFLICT is unreachable).
-- The owner is waiting on the log of the first NEW H4 candle in LIVE for the technical closure of T002 (see the T002 state below).
-- Do not start: the intrabar overlay P12, the target P13, M5/M15, orders or position handling. No merge of PR #1, #2 or #3.
+- T003 at `41feb4b` (diagnostics round, working tree): LIMITED_BY_HISTORY on the owner's real XAUUSD H4 series is REPRODUCED (Codex, then the parent; relayed): A = BULL/RECONFIRMED frozen at a level known since 2025-08, B = BEAR/RECONFIRMED frozen at a level known since 2026-03, bias differs on 1700/1700 common bars, zone events A 0 vs B 52. Hypothesis H1 (frozen HOLD/RECONFIRMED has no end) is supported but not proven as the cause; a bar-count expiry is NOT proposed.
+- DOCS-ONLY round (mine, nothing implemented, nothing committed): tasks/T003-h4-bias-change.md section 11 = revision 8 PROPOSAL (structure layer separated from the setup context, ratchet protecting level, setup end reasons, M15 interface, regression cases R1-R10, technical vs client questions C1-C5); reports/T003-verification.md section 11 (mechanism, synthetic evidence, what could not be done).
+- Private-case analysis on the owner-uploaded CSV (parent's run, derived facts only, reports/T003-verification.md 11.5): A entered a frozen STRUCT RECONFIRMED (BULL) and stayed 1709 bars with no event, closes up to 66.6% above the level and none beyond it; B entered a frozen INTERNAL RECONFIRMED (BEAR) and stayed 852 bars, last close 19.3% below the level, none beyond. The CSV stays outside the repo (PRIVATE).
+- NEXT ACTION: Codex reviews the revision 8 proposal; the owner decides (and may allow the private analysis); no implementation until approved. Also for Codex: ORG (SEED vs BREAK) is part of the A/B key and can keep two converged windows apart (synthetic, report 11.4).
+- Diagnostics round still UNCOMPILED (Codex compiles; see docs/T003-visual-ea.md sections 7 and 9). Compiled and run earlier (relayed): `62a0747` logic 262 passed, 0 failed, 5 deferred; visual EA `abd4c1b` 0/0.
+- Still to review (Codex): the 20 `AMBIGUITY` markers and the contradictions (CONFLICT unreachable). T002 still waits for the owner's LIVE new-candle log.
+- Do not start: P12, P13, M5/M15, orders, positions. No merge of PR #1, #2 or #3.
 
 ## Branches and PRs (verified from the GitHub API and git on 2026-10-13)
 - PR #1 (T001): branch `claude/amazing-darwin-icpcjd`, head `56c9570`, base `main`, open, NOT merged. Tested version `763227d`.

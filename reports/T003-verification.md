@@ -180,3 +180,42 @@ New MQL5 risks to watch at compilation: nested struct members passed by referenc
 
 ### 10.6 What the owner must send back to settle H1-H4
 See `docs/T003-visual-ea.md` sections 7 and 9: the `velo_t003_diag_XAUUSD_<last bar>.csv` of a LIMITED run (live, and/or as of 2026.10.06 00:00), the Experts log with the `T003 DIAG1..DIAG8` and `T003 EXPORT` lines, and a panel screenshot. Offline: `python3 tests/t003_replay_csv.py <file>` must say REPRODUCED (otherwise model and MQL5 disagree on that series) and prints the DIAG lines for the real series.
+
+## 11. LIMITED_BY_HISTORY on the owner's real series: mechanism analysis and revision 8 proposal (2026-10-13; documents only)
+
+### 11.1 Relayed reproduction (NOT my run)
+Codex (and then the parent) ran `tests/t003_replay_csv.py` at `41feb4b` on the owner's CSV: REPRODUCED, LIMITED_BY_HISTORY, AB_STATE_DIFF+AB_EVENT_DIFF+ANCHOR_IN_WARMUP. AsOfTime 2026.10.06 00:00 server, 2000 H4 bars, Left=Right=2, Lookback=300, Rebuild=2000. A: BULL/RECONFIRMED, origin BREAK, frozen level 3359.81 known 2025.08.27 12:00; B (1700 bars): BEAR/RECONFIRMED, origin BREAK, frozen 5128.53 known 2026.03.16 12:00; states differ on 1700/1700 common bars; zone events A 0, B 52 (first extra FLIP bear to bull); no-level runs A 83 bars/6 runs/5 flips, B 303 bars/19 runs/9 flips. Source: Codex/owner via the parent. This supports the hypothesis H1 of section 10.4 (dependence on old frozen structures); it does not prove that a bar-count expiry is right.
+
+### 11.2 What I could NOT do
+- The builder agent did not run anything on the real CSV (its read was refused by the permission system). The parent ran the private-case analysis afterwards: see 11.6 (parent's run, derived facts only).
+- No MQL5 compile, no MT5 run; nothing in `src/`, `tools/`, `tests/` was changed.
+
+### 11.3 Mechanism (code reading; functions in `tests/t003_reference_test.py` and `src/include/H4Bias.mqh`)
+Listed in tasks/T003-h4-bias-change.md section 11.2: `derive_step`/H3DeriveStep returns while `frozen`; `bias_step`/H3BiasStep ignores CONTINUATION/INTERNAL_* outside ACTIVE and SWEEP_WAIT; the only exits are `do_flip` (close beyond the frozen level), wick restart (same level), `fvg_step` RECONF_LOST (INTERNAL thaws, STRUCT returns to a still-frozen HOLD). FACT from reading the code; the synthetic runs below confirm the model behaves so.
+
+### 11.4 SYNTHETIC evidence (scratchpad scripts `frozen_mech.py`, `ab_persist.py`, `proto.py`, `run_proto*.py`, importing the model; generic units; my runs, model only)
+| Scenario | Result |
+|---|---|
+| SC-1: bear structure, wick above level 117 (close 110), decline to 70, rebuilt HH/HL up to 112, all closes and highs below 117 | WICK at bar 32, then no event; bias BEAR, HOLD, level 117 frozen to the end while T002 turns BULLISH at bar 57 |
+| SC-1 window starts (same bars) | start 0 and 10: BEAR/HOLD/117; start 20: BEAR/SWEEP_WAIT; start 31 to 40: BULL/ACTIVE (seed) |
+| SC-1 + range tail 10 and 30 cycles | bias differs on 76/76 and 236/236 trusted common bars, zone events 0 vs 0 (as the real zone for A); `evaluate`: LIMITED (AB_STATE_DIFF+ANCHOR_IN_WARMUP) |
+| same + ONE close above 117 | both converge to BULL/ACTIVE/same level, but the origin differs (BREAK vs SEED), A has a FLIP in the zone: `evaluate` stays LIMITED (AB_STATE_DIFF+AB_EVENT_DIFF+ANCHOR_IN_WARMUP) for at least 250 further bars. OBSERVATION: ORG is in the A/B key |
+| SC-2: structural RECONFIRMED, FVG invalidated, then 67 bars of large swings | RECONFIRMED then RECONF_LOST to HOLD; HOLD stays frozen at the same level to the end (structural never thaws) |
+| SC-3: RECONFIRMED(INTERNAL), later lower lows | level stays frozen; thaw only when the recorded FVG is invalidated (SC-3b: RECONF_LOST, level re-derived 117 to 111) |
+| SC-4: wick then monotone decline, lookback 20 | LIMITED only while the wick lies between B's start and A's start (tail 40 at R=60; tails 60 to 200 give CONVERGED on NONE since both windows lost the wick: a documented limit); R=240, tail 200 LIMITED |
+| LEGS (wick, then two more bearish legs, then a recovery above the newer lower level, below the old one): current model | replay from 0: BEAR/HOLD/old level; window starts 20, 31, 45: BULL/ACTIVE: disagree |
+| LEGS, THROWAWAY prototype (structure not frozen + ratchet) | all starts BULL/ACTIVE, same level |
+| LEGS without the recovery | current: BEAR/HOLD/117 vs BEAR/ACTIVE/100; ratchet only: level 100 for all but phase HOLD vs ACTIVE; ratchet + supersession (variant B): BEAR/ACTIVE/100 for all |
+| SC-1 with the prototype | no change (no newer leg ever forms): the disagreement stays. Hysteresis is intrinsic |
+The prototype is a monkeypatch of one function in the scratchpad, not tested against the 299 model tests, not the product, and only shows the direction of the effect.
+
+### 11.5 Private case, owner-uploaded CSV (parent's run; derived facts only, NO bars or prices from the CSV are stored in the repo)
+Run: scratchpad script (not in the repo) importing `tests/t003_reference_test.py`, recording the state after every bar of replay A (all 2000 bars) and replay B (the last 1700). The file stays outside the repository. Parent run, not Codex's.
+- The parent's own `t003_replay_csv.py` run on the uploaded file also gave REPRODUCED with the same flag and reason (agrees with 11.1).
+- Replay A: after the last FLIP/BREAK sequence of 2025.08 it reaches bar index 290 (2025.08.28 00:00 UTC epoch 1756339200) as BULL / RECONFIRMED, reason STRUCT (a wick-HOLD, then a touch of an eligible FVG), level frozen. It then stays in that state for the remaining 1709 bars with no event at all. Over those bars the closes range from 0.7% (low) up to 66.6% (high) above the frozen level and the last close is 23.2% above it; zero closes beyond the level, so the single flip trigger (P3) never fires.
+- Replay B: it reaches bar index 847 of its window (2026.03.18, epoch 1773864000) as BEAR / RECONFIRMED, reason INTERNAL (after SWEEP_WAIT and an INTERNAL_SWEEP), level frozen. It stays so for the remaining 852 bars. Over them the highest high is 4.5% below the frozen level and the last close is 19.3% below it (lowest close 22.7% below); zero closes beyond the level.
+- Reading: in both windows the structure (bias and protecting level) was frozen by a setup state and stayed frozen while the market moved 20 to 60+ percent away from the level without any close beyond it. This is the mechanism of 11.3 on the real series. It confirms the dependence on old frozen structure (H1 in section 10.4); it does NOT show which fix is right, and it does not prove that the revision 8 proposal is correct for this series (the prototype of 11.4 was not run on this CSV).
+- Not done: replaying the prototype on this CSV; a visual check against the client's examples.
+
+### 11.6 Proposal and open items
+Revision 8 in tasks/T003-h4-bias-change.md section 11: structure (bias, protecting level, ratchet update by the unchanged P2 candidate) separated from the setup (snapshot level, wick/sweep, FVGs, RECONFIRMED, end reasons FLIP/REPLACED/RECONF_LOST/SUPERSEDED/M15_OUTCOME), M15 interface, criterion for the level update, regression cases R1-R10, TECHNICAL vs client-validation split (C1-C5, plus F1-F4, F8), implementation impact. No arbitrary expiry. The A/B check is untouched. Next: Codex reviews; the owner decides; no implementation before that. Also for Codex: whether ORG belongs in the convergence key (not changed).
