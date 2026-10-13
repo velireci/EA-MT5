@@ -323,3 +323,51 @@ NOT verified: MetaEditor compilation of any revision 10 code; any MT5 run; the v
 - The script prints NOT REPRODUCED because the CSV header holds the result of the OLD code (LIMITED_BY_HISTORY / AB_STATE_DIFF+AB_EVENT_DIFF+ANCHOR_IN_WARMUP); this is expected after the prototype change and is not a model/MQL5 disagreement.
 - Flips over the window: 36 (A) and 29 (B), many bars without a level (125 and 107): the prototype tightens the level and flips often (the builder also saw roughly double FLIP/WICK counts on random walks).
 - This does NOT show that the prototype is right for the client's strategy: the ratchet is a working proposal awaiting the client; the result is a model run, not MetaEditor/MT5; Codex has not reviewed it. The owner authorised the prototype (docs/DECISIONS.md).
+
+
+## 15. The client's latest text (2026-10-13, relayed): comparison with prototype 2837527, ratchet/hysteresis scenarios (documents only; scratchpad, model only, not product tests)
+
+### 15.1 Sources (kept apart)
+| Item | Source | Status |
+|---|---|---|
+| N1-N7 (direction as HH/HL and LH/LL; structure versus historical liquidity; H4 FVGs and grabs; H4 context and M15 entry; M5 removed; minimum 2R; examples are not constants) | the client, as text relayed by the owner on 2026-10-13; the videos were NOT sent and were NOT seen | CLIENT STATEMENTS; wording in docs/DECISIONS.md and tasks/T003 section 13.1 |
+| This round is documents only; no M15, target or trading; CONVERGED is not a validation | owner instruction | OWNER DECISIONS |
+| Code reading of `tests/t003_reference_test.py`, `src/include/H4Bias.mqh`, T002 `H4DeriveDirection` (`H4Structure.mqh`, `tests/t002_reference_test.py`) | mine, this round | fact about the code |
+| Scenarios and causality checks (scripts in the session scratchpad, NOT in the repository): they import `tests/t003_reference_test.py` unchanged; generic units, synthetic series | mine, this round | scratchpad, model only, not product tests; the MQL5 twin was not run |
+| The ratchet, hysteresis, swing 2/2, FVG timing, sweep identification | our earlier work | TECHNICAL PROPOSALS, unvalidated |
+| Structural versus local swing; whether a bias may be held against HH/HL; M15 details; R/SL/fill/cost definitions | not given | STILL OPEN |
+The owner's CSV was not read. Nothing in `src/`, `tools/`, `tests/` was changed; no test suite was re-run in this round (the numbers of 13.1 still stand for 2837527; MetaEditor compilation remains UNVERIFIED).
+
+### 15.2 Comparison with the prototype
+Same table as tasks/T003-h4-bias-change.md 13.5 (repeated in short): N1a direction wording = MATCH (swing choice UNVALIDATED PROPOSAL); N1b bias following the structure = CONTRADICTION by design of the hysteresis (15.4); N2 historical liquidity layer = NOT IMPLEMENTED, frozen-by-old-level risk = CONTRADICTION (15.4); N3 body/wick/no future candle = MATCH (level choice UNVALIDATED); N4 touch at close, new FVG after the wick = MATCH, FVG-candle timing and sweep identification UNVALIDATED PROPOSAL, M15 NOT IMPLEMENTED; N5 = NOTHING TO CHANGE (no M5 code exists); N6 = NOT TOUCHED; N7 = MATCH (no constants, no BOS count), target NOT TOUCHED. Not touched by the prototype: M15, the 2R minimum and target, historical liquidity as a layer, the structural-versus-local distinction.
+
+### 15.3 Scenario definitions (SYNTHETIC; model only)
+Helper: `Series` of `tests/t003_reference_test.py` (bar = centre +/- 5, close = centre unless `bar(h, l, c)` is given); base = `bear_leg()` (centres 90 -> 120 -> 100 -> 112, then 108, 106, 96, 86, 86, 82, 78): the swing high that becomes the protecting level has high 117, the last swing low 73; the prototype SEEDS a BEAR bias at bar 25 with level 117 (T002 BEARISH). Parameters L=30, R=200, Left=Right=2. T002 direction at bar t = `derive_direction` on the swings confirmed by the close of t.
+- A: base then centres 84, 90, 96, 100, 98, 94, 90, 88, 90, 96, 102, 108, 110, 108, 104, 106, 108, 106, 108, 106 (lower high, higher low, higher high, all highs <= 115, closes < 117), then 60 quiet alternating bars. A2: A then one bar (125, 108, 122).
+- A3: base then 84, 90, 96, 100, 98, 94, 90, 88, 90, bar (113, 100, 110), 111, 110, 108, 106, 108, 106, 107, 106, 108, 60 quiet bars.
+- B: base then 108, 104, 100, 96, bar (126, 106, 112) [wick above 117, close below], then 104, 98, 92, 86, 80, 74, 68, 62, 70, 78, 86, 92, 86, 80, 74, 66, 58, 50, 56, 62, 56, 50, 44, 50, 44.
+- C: base then 108, 104, 100, 96, bar (126, 106, 122) [close above 117], then 118 ... 130 (rise).
+- D: base then 108, 104, 100, 96, 100, 104, 98, 90, 84, 78, 70, 64, 60, 66, 72, 78, 84, 78, 72, 66, 60, 54, 48, 54, 60, 66, 72, 78, 84, 90, 96, 102 (two newer bearish legs, then a rally).
+- E: base then 108, 104, 100, 96, 92, 96, 100, 104, 100, 96, 92, 96, 100, 104, 100, 96 and 20 quiet bars.
+- F: base then 108, 104, 100, 96, bar (126, 106, 122), 118, 112, 106, 100, 94, 88, 82, 76, 70, 76 ... 130.
+- Random walks: 40 seeds, 700 bars, step N(0, 4), L=60, R=300.
+
+### 15.4 Results (disagreement = T003 bias differs from the T002 BULLISH/BEARISH reading at the same bar)
+| Scenario | T003 | T002 | Disagreement | End |
+|---|---|---|---|---|
+| A | BEAR (ACTIVE bars 33-37, then SWEEP_WAIT; protecting level 117 never changes) | MIXED bars 33-37, then BULLISH (HH+HL) from bar 38 | 5 bars MIXED + 66 bars OPPOSITE, as long as the quiet tail lasts (the length is set by the tail, not by the model) | A2: ends only at the close 122 > 117 (FLIP and SETUP_ENDED at bar 104) |
+| A3 | BEAR; phase ACTIVE from bar 36 to bar 42, then repeated INTERNAL_SWEEP / SETUP_ENDED(REPLACED) cycles from bar 43 (an oscillation around the interior high, probably an artefact of the padding) | BULLISH from bar 36 | 3 bars MIXED + 67 bars OPPOSITE | no flip in the window |
+| B (wick above the level, then a fall) | BEAR, HOLD / RECONFIRMED, bias kept | MIXED 1 bar, BULLISH 8 bars, MIXED 4 bars (the wick top is a swing high) | 13 bars | no flip; bias kept as N3 describes IF the fall continues (the model cannot know) |
+| C (close above the level) | FLIP to BULL at the break bar, no level | BEARISH 1 bar (the break bar), MIXED 1 bar | 2 bars | T002 agrees afterwards |
+| D (ratcheted level) | level 117 -> 109 -> 89; FLIP to BULL on the close 90 > 89 | MIXED 9 bars (bias BEAR); BEARISH (LH+LL) at the flip and 2 bars after | 9 + 3 bars | flip while T002 still reads LH+LL; consistent with S1, level choice unvalidated |
+| E (correction) | BEAR ACTIVE | MIXED | 30 bars | none |
+| F (flip, fall, rise) | FLIP, WICK, FLIP back, WICK, FLIP | alternating | 1+1+5+8+1 bars | 3 flips in 48 bars |
+| Random walks | 678 flips | of 28040 bars with a bias: same 12874, opposite 4641, MIXED 9781, longest opposite run 29 | | |
+Findings: (1) the bias can be held against the HH/HL (or LH/LL) the client describes for an UNBOUNDED time: only a close beyond the current protecting level ends it, and the ratchet moves the level only toward the trend when a newer leg forms, so a rally that builds HH/HL below the level never moves it (A, A3). (2) It is by design of the proposal (P3 hysteresis + the revision 10 ratchet), not a coding fault, and the A/B check cannot see it (it measures depth sensitivity, not agreement with T002). (3) The wick-then-HH/HL case (B) is exactly the case N3 calls a grab when the previous direction later continues; known at the wick close is only the crossing; the continuation is known later, so the model cannot tell; the prototype's answer (bias kept, entries blocked in HOLD, new FVG after the wick required) is the same as the client's S3/S4. (4) Where N2 says an old level must not freeze the direction, A is the counter-example; it is not decided which side the client means (N1/N2 versus S1-S3/N3). (5) This sharpens C1; no new question.
+
+### 15.5 Causality checks (SYNTHETIC, scratchpad, model only)
+For 11 series (A2, B, F, 8 random walks of 200 bars; L=30, R=200): 1775 comparisons of the state at bar t (bias, phase, setup_id, snapshot, level) between the full replay and a replay of the prefix bars[0..t] gave 0 differences. 62 comparisons in which all bars after t were replaced by garbage gave 0 differences. Therefore no later candle changes the state at t in these series. Reading of the code: bar t is judged against the state known before t (`bias_step`); swings are used only when `index + right <= t` (`known_count`); a level accepted at the end of t is used from t+1; wick events carry source_wick_time, source_wick_known_time, detected_at and retro, and a touch counts from the close of the touching bar and `wait_start`, so 'known at the close of the crossing candle' and 'confirmed later' (RECONFIRMED, RECONF_LOST, FLIP, SETUP_ENDED, dated at their own bar) are separate events. Residual: a level accepted later can label an EARLIER bar as a structural wick (retroactive, flagged retro; section 13.7 item 4 of this report); the label is dated at the acceptance bar and no entry in the past is permitted by it. These checks are not the product tests and do not cover the MQL5 code.
+
+### 15.6 Not verified
+MetaEditor compilation; any MT5 run; the MQL5 twin on these scenarios; real data (no CSV read); whether the client wants the held bias or the structure-led direction; the visual comparison of section 10; the validation of any proposal. CONVERGED on the owner's CSV (section 14) is evidence of model stability at those depths, NOT a validation of the strategy or of profitability.
+Next action: Codex reviews/compiles 2837527; the owner passes C1 (with N1/N2 attached) to the client or decides how to proceed; M15, target and trading do not start.
