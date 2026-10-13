@@ -31,6 +31,7 @@ Usage:
 import math
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import t002_reference_test as t2  # noqa: E402  (reused, not modified)
@@ -769,6 +770,45 @@ def pre_wick_ids(st, fv, n):
     return '%s%s' % (','.join(ids), extra)
 
 
+def diag_track_bar(rep, st, open_t, ne0):
+    """DIAGNOSTIC (behaviour neutral): flips, and runs of bars where a bias exists but has no
+    protecting level. Mirrors the counters of H3Replay."""
+    types = [e.type for e in rep.events[ne0:]]
+    for e in rep.events[ne0:]:
+        if e.type == EV_FLIP:
+            rep.n_flips += 1
+            rep.last_flip = e.bar_time
+    if st.dir != 0 and not st.has_level:
+        if rep.nolv_run_start == 0:
+            rep.nolv_run_start = open_t
+            rep.nolv_run_bars = 0
+            rep.nolv_runs += 1
+            if EV_FLIP in types:
+                rep.nolv_cause = 'FLIP'
+            elif EV_BREAK_SET in types:
+                rep.nolv_cause = 'BREAK_SET'
+            elif EV_SEED in types:
+                rep.nolv_cause = 'SEED'
+            else:
+                rep.nolv_cause = 'LEVEL_DROPPED'
+        rep.nolv_run_bars += 1
+        rep.nolv_total += 1
+    else:
+        rep.nolv_run_start = 0
+        rep.nolv_run_bars = 0
+        rep.nolv_cause = ''
+
+
+def diag_flips_after(rep):
+    if rep.nolv_run_start == 0:
+        return 0
+    c = 0
+    for e in rep.events:
+        if e.type == EV_FLIP and e.bar_time > rep.nolv_run_start:
+            c += 1
+    return c
+
+
 def replay(bars, n, p):
     rep = Rep()
     rep.events = []
@@ -778,11 +818,22 @@ def replay(bars, n, p):
     fv = t2.find_fvgs(bars, n, p.period)
     rep.key_before_last = ''
     rep.keys = []
+    # DIAGNOSTIC counters (behaviour neutral, never part of the state key): bias without a level
+    rep.nolv_run_start = 0
+    rep.nolv_run_bars = 0
+    rep.nolv_cause = ''
+    rep.nolv_total = 0
+    rep.nolv_runs = 0
+    rep.n_flips = 0
+    rep.last_flip = 0
     for t in range(n):
         if t == n - 1:
             rep.key_before_last = state_key(st, rep.tracks)
+        ne0 = len(rep.events)
         process_bar(t, bars, sw, fv, p, st, rep.tracks, rep.events)
         rep.keys.append(state_key(st, rep.tracks))
+        diag_track_bar(rep, st, bars[t].time, ne0)
+    rep.flips_after_run = diag_flips_after(rep)
     if n > 0:
         nkf = known_count(sw, p.right, n - 1)
         st.t2dir = t2_dir_name(sw, nkf)
@@ -808,23 +859,30 @@ def bar_index_by_time(bars, n, t):
     return -1
 
 
-def anchor_refs(st):
-    """absolute reference times the state depends on (AMBIGUITY 5). Frozen states (HOLD,
-    RECONFIRMED): the source wick, the frozen level's pivots (if a level exists) and the
-    sweep that started an internal wait (RECONFIRMED(INTERNAL) only); origin ignored."""
+def anchor_refs_named(st):
+    """(name, absolute time) of the references the state depends on (AMBIGUITY 5). Frozen states
+    (HOLD, RECONFIRMED): the source wick, the frozen level's pivots (if a level exists) and the
+    sweep that started an internal wait (RECONFIRMED(INTERNAL) only); origin ignored. Otherwise
+    the origin reference, the level's pivots (if any) and the sweep. Zero times are dropped."""
     refs = []
     if st.frozen:
-        refs = [st.wk_src] if st.has_wick else []
+        if st.has_wick:
+            refs.append(('wick', st.wk_src))
         if st.has_level:
-            refs += [st.lv_pivot, st.lv_ext, st.lv_prev]
-        refs.append(st.sweep_time)
+            refs += [('lv_pivot', st.lv_pivot), ('lv_ext', st.lv_ext), ('lv_prev', st.lv_prev)]
+        refs.append(('sweep', st.sweep_time))
     else:
-        refs = [st.origin_ref]
+        refs.append(('origin', st.origin_ref))
         if st.has_level:
-            refs += [st.lv_pivot, st.lv_ext, st.lv_prev]
+            refs += [('lv_pivot', st.lv_pivot), ('lv_ext', st.lv_ext), ('lv_prev', st.lv_prev)]
         if st.sweep_time != 0:
-            refs.append(st.sweep_time)
-    return [r for r in refs if r != 0]
+            refs.append(('sweep', st.sweep_time))
+    return [(nm, r) for nm, r in refs if r != 0]
+
+
+def anchor_refs(st):
+    """absolute reference times the state depends on (see anchor_refs_named)"""
+    return [r for _, r in anchor_refs_named(st)]
 
 
 def anchor_time(st, p, bars, n):
@@ -1039,6 +1097,404 @@ def consume_new(ev, cursor, period):
         if e.bar_time > cursor:
             out.append(e)
     return C_OK, out
+
+
+# ================================================================ diagnostics ====
+# Behaviour-neutral helpers that explain WHY an evaluation is (not) reliable. They never
+# change evaluate(); they re-run replays A and B and compare them. Mirrored by H3Diagnose
+# in src/include/H4Bias.mqh. All times are ABSOLUTE (YYYYMMDDHHMM, server time of the bars).
+STATE_FIELDS = ('BIAS', 'PH', 'ORG', 'NR', 'LV', 'FRZ', 'WK', 'SW', 'REC', 'RSN', 'EL')
+FIELD_MEANING = {'BIAS': 'dir', 'PH': 'phase', 'ORG': 'origin', 'NR': 'none_reason',
+                 'LV': 'level id@price (id carries the pivot/ext/prev times)', 'FRZ': 'frozen',
+                 'WK': 'wick src/known/detected/retro', 'SW': 'sweep time', 'REC': 'recorded FVG',
+                 'RSN': 'reconfirm reason', 'EL': 'eligible FVG tracks'}
+
+
+def state_fields(st, tracks):
+    """the state key as an ORDERED list of (label, value); ';'.join('label=value') == state_key"""
+    return [('BIAS', dir_name(st.dir)),
+            ('PH', st.phase if st.dir != 0 else '-'),
+            ('ORG', st.origin),
+            ('NR', st.none_reason if st.dir == 0 else '-'),
+            ('LV', ('%s@%s' % (st.lv_id, pf(st.lv_price))) if st.has_level else '-'),
+            ('FRZ', '1' if st.frozen else '0'),
+            ('WK', wick_text(st)),
+            ('SW', tx(st.sweep_time)),
+            ('REC', st.rec_id if st.rec_id else '-'),
+            ('RSN', st.recon_reason if st.recon_reason else '-'),
+            ('EL', tracks_text(tracks))]
+
+
+def first_diff_field(fa, fb):
+    """first field (in the explicit order) whose values differ: (label, value_a, value_b) or None"""
+    for (la, va), (lb, vb) in zip(fa, fb):
+        if va != vb:
+            return la, va, vb
+    return None
+
+
+def anchor_binding(st, p, bars, n):
+    """(anchor, name, ref, missing): like anchor_time, plus WHICH reference gives the earliest
+    anchor (first in the reference order on a tie)"""
+    if st.dir == 0:
+        return 0, '', 0, ''
+    a = 0
+    nm = ''
+    rf = 0
+    for name, r in anchor_refs_named(st):
+        i = bar_index_by_time(bars, n, r)
+        if i < 0:
+            return 0, '', 0, 'ANCHOR_REF_NOT_IN_SERIES %s' % ts(r)
+        if i < p.left:
+            return 0, '', 0, 'ANCHOR_NEEDS_%d_BARS_BEFORE %s' % (p.left, ts(r))
+        c = bars[i - p.left].time
+        if a == 0 or c < a:
+            a = c
+            nm = name
+            rf = r
+    return a, nm, rf, ''
+
+
+def one_track_text(t):
+    return t.id + ':' + ('INVALID' if t.invalid else 'RECORDED' if t.recorded else 'FRESH')
+
+
+def track_diff_text(tra, trb):
+    """first differing track of two lists: 'track #i A=.. B=.. (counts na vs nb)' or ''"""
+    for i in range(max(len(tra), len(trb))):
+        xa = one_track_text(tra[i]) if i < len(tra) else '-'
+        xb = one_track_text(trb[i]) if i < len(trb) else '-'
+        if xa != xb:
+            return 'track #%d A=%s B=%s (counts %d vs %d)' % (i, xa, xb, len(tra), len(trb))
+    return ''
+
+
+def why_no_level(bars, n, p, d):
+    """why a bias of direction d has no protecting level at the end of bars[0..n-1]: the
+    candidate P2 would give, and the first bar that already closed beyond it"""
+    sw, _ = t2.find_swings(bars, n, p.left, p.right, p.period)
+    nk = known_count(sw, p.right, n - 1)
+    lvl, ex, lint = derive_level(sw, nk, d)
+    if lvl is None:
+        if ex is None:
+            return 'NO_CANDIDATE: no latest %s in the swings known at the last bar' % ('HH' if d > 0 else 'LL')
+        return 'NO_CANDIDATE: %s found but no bounded swing between it and its predecessor' % ex.id
+    s = -d
+    for i in range(lvl.idx + 1, n):
+        if s * (bars[i].close - lvl.price) > 0:
+            return 'CONSUMED: candidate %s price %s closed beyond at %s' % (lvl.id, pf(lvl.price), ts(bars[i].time))
+    return 'CANDIDATE_DEFINED: %s price %s (not consumed; check the freeze/derive order)' % (lvl.id, pf(lvl.price))
+
+
+def diag_side(rep, bars_win, bars_all, n_avail, p, warm):
+    d = Diag()
+    st = rep.state
+    d.start = bars_win[0].time
+    d.bars = len(bars_win)
+    d.warm_end = bars_win[warm].time if len(bars_win) > warm else 0
+    d.dir = st.dir
+    d.phase = st.phase
+    d.origin = st.origin
+    d.origin_ref = st.origin_ref
+    d.bias_start = st.bias_start
+    d.has_level = st.has_level
+    d.lv_id = st.lv_id
+    d.lv_price = st.lv_price
+    d.lv_pivot = st.lv_pivot
+    d.lv_ext = st.lv_ext
+    d.lv_prev = st.lv_prev
+    d.lv_known = st.lv_known
+    d.frozen = st.frozen
+    d.anchor, d.anchor_name, d.anchor_ref, d.anchor_missing = anchor_binding(st, p, bars_all, n_avail)
+    d.nolv_now = (st.dir != 0 and not st.has_level)
+    d.nolv_since = rep.nolv_run_start
+    d.nolv_bars = rep.nolv_run_bars
+    d.nolv_cause = rep.nolv_cause
+    d.nolv_total = rep.nolv_total
+    d.nolv_runs = rep.nolv_runs
+    d.flips = rep.n_flips
+    d.last_flip = rep.last_flip
+    d.flips_after_run = rep.flips_after_run
+    d.nolv_why = why_no_level(bars_win, len(bars_win), p, st.dir) if d.nolv_now else ''
+    d.n_events = len(rep.events)
+    return d
+
+
+class Diag(object):
+    pass
+
+
+def diagnose(bars_all, n_avail, p, ev):
+    """Explain an evaluation: ev is the result of evaluate(bars_all, n_avail, p). Returns a Diag.
+    d.valid is False when no replay ran (no bars / SHORT_HISTORY)."""
+    d = Diag()
+    d.valid = ev.state is not None
+    d.reliable = ev.reliable
+    d.reason = ev.reason
+    d.n_avail = n_avail
+    d.r_eff = ev.r_eff
+    d.b_depth = ev.b_depth
+    d.warm = ev.warm
+    d.chk = ev.chk
+    if not d.valid:
+        return d
+    winA = bars_all[n_avail - ev.r_eff:n_avail]
+    winB = bars_all[n_avail - ev.b_depth:n_avail]
+    repA = replay(winA, ev.r_eff, p)
+    repB = replay(winB, ev.b_depth, p)
+    d.series_first = bars_all[0].time
+    d.series_last = bars_all[n_avail - 1].time
+    d.a = diag_side(repA, winA, bars_all, n_avail, p, ev.warm)
+    d.b = diag_side(repB, winB, bars_all, n_avail, p, ev.warm)
+    d.zone_start = d.b.warm_end
+    d.field_diff = first_diff_field(state_fields(repA.state, repA.tracks),
+                                    state_fields(repB.state, repB.tracks))
+    d.track_diff = ''
+    if d.field_diff is not None and d.field_diff[0] == 'EL':
+        d.track_diff = track_diff_text(repA.tracks, repB.tracks)
+    # events inside B's trusted region (the comparison zone)
+    za = [e for e in repA.events if e.bar_time >= d.zone_start]
+    zb = [e for e in repB.events if e.bar_time >= d.zone_start]
+    d.zone_na = len(za)
+    d.zone_nb = len(zb)
+    d.event_diff = None            # (index, text_a, text_b) of the first difference
+    d.event_count_diff = False
+    for i in range(min(len(za), len(zb))):
+        if za[i].text() != zb[i].text():
+            d.event_diff = (i, za[i], zb[i])
+            break
+    if d.event_diff is None and len(za) != len(zb):
+        d.event_count_diff = True
+        d.event_extra = (za[len(zb)] if len(za) > len(zb) else zb[len(za)], 'A' if len(za) > len(zb) else 'B')
+    # state agreement on the common bars (B's bars; A has chk more bars in front)
+    off = ev.r_eff - ev.b_depth
+    ndiff = 0
+    first_t = 0
+    last_t = 0
+    for j in range(ev.b_depth):
+        if repA.keys[j + off] != repB.keys[j]:
+            ndiff += 1
+            if first_t == 0:
+                first_t = winB[j].time
+            last_t = winB[j].time
+    d.common_bars = ev.b_depth
+    d.common_diff = ndiff
+    d.common_first_diff = first_t
+    d.common_last_diff = last_t
+    return d
+
+
+def t_or_dash(t):
+    return tx(t) if t != 0 else '-'
+
+
+def dir_phase(side):
+    if side.dir == 0:
+        return 'NONE'
+    return '%s/%s' % (dir_name(side.dir), side.phase)
+
+
+def side_line(label, side):
+    if side.has_level:
+        lv = '%s@%s known %s pivots %s/%s/%s%s' % (side.lv_id, pf(side.lv_price), tx(side.lv_known),
+                                                   tx(side.lv_pivot), tx(side.lv_ext), tx(side.lv_prev),
+                                                   ' FROZEN' if side.frozen else '')
+    else:
+        lv = 'none'
+    if side.anchor_missing:
+        anc = 'missing (%s)' % side.anchor_missing
+    elif side.anchor == 0:
+        anc = '-'
+    else:
+        anc = '%s via %s@%s' % (tx(side.anchor), side.anchor_name, tx(side.anchor_ref))
+    return '%s: %s origin %s ref %s since %s | level %s | anchor %s' % (
+        label, dir_phase(side), side.origin, t_or_dash(side.origin_ref), t_or_dash(side.bias_start), lv, anc)
+
+
+def nolv_line(label, side):
+    if not side.nolv_now:
+        if side.dir == 0:
+            return '%s: no bias (NONE)' % label
+        return '%s: level defined at the last bar; bars without a level in the window %d in %d run(s); flips %d (last %s)' % (
+            label, side.nolv_total, side.nolv_runs, side.flips, t_or_dash(side.last_flip))
+    return ('%s: level UNDEFINED since %s (%d bars, started by %s); runs %d, bars without level %d; flips in window %d '
+            '(last %s), flips after the run began %d; why: %s') % (
+        label, tx(side.nolv_since), side.nolv_bars, side.nolv_cause, side.nolv_runs, side.nolv_total,
+        side.flips, t_or_dash(side.last_flip), side.flips_after_run, side.nolv_why)
+
+
+def diag_lines(d):
+    """the diagnostic report, one line per list item (Experts log / replay tool / tests)"""
+    if not d.valid:
+        return ['DIAG1 no replay ran: %s (bars available %d)' % (d.reason, d.n_avail)]
+    out = []
+    out.append('DIAG1 %s reasons=%s | series %s..%s (%d bars) | A window %s..%s (%d bars) warm-up ends %s | '
+               'B window %s..%s (%d bars) warm-up ends %s | comparison zone from %s' % (
+                   'RELIABLE' if d.reliable else 'LIMITED', d.reason if not d.reliable else '-',
+                   tx(d.series_first), tx(d.series_last), d.n_avail,
+                   tx(d.a.start), tx(d.series_last), d.a.bars, tx(d.a.warm_end),
+                   tx(d.b.start), tx(d.series_last), d.b.bars, tx(d.b.warm_end), tx(d.zone_start)))
+    out.append('DIAG2 ' + side_line('A', d.a))
+    out.append('DIAG3 ' + side_line('B', d.b))
+    if d.field_diff is None:
+        out.append('DIAG4 final states A and B: all %d fields equal' % len(STATE_FIELDS))
+    else:
+        lab, va, vb = d.field_diff
+        txt = 'DIAG4 first differing field of %s: %s (%s) A=%s B=%s' % (
+            '>'.join(STATE_FIELDS), lab, FIELD_MEANING[lab], va, vb)
+        if d.track_diff:
+            txt += ' | ' + d.track_diff
+        out.append(txt)
+    if d.event_diff is not None:
+        i, ea, eb = d.event_diff
+        out.append('DIAG5 first differing event in the zone: #%d A=%s B=%s' % (i, ea.text(), eb.text()))
+    elif d.event_count_diff:
+        e, who = d.event_extra
+        out.append('DIAG5 events in the zone: count differs: nA %d vs nB %d (first extra on %s: %s)' % (
+            d.zone_na, d.zone_nb, who, e.text()))
+    else:
+        out.append('DIAG5 events in the zone: identical (%d)' % d.zone_na)
+    out.append('DIAG6 ' + nolv_line('A', d.a))
+    out.append('DIAG7 ' + nolv_line('B', d.b))
+    if d.common_diff == 0:
+        out.append('DIAG8 state keys agree on all %d common bars' % d.common_bars)
+    else:
+        out.append('DIAG8 state keys differ on %d of %d common bars, first %s, last %s' % (
+            d.common_diff, d.common_bars, tx(d.common_first_diff), tx(d.common_last_diff)))
+    return out
+
+
+def diag_text(d):
+    return '\n'.join(diag_lines(d))
+
+
+# ---------------------------------------------------- TrackChanges decision ----
+C_BASELINE = 'BASELINE'          # EA only: the baseline was set at this evaluation
+TC_BASELINE = 'BASELINE'
+TC_REPORT = 'REPORT'
+TC_REDERIVE = 'REDERIVE'
+
+
+def track_changes_mode(consume_status, prev_valid):
+    """pure decision of the EA's TrackChanges (mirror of H3TrackChangesMode). A change between two
+    RELIABLE evaluations is a market change only when the consumer accepted the step as exactly the
+    next closed bar with the previous state reproduced (OK). After REDERIVED, GAP or NOTHING_NEW a
+    difference comes from the rebuild (or from missed bars with an unknown date): never reported."""
+    if consume_status == C_BASELINE or not prev_valid:
+        return TC_BASELINE
+    if consume_status == C_OK:
+        return TC_REPORT
+    return TC_REDERIVE
+
+
+def snapshot_of(ev):
+    st = ev.state
+    return (dir_name(st.dir), st.t2dir, st.phase if st.dir != 0 else '-')
+
+
+def track_step(prev_snapshot, ev, consume_status, fixed=True):
+    """model of the EA's TrackChanges for one reliable evaluation. Returns (reported, rederived,
+    new_snapshot). fixed=False is the LEGACY behaviour (every difference between two reliable
+    evaluations was reported as a change), kept only to show the defect in a test."""
+    cur = snapshot_of(ev)
+    mode = track_changes_mode(consume_status, prev_snapshot is not None)
+    if not fixed:
+        mode = TC_REPORT if prev_snapshot is not None else TC_BASELINE
+    reported = []
+    rederived = []
+    if mode != TC_BASELINE:
+        names = ('BIAS', 'T002', 'PHASE')
+        for i in range(3):
+            if cur[i] != prev_snapshot[i]:
+                if i == 2 and cur[0] != prev_snapshot[0]:
+                    continue            # a phase change next to a bias change is not listed separately
+                (reported if mode == TC_REPORT else rederived).append('%s %s -> %s' % (names[i], prev_snapshot[i], cur[i]))
+    return reported, rederived, cur
+
+
+# ------------------------------------------------------------- CSV export ----
+# Mirror of H3CsvName / H3CsvHeader / H3CsvRow (pure text; the EA writes the file).
+class Export(object):
+    def __init__(self, **kw):
+        self.source = 'EA'
+        self.symbol = 'XAUUSD'
+        self.mode = 'LIVE'
+        self.asof = 0
+        self.digits = 2
+        self.period = PERIOD
+        self.left = 2
+        self.right = 2
+        self.lookback = 300
+        self.rebuild = 1000
+        self.r_req = 1000
+        self.r_eff = 1000
+        self.b_depth = 700
+        self.chk = 300
+        self.warm = 300
+        self.hard_cap = 5000
+        self.bars = 0
+        self.first = 0
+        self.last = 0
+        self.flag = ''
+        self.reason = ''
+        self.note = ''
+        for k, v in kw.items():
+            setattr(self, k, v)
+
+
+def csv_safe_symbol(symbol):
+    return ''.join(c if (c.isascii() and (c.isalnum() or c in '._-')) else '_' for c in symbol)
+
+
+def csv_time_text(t):
+    return time.strftime('%Y.%m.%d %H:%M', time.gmtime(t))
+
+
+def csv_name(symbol, last):
+    return 'velo_t003_diag_%s_%s.csv' % (csv_safe_symbol(symbol), ts(last))
+
+
+def csv_header(x):
+    lines = ['# velo_t003_diag v1',
+             '# source=' + x.source,
+             '# symbol=' + x.symbol,
+             '# period=H4',
+             '# period_seconds=%d' % x.period,
+             '# digits=%d' % x.digits,
+             '# mode=' + x.mode,
+             '# asof_input=' + ('0' if x.asof == 0 else csv_time_text(x.asof)),
+             '# first_bar_open=' + csv_time_text(x.first),
+             '# last_closed_bar_open=' + csv_time_text(x.last),
+             '# bars=%d' % x.bars,
+             '# left=%d' % x.left,
+             '# right=%d' % x.right,
+             '# lookback=%d' % x.lookback,
+             '# rebuild_input=%d' % x.rebuild,
+             '# r_req=%d' % x.r_req,
+             '# r_eff=%d' % x.r_eff,
+             '# b_depth=%d' % x.b_depth,
+             '# check_depth=%d' % x.chk,
+             '# warm_up=%d' % x.warm,
+             '# hard_cap=%d' % x.hard_cap,
+             '# result_flag=' + x.flag,
+             '# result_reason=' + x.reason,
+             '# note=' + (x.note if x.note else '-'),
+             'time_epoch,time_server,open,high,low,close,tick_volume,spread,real_volume']
+    return '\n'.join(lines)
+
+
+def csv_sample():
+    """the fixed sample both test scripts use for the text-building checks (generated into the MQL5 test)"""
+    x = Export(symbol='XAUUSD', mode='HISTORICAL', asof=T0 + 100 * PERIOD, bars=3, first=T0, last=T0 + 2 * PERIOD,
+               flag='LIMITED_BY_HISTORY', reason='AB_STATE_DIFF', note='')
+    row = csv_row(T0 + 40 * PERIOD, 4120.5, 4130.25, 4118.0, 4127.75, 2, 1234, 12, 0)
+    return x, row, csv_name('XAUUSD.r', T0 + PERIOD)
+
+
+def csv_row(t, o, h, l, c, digits, tick_volume=0, spread=0, real_volume=0):
+    f = '%%.%df' % digits
+    return '%d,%s,%s,%s,%s,%s,%d,%d,%d' % (t, csv_time_text(t), f % o, f % h, f % l, f % c,
+                                           tick_volume, spread, real_volume)
 
 
 # ================================================================ builders ====
@@ -1601,6 +2057,25 @@ def sc17_quiet_tail():
     return sc_case_c(24).bars()
 
 
+def sc_old_frozen(prefix, tail):
+    """HYPOTHESIS H1 evidence (SYNTHETIC): `prefix` quiet bars, a bear structure with a wick above
+    the protecting high (HOLD, frozen), then `tail` bars of a monotone decline that never returns
+    to the level and forms no swing. The frozen HOLD never ends, so its age grows with the tail."""
+    s = Series(90)
+    if prefix:
+        pad(s, prefix)
+    s.to(120).to(100).to(112)
+    s.pts([108, 106, 96, 86, 86, 82, 78])
+    s.to(108)
+    s.bar(120, 106, 110)
+    s.c = 110
+    c = 110.0
+    for _ in range(tail):
+        c -= 1.0
+        s.pts([c])
+    return s.bars()
+
+
 def sc_consumer_series():
     """converged BULL ACTIVE series (n = 64), the 65th bar is a structural wick"""
     s = sc_case_c(24)
@@ -1626,7 +2101,7 @@ def weekend_slots(n, start_pos):
 class Case(object):
     def __init__(self, name, kind, bars, lookback=20, rebuild=1000, hard_cap=5000, n_use=None):
         self.name = name
-        self.kind = kind          # 'R' raw replay, 'E' evaluate
+        self.kind = kind          # 'R' raw replay, 'E' evaluate, 'D' evaluate + diagnostics text
         self.bars = bars
         self.lookback = lookback
         self.rebuild = rebuild
@@ -1641,6 +2116,9 @@ def run_case(c):
     p = c.params()
     if c.kind == 'R':
         return replay_text(replay(c.bars, c.n_use, p))
+    if c.kind == 'D':
+        e = evaluate(c.bars, c.n_use, p)
+        return diag_text(diagnose(c.bars, c.n_use, p, e))
     return eval_text(evaluate(c.bars, c.n_use, p))
 
 
@@ -1726,6 +2204,28 @@ def build_cases():
     add('p17_reduced_depth_ok', sc16_converged_break(), 'E', rebuild=200)
     add('p17_failed_copy', sc16_converged_break(), 'E', rebuild=60, n_use=0)
     add('p17_hard_cap', sc16_converged_break(), 'E', rebuild=1000, hard_cap=61)
+    # DIAGNOSTICS cases (kind D): the expected text is the diagnostic report of the evaluation
+    for nm, src, kw in (('d_diag_p16b_ab_difference', 'p16b_ab_difference', {}),
+                        ('d_diag_p16e_event_only', 'p16e_event_only_diff', {}),
+                        ('d_diag_p16c_anchor_warmup', 'p16c_anchor_warmup', {}),
+                        ('d_diag_p16a_converged', 'p16a_converged_break', {}),
+                        ('d_diag_p16d_r140_old_bias', 'p16d_limit_r140', {}),
+                        ('d_diag_p16d_r60_reliable', 'p16d_limit_r60', {}),
+                        ('d_diag_count_differs', 'w_wick', {'lookback': 10, 'rebuild': 30}),
+                        ('d_diag_no_level_after_flip', 's_no_level_after_flip', {'lookback': 10, 'rebuild': 30, 'n_use': 35}),
+                        ('d_diag_short_history', 'p17_reduced_depth', {}),
+                        ('d_diag_failed_copy', 'p17_failed_copy', {})):
+        base = None
+        for x in cs:
+            if x.name == src:
+                base = x
+        assert base is not None, src
+        add(nm, base.bars, 'D', lookback=kw.get('lookback', base.lookback), rebuild=kw.get('rebuild', base.rebuild),
+            hard_cap=base.hard_cap, n_use=kw.get('n_use', base.n_use))
+    # HYPOTHESIS H1 (SYNTHETIC): a frozen HOLD that never ends makes the required depth grow with its age
+    b = sc_old_frozen(100, 190)
+    add('d_diag_frozen_old_limited', b, 'D', lookback=40, rebuild=223)
+    add('d_diag_frozen_old_converged', b, 'D', lookback=40, rebuild=323)
     _CASES = cs
     return cs
 
@@ -2777,6 +3277,313 @@ def test_consumer():
     check(consume_new(el, lim.bars[-2].time, PERIOD) == (C_NOT_RELIABLE, []), 'a LIMITED_BY_HISTORY evaluation emits no event')
 
 
+def test_24_diagnostics():
+    print('--- 24. diagnostics: ordered state fields, first differing field/event, windows, anchors, level undefined')
+    cases = build_cases()
+    # a. the ordered field list IS the state key
+    ok = True
+    n_r = 0
+    flips_ok = True
+    for c in cases:
+        if c.kind != 'R':
+            continue
+        rep = replay(c.bars, c.n_use, c.params())
+        n_r += 1
+        if ';'.join('%s=%s' % kv for kv in state_fields(rep.state, rep.tracks)) != state_key(rep.state, rep.tracks):
+            ok = False
+        if rep.flips_after_run != 0 or rep.n_flips != sum(1 for e in rep.events if e.type == EV_FLIP):
+            flips_ok = False
+    check(ok and n_r > 60 and [l for l, _ in state_fields(St(), [])] == list(STATE_FIELDS),
+          'the ordered state fields joined as label=value equal the state key (%d replays) and follow the documented order' % n_r)
+    check(flips_ok, 'no FLIP is ever dated after a "bias without a level" run began (a flip needs a level), flips counted from the events (%d replays)' % n_r)
+    anch_ok = True
+    n_anch = 0
+    for x in cases:
+        if x.kind not in ('E', 'D'):
+            continue
+        e_ = evaluate(x.bars, x.n_use, x.params())
+        if e_.state is None:
+            continue
+        d_ = diagnose(x.bars, x.n_use, x.params(), e_)
+        n_anch += 1
+        if d_.a.anchor != e_.anchor or d_.a.anchor_missing != e_.anchor_missing:
+            anch_ok = False
+    check(anch_ok and n_anch > 15, 'the anchor reported by the diagnostics (with the reference that binds it) equals the anchor of the evaluation (%d evaluations)' % n_anch)
+    # b. first differing field = first in the explicit order
+    base = [(l, 'x') for l in STATE_FIELDS]
+
+    def with_(**kv):
+        return [(l, kv.get(l, 'x')) for l in STATE_FIELDS]
+    check(first_diff_field(base, with_(PH='y', LV='y')) == ('PH', 'x', 'y'), 'two fields differ (PH, LV): the earlier one in the explicit order is named')
+    check(first_diff_field(base, with_(EL='y', LV='y')) == ('LV', 'x', 'y'), 'two fields differ (LV, EL): LV is named, EL is not')
+    check(first_diff_field(base, with_(BIAS='y', EL='y')) == ('BIAS', 'x', 'y') and first_diff_field(base, list(base)) is None,
+          'BIAS comes first; identical lists give none')
+    ta = [Track(0, 'F1'), Track(1, 'F2')]
+    tb = [Track(0, 'F1'), Track(1, 'F2')]
+    tb[1].invalid = True
+    check(track_diff_text(ta, tb) == 'track #1 A=F2:FRESH B=F2:INVALID (counts 2 vs 2)' and
+          track_diff_text(ta, ta[:1]) == 'track #1 A=F2:FRESH B=- (counts 2 vs 1)' and track_diff_text(ta, ta) == '',
+          'eligible-FVG tracks: the first differing track, or a count difference, is named; equal lists give nothing')
+
+    def dg(name):
+        c = case_by_name(name)
+        p = c.params()
+        ev = evaluate(c.bars, c.n_use, p)
+        return c, ev, diagnose(c.bars, c.n_use, p, ev)
+    # c. replay A and B differ in origin and in the first event (p16b)
+    c, ev, d = dg('p16b_ab_difference')
+    n = len(c.bars)
+    check((not d.reliable) and d.reason == 'AB_STATE_DIFF+AB_EVENT_DIFF' and d.field_diff == ('ORG', 'BREAK', 'SEED'),
+          'p16b: the first differing field is ORG (A=BREAK, B=SEED); both biases are BULL/HOLD with the same level')
+    i, ea, eb = d.event_diff
+    check(i == 0 and ea.type == EV_INT_SWEEP and eb.type == EV_SEED and ts(ea.bar_time) == '202601130800' and ts(eb.bar_time) == '202601120400',
+          'p16b: the first differing event of the zone is #0, A INTERNAL_SWEEP at 202601130800 versus B SEED at 202601120400 (absolute times)')
+    check(d.a.start == c.bars[0].time and d.a.bars == ev.r_eff and d.b.start == c.bars[n - ev.b_depth].time and d.b.bars == ev.b_depth and
+          d.a.warm_end == c.bars[ev.warm].time and d.b.warm_end == c.bars[n - ev.b_depth + ev.warm].time and
+          d.zone_start == ev.trusted_from == d.b.warm_end,
+          'p16b: window starts, bar counts, warm-up end times and the comparison-zone start are the absolute times of the bars used')
+    check(d.a.origin == 'BREAK' and d.b.origin == 'SEED' and d.a.frozen and d.b.frozen and d.a.anchor_name == 'lv_prev' and
+          d.a.anchor >= d.a.warm_end and d.a.origin_ref < d.b.start <= d.b.origin_ref,
+          'p16b: A\'s bias was set by a break dated before B starts (A origin ref before B\'s first bar), B can only seed later; the anchor (via lv_prev) is NOT in the warm-up here')
+    check(d.common_diff > 0 and d.common_first_diff >= d.b.start and 'DIAG4 first differing field of BIAS>PH>ORG>NR>LV>FRZ>WK>SW>REC>RSN>EL: ORG (origin) A=BREAK B=SEED' in diag_lines(d)[3],
+          'p16b: the state keys differ on some common bars and the report names ORG')
+    # d. same final state, only an event differs (p16e): level undefined since the flip, flips counted
+    c, ev, d = dg('p16e_event_only_diff')
+    i, ea, eb = d.event_diff
+    check(d.reason == 'AB_EVENT_DIFF' and d.field_diff is None and ea.type == EV_FLIP and eb.type == EV_BREAK_SET and ea.bar_time == eb.bar_time,
+          'p16e: all 11 final fields equal, the first differing event is A FLIP versus B BREAK_SET on the same bar')
+    check(d.a.nolv_now and d.b.nolv_now and d.a.nolv_cause == 'FLIP' and d.b.nolv_cause == 'BREAK_SET' and d.a.nolv_since == d.b.nolv_since and
+          d.a.flips == 1 and d.b.flips == 0 and d.a.flips_after_run == 0 and d.b.flips_after_run == 0 and d.a.nolv_why.startswith('NO_CANDIDATE'),
+          'p16e: the protecting level stayed UNDEFINED since the flip bar (A: FLIP, B: BREAK_SET), 0 flips since, and the reason is named (no candidate)')
+    # e. anchor in the warm-up only (p16c)
+    c, ev, d = dg('p16c_anchor_warmup')
+    check(d.reason == 'ANCHOR_IN_WARMUP' and d.field_diff is None and d.event_diff is None and not d.event_count_diff and
+          d.a.anchor_name == 'origin' and d.a.anchor < d.a.warm_end and d.b.anchor >= d.b.start,
+          'p16c: only the anchor reason: A\'s anchor (via origin) lies before A\'s warm-up end, the final states and the events agree')
+    # f. the triple reason of the real observation, on a synthetic series (p16d_limit_r140)
+    c, ev, d = dg('p16d_limit_r140')
+    check(d.reason == 'AB_STATE_DIFF+AB_EVENT_DIFF+ANCHOR_IN_WARMUP' and d.field_diff[0] == 'BIAS' and d.field_diff[1:] == ('BULL', 'BEAR') and
+          d.a.anchor_ref < d.b.start and d.a.anchor < d.a.warm_end and d.event_diff[1].type == EV_SEED and d.event_diff[2].type == EV_SEED,
+          'p16d r140 (SYNTHETIC): the same three reasons as the owner\'s observation: A keeps an old BULL bias (anchor older than B\'s window), B seeds BEAR later')
+    # g. count difference in the zone
+    c, ev, d = dg('w_wick') if False else (None, None, None)
+    cd = case_by_name('d_diag_count_differs')
+    ev = evaluate(cd.bars, cd.n_use, cd.params())
+    d = diagnose(cd.bars, cd.n_use, cd.params(), ev)
+    check(d.event_diff is None and d.event_count_diff and d.zone_na != d.zone_nb and ('count differs: nA %d vs nB %d' % (d.zone_na, d.zone_nb)) in diag_lines(d)[4],
+          'count difference in the comparison zone is reported as "count differs: nA vs nB" with the first extra event')
+    # h. reliable and unavailable cases
+    c, ev, d = dg('p16a_converged_break')
+    check(d.reliable and d.field_diff is None and d.event_diff is None and not d.event_count_diff and d.common_diff == 0 and
+          diag_lines(d)[0].startswith('DIAG1 RELIABLE reasons=-'),
+          'p16a (reliable): fields equal, events identical, keys agree on every common bar')
+    d1 = diagnose(case_by_name('p17_reduced_depth').bars, 50, case_by_name('p17_reduced_depth').params(),
+                  evaluate(case_by_name('p17_reduced_depth').bars, 50, case_by_name('p17_reduced_depth').params()))
+    c0 = case_by_name('p17_failed_copy')
+    d2 = diagnose(c0.bars, 0, c0.params(), evaluate(c0.bars, 0, c0.params()))
+    check((not d1.valid) and (not d2.valid) and len(diag_lines(d1)) == 1 and len(diag_lines(d2)) == 1 and
+          diag_lines(d1)[0] == 'DIAG1 no replay ran: SHORT_HISTORY (bars available 50)' and
+          diag_lines(d2)[0] == 'DIAG1 no replay ran: NO_BARS (bars available 0)',
+          'SHORT_HISTORY and a failed copy: no replay ran, the report says so in one line')
+    # i. level undefined after a flip (replay level): the prefix that ends right after the flip bar
+    c = case_by_name('s_no_level_after_flip')
+    ft = [e.bar_time for e in replay(c.bars, c.n_use, c.params()).events if e.type == EV_FLIP]
+    fi = [i for i, b in enumerate(c.bars) if ft and b.time == ft[0]][0]
+    rep = replay(c.bars, fi + 2, c.params())          # the flip bar and one more bar
+    st = rep.state
+    check(st.dir != 0 and not st.has_level and rep.nolv_cause == 'FLIP' and rep.nolv_run_start == ft[0] and rep.flips_after_run == 0 and
+          rep.nolv_run_bars == 2 and rep.n_flips == 1 and rep.nolv_runs >= 1,
+          's_no_level_after_flip: right after the FLIP the replay has a bias without a level since the flip bar (run of 2 bars), no flip since')
+    rep2 = replay(c.bars, c.n_use, c.params())
+    check(rep2.state.has_level and rep2.nolv_run_start == 0 and rep2.nolv_runs >= 1 and rep2.nolv_total >= 2,
+          's_no_level_after_flip: when a level is defined again the run is closed (counted in runs and total, not "now")')
+    # j. behaviour neutral, deterministic, no lookahead
+    same = True
+    for x in cases:
+        if x.kind == 'E':
+            t1 = eval_text(evaluate(x.bars, x.n_use, x.params()))
+            diagnose(x.bars, x.n_use, x.params(), evaluate(x.bars, x.n_use, x.params()))
+            if eval_text(evaluate(x.bars, x.n_use, x.params())) != t1:
+                same = False
+    check(same, 'calling the diagnostics does not change any evaluation (all E cases)')
+    c = case_by_name('p16b_ab_difference')
+    nn = len(c.bars) - 6
+    garbage = [Bar(b.time, 9999.0, -9999.0, 5000.0) for b in c.bars[nn:]]
+    pp = c.params()
+    pp.rebuild = nn
+    e1 = evaluate(c.bars, nn, pp)
+    e2 = evaluate(c.bars[:nn] + garbage, nn, pp)
+    check(diag_text(diagnose(c.bars, nn, pp, e1)) == diag_text(diagnose(c.bars[:nn] + garbage, nn, pp, e2)) and
+          diag_text(diagnose(c.bars, nn, pp, e1)) == diag_text(diagnose(list(c.bars), nn, pp, e1)),
+          'the diagnostics read only bars[0..n_avail-1] (later bars replaced by garbage give the same report) and are deterministic')
+    # k. every diagnostic time is absolute (12 digits), none is a window index
+    txt = '\n'.join(diag_text(diagnose(x.bars, x.n_use, x.params(), evaluate(x.bars, x.n_use, x.params()))) for x in cases if x.kind == 'D')
+    import re
+    check(len(re.findall(r'\b\d{12}\b', txt)) > 50 and not re.search(r'idx|index|window index', txt),
+          'the diagnostic texts carry absolute times (YYYYMMDDHHMM) and no window index')
+
+
+def test_27_hypothesis_frozen_age():
+    print('--- 27. HYPOTHESIS H1 on SYNTHETIC series: a frozen HOLD has no end, so the depth it needs grows with its age')
+    rows = []
+    for R, tail in ((223, 90), (223, 190), (323, 190), (323, 290), (423, 290), (423, 390)):
+        b = sc_old_frozen(100, tail)
+        p = Params(lookback=40, rebuild=R)
+        ev = evaluate(b, len(b), p)
+        d = diagnose(b, len(b), p, ev)
+        rows.append((R, tail, len(b), ev.reliable, ev.reason, dir_phase(d.a), dir_phase(d.b), d))
+        print('  R=%d tail=%d n=%d -> %s | A %s | B %s' % (R, tail, len(b), ev.reason, dir_phase(d.a), dir_phase(d.b)))
+    check([r[3] for r in rows] == [True, False, True, False, True, False],
+          'for every fixed depth R the evaluation is reliable while the frozen HOLD fits in B (tail 90/190/290) and LIMITED once the tail grows by 100 bars (SYNTHETIC)')
+    lim = [r for r in rows if not r[3]]
+    check(all(r[4] == 'AB_STATE_DIFF+ANCHOR_IN_WARMUP' and r[5] == 'BEAR/HOLD' and r[6] == 'NONE' for r in lim) and
+          all(r[7].a.frozen and r[7].a.anchor_ref < r[7].b.start for r in lim),
+          'the LIMITED rows show exactly the cause: A holds a frozen BEAR/HOLD whose reference bars lie before B\'s first bar, B sees no structure and is NONE')
+    ok = [r for r in rows if r[3]]
+    check(all(r[5] == 'BEAR/HOLD' and r[6] == 'BEAR/HOLD' for r in ok),
+          'with a deeper R the same frozen HOLD is inside B and both replays agree: the cure by depth only works until the HOLD is older than R minus the check depth')
+
+
+def sim_ea_flow(bars, p, ns, fixed=True):
+    """model of the EA flow per evaluation: evaluate_latest, consumer (cursor kept over unreliable
+    steps, as the EA does), TrackChanges decision. Returns [(n, status, reported, rederived)]"""
+    cursor = 0
+    snap = None
+    log = []
+    for n in ns:
+        ev = evaluate_latest(bars[:n], n, p)
+        if not ev.reliable:
+            snap = None
+            log.append((n, 'NOT_RELIABLE', [], []))
+            continue
+        if cursor == 0:
+            cursor = baseline_cursor(ev)
+            status = C_BASELINE
+        else:
+            status, _ = consume_new(ev, cursor, p.period)
+            if status in (C_OK, C_REDERIVED, C_GAP):
+                cursor = ev.last_time
+        rep, red, snap = track_step(snap, ev, status, fixed)
+        log.append((n, status, rep, red))
+    return log
+
+
+def test_25_trackchanges():
+    print('--- 25. TrackChanges after GAP / RE-DERIVATION: a rebuild difference is never a market change')
+    check(track_changes_mode(C_OK, True) == TC_REPORT and track_changes_mode(C_REDERIVED, True) == TC_REDERIVE and
+          track_changes_mode(C_GAP, True) == TC_REDERIVE and track_changes_mode(C_NOTHING_NEW, True) == TC_REDERIVE and
+          track_changes_mode(C_OK, False) == TC_BASELINE and track_changes_mode(C_BASELINE, True) == TC_BASELINE and
+          track_changes_mode(C_GAP, False) == TC_BASELINE,
+          'decision table: only OK with a previous snapshot reports; REDERIVED, GAP and NOTHING_NEW re-derive silently; no snapshot or a baseline stores it')
+    p = Params(lookback=20, rebuild=1000)
+    base = case_by_name('p16a_converged_break').bars
+    wick = Bar(base[-1].time + PERIOD, 135.0, 104.0, 112.0)
+    quiet = [Bar(base[-1].time + 2 * PERIOD, 115.0, 105.0, 110.0), Bar(base[-1].time + 3 * PERIOD, 116.0, 106.0, 111.0)]
+    allb = base + [wick] + quiet
+    n0 = len(base)
+    log = sim_ea_flow(allb, p, [n0, n0 + 1, n0 + 2, n0 + 3])
+    check([x[1] for x in log] == [C_BASELINE, C_OK, C_OK, C_OK],
+          'consecutive polling: baseline, then three OK steps (exactly the next closed bar each time)')
+    check(log[1][2] == ['PHASE ACTIVE -> HOLD'] and log[2][2] == [] and log[3][2] == ['T002 MIXED -> BEARISH'] and all(not x[3] for x in log),
+          'consecutive polling: each change is reported once, at the bar that caused it (PHASE at the wick bar, T002 two bars later), none re-derived')
+    gap_new = sim_ea_flow(allb, p, [n0, n0 + 3], fixed=True)
+    gap_old = sim_ea_flow(allb, p, [n0, n0 + 3], fixed=False)
+    check(gap_new[1][1] == C_GAP and gap_new[1][2] == [] and sorted(gap_new[1][3]) == ['PHASE ACTIVE -> HOLD', 'T002 MIXED -> BEARISH'],
+          'FIXED: bars were missed (GAP): the differences are NOT reported as market changes, they are logged as a re-derivation')
+    check(sorted(gap_old[1][2]) == ['PHASE ACTIVE -> HOLD', 'T002 MIXED -> BEARISH'],
+          'LEGACY (documents the defect): the same GAP step reported both as changes of the latest bar although the wick was two bars before it')
+    e = evaluate_latest(base, n0, p)
+    prev = ('BEAR', 'BEARISH', 'ACTIVE')
+    r1 = track_step(prev, e, C_REDERIVED, True)
+    r2 = track_step(prev, e, C_NOTHING_NEW, True)
+    r3 = track_step(prev, e, C_OK, True)
+    r4 = track_step(prev, e, C_REDERIVED, False)
+    check(r1[0] == [] and len(r1[1]) >= 1 and r2[0] == [] and len(r2[1]) >= 1 and len(r3[0]) >= 1 and len(r4[0]) >= 1,
+          'a bias/T002 difference after REDERIVED or NOTHING_NEW is only a re-derivation (fixed); the legacy behaviour reported it; after OK it is reported')
+    lim = case_by_name('p16b_ab_difference')
+    log2 = sim_ea_flow(lim.bars, lim.params(), [len(lim.bars) - 1, len(lim.bars)])
+    check(all(x[2] == [] and x[3] == [] for x in log2), 'a LIMITED evaluation reports no change and drops the snapshot')
+
+
+def test_26_csv_export():
+    print('--- 26. candle export (text building) and the offline replay of the CSV')
+    import tempfile
+    check(csv_name('XAUUSD', T0) == 'velo_t003_diag_XAUUSD_202601050000.csv' and csv_name('XAUUSD.r', T0 + PERIOD) == 'velo_t003_diag_XAUUSD.r_202601050400.csv' and
+          csv_name('XAU/USD #1', T0) == 'velo_t003_diag_XAU_USD__1_202601050000.csv',
+          'file name velo_t003_diag_<symbol>_<last closed bar>.csv; characters outside [A-Za-z0-9._-] become _')
+    tt = T0 + 40 * PERIOD
+    check(csv_time_text(tt) == '2026.01.11 16:00' and csv_row(tt, 4120.5, 4130.25, 4118.0, 4127.75, 2, 1234, 12, 0) ==
+          '%d,2026.01.11 16:00,4120.50,4130.25,4118.00,4127.75,1234,12,0' % tt,
+          'a row: epoch, readable server time, open high low close with the symbol digits, tick volume, spread, real volume')
+    x = Export(symbol='XAUUSD', mode='HISTORICAL', asof=T0 + 100 * PERIOD, bars=3, first=T0, last=T0 + 2 * PERIOD, flag='LIMITED_BY_HISTORY',
+               reason='AB_STATE_DIFF', note='')
+    hl = csv_header(x).split('\n')
+    check(hl[0] == '# velo_t003_diag v1' and '# asof_input=2026.01.21 16:00' in hl and '# mode=HISTORICAL' in hl and '# note=-' in hl and
+          hl[-1] == 'time_epoch,time_server,open,high,low,close,tick_volume,spread,real_volume' and '# result_reason=AB_STATE_DIFF' in hl and
+          '# lookback=300' in hl and '# warm_up=300' in hl and '# check_depth=300' in hl,
+          'header: symbol, mode, as-of, lookback, rebuild, depths, warm-up, check depth, result, then the column line')
+    # roundtrip on a SYNTHETIC case: write, read, replay -> same evaluation and diagnostics
+    import t003_replay_csv as rc
+    c = case_by_name('p16d_limit_r140')
+    p = c.params()
+    bars = [Bar(b.time, float('%.2f' % b.high), float('%.2f' % b.low), float('%.2f' % b.close)) for b in c.bars]
+    n = len(bars)
+    ev = evaluate(bars, n, p)
+    d = diagnose(bars, n, p, ev)
+    xx = Export(source='SYNTHETIC test data (t003_reference_test case p16d_limit_r140), not market data', symbol='SYNTH', mode='LIVE', asof=0,
+                digits=2, left=p.left, right=p.right, lookback=p.lookback, rebuild=p.rebuild, r_req=ev.r_req, r_eff=ev.r_eff, b_depth=ev.b_depth,
+                chk=ev.chk, warm=ev.warm, hard_cap=p.hard_cap, bars=n, first=bars[0].time, last=bars[-1].time, flag=ev.flag, reason=ev.reason, note=ev.note)
+    lines = [csv_header(xx)] + [csv_row(b.time, b.close, b.high, b.low, b.close, 2, 1, 0, 0) for b in bars]
+    d_ = tempfile.mkdtemp()
+    path = os.path.join(d_, csv_name('SYNTH', bars[-1].time))
+    with open(path, 'w') as fh:
+        fh.write('\n'.join(lines) + '\n')
+    h, p2, bars2, ev2, d2, repro = rc.run_csv(path)
+    check(len(bars2) == n and all(a.time == b.time and a.high == b.high and a.low == b.low and a.close == b.close for a, b in zip(bars, bars2)),
+          'roundtrip (SYNTHETIC): the CSV gives back the same %d closed bars (time, high, low, close)' % n)
+    check(eval_text(ev2) == eval_text(ev) and diag_text(d2) == diag_text(d) and repro is True and
+          (p2.left, p2.right, p2.lookback, p2.rebuild, p2.hard_cap) == (p.left, p.right, p.lookback, p.rebuild, p.hard_cap),
+          'roundtrip (SYNTHETIC): the replay of the file gives the same evaluation, the same diagnostics and REPRODUCED (flag and reason equal to the header)')
+    # a header whose result differs is NOT reproduced; as-of / overrides are not compared
+    with open(path) as fh:
+        txt_ = fh.read()
+    bad = os.path.join(d_, 'bad.csv')
+    with open(bad, 'w') as fh:
+        fh.write(txt_.replace('# result_flag=LIMITED_BY_HISTORY', '# result_flag=CONVERGED'))
+    check(rc.run_csv(bad)[5] is False and rc.run_csv(path, {'rebuild': 100})[5] is None and rc.run_csv(path, None, bars[-6].time + PERIOD)[5] is None,
+          'a header result that differs is NOT REPRODUCED; with an overridden depth or an as-of time no comparison is claimed')
+    cut = rc.run_csv(path, None, bars[-6].time + PERIOD)
+    check(len(cut[2]) == n - 5 and cut[2][-1].time == bars[-6].time, '--asof keeps only the bars closed by that time (here the last 5 bars are dropped)')
+    errs = 0
+    ls = txt_.split('\n')
+    first_row = [i for i, l in enumerate(ls) if l and l[0].isdigit()][0]
+    bad_time = list(ls)
+    bad_time[first_row] = bad_time[first_row].replace('2026.', '2025.', 1)
+    bad_count = [l.replace('# bars=%d' % n, '# bars=%d' % (n + 1)) for l in ls]
+    no_rows = ls[:first_row]
+    for mut in (bad_time, bad_count, no_rows):
+        pth = os.path.join(d_, 'm%d.csv' % errs)
+        with open(pth, 'w') as fh:
+            fh.write('\n'.join(mut) + '\n')
+        try:
+            rc.run_csv(pth)
+        except rc.CsvError:
+            errs += 1
+    check(errs == 3, 'a time text that does not match the epoch, a wrong bar count and a file with no bars are refused (CsvError), never replayed')
+    dup = txt_.split('\n')
+    rows_at = [i for i, l in enumerate(dup) if l and l[0].isdigit()]
+    dup[rows_at[3]] = dup[rows_at[2]]
+    pth = os.path.join(d_, 'dup.csv')
+    with open(pth, 'w') as fh:
+        fh.write('\n'.join(dup))
+    try:
+        rc.run_csv(pth)
+        refused = False
+    except rc.CsvError:
+        refused = True
+    check(refused, 'bars that are not strictly chronological (a duplicated row) are refused')
+
+
 def test_deferred():
     print('--- deferred groups (NOT counted as PASS)')
     deferred('test 9 (EA lifecycle and reload: no duplicate objects, clear/rebuild as in T002)')
@@ -2802,15 +3609,20 @@ def emit_mql():
     for i, c in enumerate(cases):
         exp = run_case(c)
         assert '"' not in exp and '\\' not in exp
-        flat = ','.join('%r,%r,%r' % (b.high, b.low, b.close) for b in c.bars)
+        vals = []
+        for b in c.bars:
+            vals += ['%r' % b.high, '%r' % b.low, '%r' % b.close]
+        # at most 24 numbers per source line (long series would otherwise give very long lines)
+        flat = ',\n           '.join(','.join(vals[j:j + 24]) for j in range(0, len(vals), 24))
         out.append('      case %d:' % i)
         out.append('        {')
         out.append('         double d[] = {%s};' % flat)
         out.append('         name = "%s"; kind = %d; lookback = %d; rebuild = %d; hard_cap = %d;' % (
-            c.name, 0 if c.kind == 'R' else 1, c.lookback, c.rebuild, c.hard_cap))
+            c.name, {'R': 0, 'E': 1, 'D': 2}[c.kind], c.lookback, c.rebuild, c.hard_cap))
         out.append('         expected = "";')
         for part in chunks(exp):
-            out.append('         expected += "%s";' % part)
+            # diagnostics texts hold line breaks: escape them inside the MQL5 string literal
+            out.append('         expected += "%s";' % part.replace('\n', '\\n'))
         first = (c.bars[0].time - T0) // PERIOD
         assert T0 + first * PERIOD == c.bars[0].time
         slots = [(b.time - T0) // PERIOD for b in c.bars]
@@ -2827,6 +3639,18 @@ def emit_mql():
         out.append('        }')
     out.append('     }')
     out.append('  }')
+    x, row, nm = csv_sample()
+    out.append('string T3CsvExpectedHeader(void)')
+    out.append('  {')
+    out.append('   string h = "";')
+    hl = csv_header(x).split('\n')
+    for i, line in enumerate(hl):
+        assert '"' not in line and '\\' not in line
+        out.append('   h += "%s%s";' % (line, '\\n' if i < len(hl) - 1 else ''))
+    out.append('   return(h);')
+    out.append('  }')
+    out.append('string T3CsvExpectedRow(void) { return("%s"); }' % row)
+    out.append('string T3CsvExpectedName(void) { return("%s"); }' % nm)
     out.append('// END GENERATED CASE DATA')
     return '\n'.join(out)
 
@@ -2858,6 +3682,10 @@ def main():
     test_21_no_fixed_count()
     test_22_freeze_internal()
     test_23_anchor_by_bars()
+    test_24_diagnostics()
+    test_25_trackchanges()
+    test_26_csv_export()
+    test_27_hypothesis_frozen_age()
     test_ids_and_windows()
     test_consumer()
     test_deferred()

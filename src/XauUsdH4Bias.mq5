@@ -28,6 +28,15 @@
 //|  differ; never assume equal). Only H4 bars CLOSED by then are    |
 //|  used, no live price is read, the picture is static.             |
 //|                                                                  |
+//|  DIAGNOSTICS (InpDiagnostics, default on): when the evaluation is |
+//|  LIMITED_BY_HISTORY the Experts log (and the panel) say WHY: the |
+//|  first differing field and event between replays A and B, origin,|
+//|  level, anchors, window starts, warm-up ends, level undefined.   |
+//|  CANDLE EXPORT (InpExportCandles, default OFF): writes the closed |
+//|  bars used by the evaluation to MQL5/Files/velo_t003_diag_*.csv  |
+//|  (closed bars only; no trading API) so a real case can be        |
+//|  replayed offline with tests/t003_replay_csv.py.                 |
+//|                                                                  |
 //|  Does NOT: send, modify or close orders; use M5/M15; draw the    |
 //|  intrabar overlay (P12) or the target (P13); compute entries,    |
 //|  stop loss, take profit or lot size. The two entry-block flags   |
@@ -68,6 +77,10 @@ input int              InpLeftBars      = 2;                   // Swing: closed 
 input int              InpRightBars     = 2;                   // Swing: closed bars on the right (1..10)
 input int              InpLookbackBars  = 300;                 // L: warm-up and A/B check depth, closed H4 bars (clamped 50..1000)
 input int              InpRebuildBars   = 1000;                // R: closed H4 bars replayed (raised to 3*L, capped at 5000)
+
+input group "Diagnostics (why LIMITED_BY_HISTORY)"
+input bool             InpDiagnostics   = true;                // Log (Experts) and show (panel) the A/B diagnostics when the evaluation is LIMITED_BY_HISTORY
+input bool             InpExportCandles = false;               // Write the closed-bar set of the evaluation to MQL5/Files/velo_t003_diag_<symbol>_<last bar>.csv (closed bars only)
 
 input group "Historical review (0 = live mode)"
 input datetime         InpAsOfTime      = 0;                   // AsOfTime: BROKER/SERVER time as shown by MT5 - NOT UTC, NOT TradingView chart time (they can differ; never assume equal). 0 = live mode
@@ -117,6 +130,15 @@ string            g_new_ids[];
 int               g_n_new    = 0;
 int               g_new_total = 0;
 string            g_cons_text = "";
+int               g_cons_status = H3_C_BASELINE;   // consumer status of the last evaluation (TrackChanges input)
+
+//--- diagnostics and candle export
+SH3Diag           g_diag;
+string            g_diag_lines[];
+int               g_ndiag      = 0;
+string            g_diag_key   = "";
+string            g_export_key = "";
+string            g_export_text = "";
 
 //--- changes observed while running (live only), and the previous reliable snapshot
 bool              g_prev_valid = false;
@@ -146,6 +168,8 @@ int  CopyClosedSet(MqlRates &out[], datetime &oldest, bool &newest_ok);
 void EvaluateAndDraw(const string was_cleared);
 void ConsumeEvents(void);
 void TrackChanges(void);
+void RunDiagnostics(void);
+void ExportCandles(void);
 void LogEvaluation(void);
 void PushChange(const string text);
 void RenderPanel(void);
@@ -164,6 +188,9 @@ void ResetEval(void)
    g_ev.last_time = 0;
    ArrayResize(g_tracks, 0);
    ArrayResize(g_events, 0);
+   H3DiagInit(g_diag);
+   ArrayResize(g_diag_lines, 0);
+   g_ndiag = 0;
   }
 
 int OnInit(void)
@@ -176,6 +203,10 @@ int OnInit(void)
    g_n_new = 0;
    g_new_total = 0;
    g_cons_text = "";
+   g_cons_status = H3_C_BASELINE;
+   g_diag_key = "";
+   g_export_key = "";
+   g_export_text = "";
    g_prev_valid = false;
    g_nchanges = 0;
    g_last_flag_text = "";
@@ -223,6 +254,8 @@ int OnInit(void)
       PrintFormat("NOTICE: rebuild depth R=%d requested, %d closed bars are copied (R is at least 3*L and at most %d)",
                   InpRebuildBars, g_depth, g_params.hard_cap);
 
+   PrintFormat("T003 diagnostics: log/panel %s | candle export %s (closed bars only; file in MQL5\\Files of the terminal data folder)",
+               (InpDiagnostics ? "ON" : "off"), (InpExportCandles ? "ON" : "off"));
    Print("================ T003 H4 bias (visual) ================");
    Print("Visual validation only. NO ORDER FUNCTIONS ARE PRESENT IN THIS EA.");
    Print("All rules are PROPOSALS and await client validation (not client answers).");
@@ -437,7 +470,99 @@ void EvaluateAndDraw(const string was_cleared)
    if(!g_hist)
       TrackChanges();
    LogEvaluation();
+   RunDiagnostics();
+   ExportCandles();
    g_dirty = true;
+  }
+
+//+------------------------------------------------------------------+
+//| RunDiagnostics: once per evaluation that is LIMITED_BY_HISTORY    |
+//| (and once per last bar and reason): replays A and B are compared  |
+//| again and the findings are logged (DIAG1..DIAG8) and kept for the |
+//| panel. Behaviour neutral: the evaluation itself is not changed.   |
+//+------------------------------------------------------------------+
+void RunDiagnostics(void)
+  {
+   ArrayResize(g_diag_lines, 0);
+   g_ndiag = 0;
+   if(!InpDiagnostics || g_ev.reliable || g_n <= 0)
+     {
+      g_diag_key = "";
+      return;
+     }
+   H3Diagnose(g_bars, g_n, g_params, g_ev, g_diag);
+   g_ndiag = H3DiagLines(g_diag, g_diag_lines);
+   string key = H3Tx(g_ev.last_time) + "|" + g_ev.reason + "|" + IntegerToString(g_n);
+   if(key == g_diag_key)
+      return;
+   g_diag_key = key;
+   PrintFormat("T003 DIAGNOSTICS for the LIMITED_BY_HISTORY evaluation at closed bar %s (all times are server times, YYYYMMDDHHMM; causes are HYPOTHESES until a real series is replayed):",
+               H3VTime(g_ev.last_time));
+   for(int i = 0; i < g_ndiag; i++)
+      Print("T003 " + g_diag_lines[i]);
+  }
+
+//+------------------------------------------------------------------+
+//| ExportCandles: writes the CLOSED-bar set the evaluation used     |
+//| (g_bars, index 0 = oldest; replays A and B are subsets of it) to  |
+//| MQL5/Files/velo_t003_diag_<symbol>_<last bar>.csv. Only when the  |
+//| input is true, once per symbol / as-of / last bar. No series is  |
+//| read here, no quote, no trading function.                         |
+//+------------------------------------------------------------------+
+void ExportCandles(void)
+  {
+   g_export_text = "";
+   if(!InpExportCandles || g_n <= 0)
+      return;
+   string key = g_symbol + "|" + IntegerToString((long)g_asof) + "|" + IntegerToString((long)g_bars[g_n - 1].time);
+   if(key == g_export_key)
+      return;
+   SH3Export x;
+   x.source   = "EA XauUsdH4Bias (MT5 closed bars, server time)";
+   x.symbol   = g_symbol;
+   x.mode     = (g_hist ? "HISTORICAL" : "LIVE");
+   x.asof     = g_asof;
+   x.digits   = g_snapshot.digits;
+   x.period   = g_params.period;
+   x.left     = g_params.left;
+   x.right    = g_params.right;
+   x.lookback = g_params.lookback;
+   x.rebuild  = g_params.rebuild;
+   x.r_req    = g_ev.r_req;
+   x.r_eff    = g_ev.r_eff;
+   x.b_depth  = g_ev.b_depth;
+   x.chk      = g_ev.chk;
+   x.warm     = g_ev.warm;
+   x.hard_cap = g_params.hard_cap;
+   x.bars     = g_n;
+   x.first    = g_bars[0].time;
+   x.last     = g_bars[g_n - 1].time;
+   x.flag     = H3FlagName(g_ev.flag);
+   x.reason   = g_ev.reason;
+   x.note     = g_ev.note;
+   string name = H3CsvName(g_symbol, x.last);
+   int h = FileOpen(name, FILE_WRITE | FILE_TXT | FILE_ANSI);
+   if(h == INVALID_HANDLE)
+     {
+      PrintFormat("T003 EXPORT FAILED: cannot open %s for writing (error %d).", name, GetLastError());
+      ResetLastError();
+      return;
+     }
+   bool ok = (FileWriteString(h, H3CsvHeader(x) + "\n") > 0);
+   for(int i = 0; i < g_n && ok; i++)
+      ok = (FileWriteString(h, H3CsvRow(g_bars[i], g_snapshot.digits) + "\n") > 0);
+   FileClose(h);
+   if(!ok)
+     {
+      PrintFormat("T003 EXPORT FAILED: write error on %s (error %d); the file is incomplete.", name, GetLastError());
+      ResetLastError();
+      return;
+     }
+   g_export_key = key;
+   g_export_text = TerminalInfoString(TERMINAL_DATA_PATH) + "\\MQL5\\Files\\" + name;
+   PrintFormat("T003 EXPORT: %d closed H4 bars (%s .. %s, server time) written to %s", g_n, H3CsvTimeText(x.first),
+               H3CsvTimeText(x.last), g_export_text);
+   Print("T003 EXPORT: replay offline with: python3 tests/t003_replay_csv.py <this file>");
   }
 
 //+------------------------------------------------------------------+
@@ -456,6 +581,7 @@ void ConsumeEvents(void)
    if(g_cursor == 0)
      {
       g_cursor = H3BaselineCursor(g_ev);
+      g_cons_status = H3_C_BASELINE;
       g_cons_text = "BASELINE at closed bar " + H3VTime(g_cursor);
       PrintFormat("T003 BASELINE: closed bar %s; %d history event(s) are NOT reported as new.",
                   H3VTime(g_cursor), g_ev.ne);
@@ -464,6 +590,7 @@ void ConsumeEvents(void)
    SH3Event nev[];
    int nn = 0;
    int cs = H3ConsumeNew(g_ev, g_events, g_cursor, g_params.period, nev, nn);
+   g_cons_status = cs;
    g_cons_text = H3ConsumeName(cs);
    if(cs == H3_C_OK)
      {
@@ -512,8 +639,14 @@ void PushChange(const string text)
 
 //+------------------------------------------------------------------+
 //| TrackChanges (live): T003 bias, T002 direction and phase changes  |
-//| between two RELIABLE evaluations. The earlier past is in the      |
-//| drawn history events and in the panel's T002 run.                 |
+//| between two RELIABLE evaluations, reported as market changes ONLY |
+//| when the consumer accepted the step as exactly the next closed    |
+//| bar with the previous state reproduced (H3_C_OK, see              |
+//| H3TrackChangesMode). After a REDERIVED step (window slid, depth   |
+//| changed, A/B differ), a GAP (missed bars: the date is unknown) or |
+//| a same-bar re-evaluation, a difference is logged as a             |
+//| RE-DERIVATION and is NEVER shown as a market change.              |
+//| (Before this fix every difference was reported as a change.)      |
 //+------------------------------------------------------------------+
 void TrackChanges(void)
   {
@@ -526,7 +659,8 @@ void TrackChanges(void)
    string t2 = g_ev.st.t2dir;
    string ph = (g_ev.st.dir == H3_NONE ? "-" : H3PhaseName(g_ev.st.phase));
    string when = H3VTime(g_ev.last_time);
-   if(g_prev_valid)
+   int mode = H3TrackChangesMode(g_cons_status, g_prev_valid);
+   if(mode == H3_TC_REPORT)
      {
       if(bias != g_prev_bias)
          PushChange(StringFormat("BIAS CHANGED %s -> %s at closed bar %s (PROPOSAL)", g_prev_bias, bias, when));
@@ -535,6 +669,12 @@ void TrackChanges(void)
       if(ph != g_prev_phase && bias == g_prev_bias)
          PushChange(StringFormat("PHASE CHANGED %s -> %s at closed bar %s (PROPOSAL)", g_prev_phase, ph, when));
      }
+   else
+      if(mode == H3_TC_REDERIVE && (bias != g_prev_bias || t2 != g_prev_t2 || ph != g_prev_phase))
+         PrintFormat("T003 RE-DERIVATION (consumer %s%s) at closed bar %s: bias %s -> %s, T002 %s -> %s, phase %s -> %s differ from the previous evaluation; "
+                     "this comes from the rebuild or from missed bars and is NOT reported as a market change.",
+                     H3ConsumeName(g_cons_status), (g_ev.cause != "" ? ", " + g_ev.cause : ""), when,
+                     g_prev_bias, bias, g_prev_t2, t2, g_prev_phase, ph);
    g_prev_valid = true;
    g_prev_bias = bias;
    g_prev_t2 = t2;
@@ -613,6 +753,15 @@ void RenderPanel(void)
       g_panel.Line("T003 bias: UNKNOWN (not reliable). Nothing proposal-derived is drawn and no event is emitted.", clrOrange);
       if(!g_hist)
          g_panel.Line("consumer: " + g_cons_text, clrOrange);
+      if(InpDiagnostics && g_diag.valid && g_ndiag >= 8)
+        {
+         g_panel.Line("WHY (diagnostics; causes are hypotheses; all DIAG1..DIAG8 lines are in the Experts log):", clrGold);
+         g_panel.Line(g_diag_lines[0], clrSilver);      // windows, warm-up ends, comparison zone
+         g_panel.Line(g_diag_lines[3], clrOrange);      // first differing field of the final states
+         g_panel.Line(g_diag_lines[4], clrOrange);      // first differing event in the zone
+        }
+      if(g_export_text != "")
+         g_panel.Line("candles exported: " + g_export_text, clrSilver);
       g_panel.End();
       return;
      }
@@ -705,6 +854,8 @@ void RenderPanel(void)
       g_panel.Line("not located: " + g_view.missing, clrOrange);
    if(!g_view.t2_consistent)
       g_panel.Line("WARNING: recomputed T002 direction differs from the replay state", clrRed);
+   if(g_export_text != "")
+      g_panel.Line("candles exported: " + g_export_text, clrSilver);
    g_panel.End();
   }
 //+------------------------------------------------------------------+

@@ -124,13 +124,17 @@ echo "=== V5: live / historical flow ==="
 out=$($CHK flow $VIS) && echo "  PASS closed bars only (CopyRates from position 1 live, from the as-of time historical), historical mode never rebuilds on new bars and never consumes events, baseline cursor before H3ConsumeNew, clear/recover resets the baseline, unreliable evaluation draws nothing" || { echo "$out"; echo "  FAIL flow"; FAIL=1; }
 out=$($CHK nopricefeed $VIS) && echo "  PASS no quote/tick/indicator access, no other timeframe than H4, no overlay/target/SL-TP construct in the EA or the drawer" || { echo "$out"; echo "  FAIL price feed or out-of-scope construct"; FAIL=1; }
 
-echo "=== V6: T001/T002 files and the T003 logic are unchanged ==="
+echo "=== V6: T001/T002 files are unchanged; the T003 logic only GREW (diagnostics) ==="
+# The T003 logic files below were extended on purpose by the diagnostics round (H4Bias.mqh gained lines only: see
+# tools/t003-static-checks.sh CHECK 14; the test script, the model and the static checks follow); every other file
+# that exists at the base commits must still be identical.
+T003_LOGIC='^(src/include/H4Bias\.mqh|src/tests/T003_LogicTest\.mq5|tests/t003_reference_test\.py|tools/t003-static-checks\.sh)$'
 for base in dd571f6 62a0747; do
   if git cat-file -e "$base^{commit}" 2>/dev/null; then
-    files=$(git ls-tree -r --name-only "$base" -- src tools tests)
+    files=$(git ls-tree -r --name-only "$base" -- src tools tests | grep -vE "$T003_LOGIC")
     n=$(echo "$files" | wc -l)
     if git diff --quiet "$base" -- $files 2>/dev/null; then
-      echo "  PASS all $n files under src/ tools/ tests/ that exist at $base are identical in the working tree"
+      echo "  PASS all $n files under src/ tools/ tests/ that exist at $base (except the four T003 logic files) are identical in the working tree"
     else
       echo "  FAIL a file that exists at $base differs from it:"; git diff --stat "$base" -- $files | tail -5; FAIL=1
     fi
@@ -138,10 +142,13 @@ for base in dd571f6 62a0747; do
     echo "  INFO: base commit $base not available here; the parent must verify against it"
   fi
 done
-for f in src/include/H4Bias.mqh src/include/H4Structure.mqh src/XauUsdH4Map.mq5 src/include/H4MapDrawer.mqh src/XauUsdFoundation.mq5; do
+for f in src/include/H4Structure.mqh src/XauUsdH4Map.mq5 src/include/H4MapDrawer.mqh src/XauUsdFoundation.mq5; do
   git diff --quiet HEAD -- "$f" 2>/dev/null && echo "  PASS $f identical to HEAD" || { echo "  FAIL $f differs from HEAD"; FAIL=1; }
 done
 echo "  INFO: untracked files: $(git ls-files --others --exclude-standard | tr '\n' ' ')"
+
+echo "=== V8: diagnostics, candle export and TrackChanges (source reading) ==="
+out=$($CHK diag $VIS) && echo "  PASS export off by default and gated by InpExportCandles; file access only inside ExportCandles (closed-bar set g_bars, no series/tick/quote read, full path reported); called once from EvaluateAndDraw; diagnostics only for an unreliable evaluation and read-only; TrackChanges reports only under H3_TC_REPORT" || { echo "$out"; echo "  FAIL diagnostics / export / TrackChanges pattern"; FAIL=1; }
 
 echo "=== V7: negative controls (every checker must detect its problem, for the intended reason) ==="
 # trading API
@@ -214,6 +221,26 @@ neg "N25 an intrabar overlay construct" nopricefeed DRW '      ChartRedraw(m_cha
   };' '      ChartRedraw(m_chart); bool overlay = true;
      }
   };' "out-of-scope"
+# diagnostics / export / TrackChanges
+neg "N30 candle export on by default" diag EA 'input bool             InpExportCandles = false;' 'input bool             InpExportCandles = true;' "default false"
+neg "N31 file access outside the export" diag EA 'void OnTick(void)  { Poll(); }' 'void OnTick(void)  { int hh = FileOpen("x.csv", FILE_WRITE); Poll(); }' "outside ExportCandles"
+neg "N32 the export reads a series" diag EA '   g_export_text = "";
+   if(!InpExportCandles || g_n <= 0)
+      return;' '   g_export_text = "";
+   MqlRates zz[];
+   int cz = CopyRates(g_symbol, PERIOD_H4, 0, 5, zz);
+   if(!InpExportCandles || g_n <= 0)
+      return;' "a series/tick copy"
+neg "N33 the export is not gated by the input" diag EA 'if(!InpExportCandles || g_n <= 0)' 'if(g_n <= 0)' "not gated by InpExportCandles"
+neg "N34 the export reads a quote" diag EA '   string name = H3CsvName(g_symbol, x.last);' '   double qq = SymbolInfoDouble(g_symbol, SYMBOL_BID);
+   string name = H3CsvName(g_symbol, x.last);' "a quote"
+neg "N35 the export is not reported with its full path" diag EA 'TerminalInfoString(TERMINAL_DATA_PATH)' 'g_symbol' "full path"
+neg "N36 the diagnostics rewrite the evaluation" diag EA '   H3Diagnose(g_bars, g_n, g_params, g_ev, g_diag);' '   H3Diagnose(g_bars, g_n, g_params, g_ev, g_diag); g_ev.reliable = true;' "changes or recomputes the evaluation"
+neg "N37 TrackChanges ignores the consumer decision" diag EA 'int mode = H3TrackChangesMode(g_cons_status, g_prev_valid);' 'int mode = H3_TC_REPORT;' "H3TrackChangesMode"
+neg "N38 TrackChanges reports outside the REPORT branch" diag EA '   else
+      if(mode == H3_TC_REDERIVE && (bias != g_prev_bias' '   else
+      if(mode == H3_TC_REDERIVE && (PushChange("x"), bias != g_prev_bias' "outside the H3_TC_REPORT branch"
+neg "N39 the consumer status is not recorded" diag EA '   g_cons_status = cs;' '   int cs_unused = cs;' "consumer status"
 # balance / format / ASCII
 printf 'void F(){ if(a { }\n' > "$NEG/b1.mqh"
 python3 tools/t001-check-balance.py "$NEG/b1.mqh" >/dev/null && { echo "  FAIL N26 unbalanced file passed"; FAIL=1; } || echo "  PASS N26 unbalanced parentheses detected"

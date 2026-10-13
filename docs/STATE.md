@@ -3,8 +3,10 @@
 Updated: 2026-10-13 (Europe/Tirane)
 
 ## Resume here
-- Codex compiles and reviews `src/XauUsdH4Bias.mq5` (+ `src/include/H4BiasDrawer.mqh`), the T003 visual EA; the owner then observes it against the client's examples (task section 10; instructions in `docs/T003-visual-ea.md`; send back the compile log, Experts log and screenshots). The new files are in the WORKING TREE of `claude/t003-h4-bias` (on top of `62a0747`), NOT committed or pushed.
+- T003 visual EA at `abd4c1b`: compiled by Codex (0/0, relayed). The owner's first observation (relayed): XAUUSD H4 live (R 1000) and as-of 2026.10.06 00:00 (1000 and 2000 bars) are all LIMITED_BY_HISTORY with `AB_STATE_DIFF+AB_EVENT_DIFF+ANCHOR_IN_WARMUP`.
+- DIAGNOSTICS ROUND (working tree on top of `abd4c1b`, NOT committed, NOT compiled): the EA logs `T003 DIAG1..DIAG8` when LIMITED (`InpDiagnostics`), can export the closed-bar set to `MQL5/Files/velo_t003_diag_<symbol>_<last bar>.csv` (`InpExportCandles`, default off) and `tests/t003_replay_csv.py` replays that CSV in the Python model. A TrackChanges reporting defect (GAP / RE-DERIVATION shown as market changes) is fixed. Analysis: reports/T003-verification.md section 10.
 - T003 logic at `62a0747` (revision 7), relayed (not my runs): Codex compiled `T003_LogicTest.mq5` with `H4Bias.mqh`: 0 errors, 0 warnings; the owner ran it in MT5: 262 passed, 0 failed, 5 deferred. Deferred are not passes; the tests do not prove agreement with the client's strategy.
+- NEXT ACTION: Codex compiles the diagnostics round; the owner runs the EA with `InpExportCandles = true` on the LIMITED case and sends the CSV, the Experts log (`T003 DIAG`, `T003 EXPORT`) and a panel screenshot; then `python3 tests/t003_replay_csv.py <csv>` (see docs/T003-visual-ea.md sections 7 and 9).
 - Still to review (Codex): the 20 `AMBIGUITY` markers and the contradictions in `reports/T003-verification.md` (notably CONFLICT is unreachable).
 - The owner is waiting on the log of the first NEW H4 candle in LIVE for the technical closure of T002 (see the T002 state below).
 - Do not start: the intrabar overlay P12, the target P13, M5/M15, orders or position handling. No merge of PR #1, #2 or #3.
@@ -30,8 +32,9 @@ Out of T002 scope: M5/M15 and the 2R policy. Declared limits: Tauro versus Tradi
 ## T003 state (PR #3; proposals, not confirmed strategy)
 - Specification: tasks/T003-h4-bias-change.md revision 7 (client statements S1-S6 and BUY example E1-E6 kept apart from proposals P1-P14). Client statements are in docs/DECISIONS.md.
 - Implemented: pure logic `src/include/H4Bias.mqh`, test script `src/tests/T003_LogicTest.mq5`, Python model `tests/t003_reference_test.py`, `tools/t003-static-checks.sh`; NEW and uncommitted: visual EA `src/XauUsdH4Bias.mq5`, drawer `src/include/H4BiasDrawer.mqh`, `tools/t003-visual-check.py`, `tools/t003-visual-static-checks.sh`, `docs/T003-visual-ea.md`. No T001/T002 file and no `H4Bias.mqh` change. The visual EA has no trading API, no overlay P12, no target P13, no M5/M15; prefix `velo_t003_`.
-- Results (mine, this environment, static/model only): visual static checks PASS (61 PASS lines, 29 negative controls); T003 static PASS (64); T002 static PASS (59); T001 static PASS (24); Python T003 model 256 passed, 0 failed, 5 deferred; T002 model 197 passed, 0 failed.
-- UNVERIFIED: MetaEditor compilation of the visual EA, its chart behaviour (live and historical), panel readability, first-rebuild time; there are no behavioural tests of the drawing code. DEFERRED test groups: 9, 18, 20, drawing tests, M5/M15.
+- Results (mine, this environment, static/model only, diagnostics round): visual static checks PASS (71 PASS lines, 40 negative controls); T003 static PASS (78); T002 static PASS (59); T001 static PASS (24); Python T003 model 299 passed, 0 failed, 5 deferred; T002 model 197 passed, 0 failed. MQL5 test script: expected 304 passed by static count, NOT run.
+- HYPOTHESES for LIMITED_BY_HISTORY (synthetic evidence only, to be settled by the real CSV): H1 frozen HOLD/RECONFIRMED has no end, so the state depends on bars older than replay B (the needed depth grows with its age); H2 long stretches of a bias without a protecting level; H3 old eligible-FVG tracks. No implementation defect found in the A/B check; the strategy proposals P-A/P-B in section 10.4 need the owner's decision (task F5).
+- UNVERIFIED: MetaEditor compilation of the diagnostics/export/TrackChanges code and of the new test groups, the CSV actually written by MT5, chart behaviour, panel readability, first-rebuild time; there are no behavioural tests of the drawing code or of the export function. DEFERRED test groups: 9, 18, 20, drawing tests, M5/M15.
 - The 20 interpretations (`AMBIGUITY n`) are in reports/T003-verification.md section 5, the contradictions in section 6, the visual EA section 9. The freeze/thaw and no-level rules are technical proposals (P14), not client statements.
 
 ## Open decisions and next owner actions
@@ -41,7 +44,7 @@ Out of T002 scope: M5/M15 and the 2R policy. Declared limits: Tauro versus Tradi
 
 ## Basics
 - Source: inputs/client-E27N93/pergjigjet.json and associated TXT/photos. No strategy logic was invented; disputed or undefined rules remain open (Q01-Q12).
-- Next developer action: none until the parent commits the visual EA, Codex compiles and reviews it and the owner reports the chart observation.
+- Next developer action: none until the parent commits this round, Codex compiles it and the owner sends the CSV and the DIAG lines.
 
 ## Files added in T001
 - `src/XauUsdFoundation.mq5` — main EA. OnInit/OnDeinit/OnTick/OnTimer, configurable magic (stored, unused), symbol resolution, status logging on change only, chart panel.

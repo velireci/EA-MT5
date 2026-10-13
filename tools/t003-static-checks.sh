@@ -185,9 +185,9 @@ check_unmodified() {
   git -C "$repo" diff --quiet HEAD -- "$@" 2>/dev/null
 }
 # The T003-owned files are legitimately edited in the working tree before they are committed
-# (the four code files, the T003 task/report, the hand-updated STATE). Every OTHER tracked file
+# (the T003 code files, the visual EA and its tools, the replay tools, the T003 task/report/doc, the hand-updated STATE). Every OTHER tracked file
 # must be identical to HEAD; the base-commit comparison below covers all code paths of T001/T002.
-T003_OWNED='^(src/include/H4Bias\.mqh|src/tests/T003_LogicTest\.mq5|tests/t003_reference_test\.py|tools/t003-static-checks\.sh|tasks/T003-h4-bias-change\.md|reports/T003-verification\.md|docs/STATE\.md)$'
+T003_OWNED='^(src/include/H4Bias\.mqh|src/tests/T003_LogicTest\.mq5|tests/t003_reference_test\.py|tests/t003_replay_csv\.py|tests/t003_explore_synthetic\.py|tools/t003-static-checks\.sh|tools/t003-visual-static-checks\.sh|tools/t003-visual-check\.py|src/XauUsdH4Bias\.mq5|src/include/H4BiasDrawer\.mqh|docs/T003-visual-ea\.md|tasks/T003-h4-bias-change\.md|reports/T003-verification\.md|docs/STATE\.md)$'
 EXISTING=$(git ls-files | grep -vE "$T003_OWNED")
 tracked_new=0
 if check_unmodified . $EXISTING; then
@@ -239,6 +239,91 @@ freeze_ok() {
   return 0
 }
 out=$(freeze_ok $HDR) && echo "  PASS: H3FvgStep freezes at the internal touch, thaws on loss and skips that bar's derive step; H3ProcessBar honours it" || { echo "$out"; echo "  FAIL: FINDING 2 pattern"; FAIL=1; }
+
+echo "=== CHECK 14: diagnostics, candle export text and the TrackChanges decision are read-only / behaviour neutral (static reading) ==="
+# (a) H3Diagnose takes the evaluation as const and never calls the evaluation itself
+diag_ro_ok() {
+  local f="$1" b
+  b=$(fn_body "$f" 'void H3Diagnose(')
+  [ -n "$b" ] || { echo "    H3Diagnose body not found"; return 1; }
+  strip_comments "$f" | grep -q 'void H3Diagnose(const MqlRates &bars_all\[\], const int n_avail, const SH3Params &p, const SH3Eval &ev, SH3Diag &d)' || { echo "    H3Diagnose does not take the evaluation as const SH3Eval &ev"; return 1; }
+  echo "$b" | grep -qE '\bH3Evaluate(Latest)?\(' && { echo "    H3Diagnose calls the evaluation (it must only explain it)"; return 1; }
+  echo "$b" | grep -qE '\bev\.[A-Za-z_]+ *=[^=]' && { echo "    H3Diagnose writes to the evaluation"; return 1; }
+  return 0
+}
+out=$(diag_ro_ok $HDR) && echo "  PASS: H3Diagnose takes 'const SH3Eval &ev', does not call H3Evaluate and writes nothing into ev" || { echo "$out"; echo "  FAIL diagnostics read-only pattern"; FAIL=1; }
+# (b) the diagnostic counters of a replay are not part of the state key / state text
+key_ok() {
+  local f="$1" fn b
+  for fn in 'string H3StateKey(' 'string H3StateText(' 'string H3EventsText(' 'string H3EvalText('; do
+    b=$(fn_body "$f" "$fn")
+    [ -n "$b" ] || { echo "    body not found: $fn"; return 1; }
+    echo "$b" | grep -qE 'nolv_|n_flips|last_flip|flips_after_run' && { echo "    $fn uses a diagnostic counter"; return 1; }
+  done
+  return 0
+}
+out=$(key_ok $HDR) && echo "  PASS: the state key, state text, events text and evaluation text do not use the diagnostic counters (the A/B comparison cannot change)" || { echo "$out"; echo "  FAIL key purity"; FAIL=1; }
+# (c) against the revision-7 logic (62a0747) H4Bias.mqh only GREW: the only removed lines are the two of the H3AnchorRefs refactor
+H62=62a0747
+removed_ok() {
+  local f="$1" rem
+  git cat-file -e "$H62^{commit}" 2>/dev/null || { echo "    base $H62 not available"; return 2; }
+  git show "$H62:$HDR" > "$TMPD/base62.mqh"
+  rem=$(diff "$TMPD/base62.mqh" "$f" | grep '^< ' | sed 's/^< //')
+  [ "$(echo "$rem" | grep -c .)" -le 2 ] || { echo "    more than 2 lines of the revision-7 logic were removed or changed:"; echo "$rem" | head -5; return 1; }
+  echo "$rem" | grep -vqE '^(int H3AnchorRefs\(const SH3State &st, datetime &refs\[\]\)|         refs\[nr\] = lst\[i\];|)$' && { echo "    an unexpected line of the revision-7 logic was removed or changed:"; echo "$rem" | head -5; return 1; }
+  return 0
+}
+if git cat-file -e "$H62^{commit}" 2>/dev/null; then
+  out=$(removed_ok $HDR) && echo "  PASS: against $H62 (revision-7 logic) H4Bias.mqh only gained lines; the two replaced lines are the H3AnchorRefs wrapper (behaviour: the generated transcripts of all earlier cases are unchanged, CHECK 10)" || { echo "$out"; echo "  FAIL logic changed beyond the diagnostics"; FAIL=1; }
+else
+  echo "  INFO: base $H62 not available here; the parent must verify that H4Bias.mqh only gained lines"
+fi
+# (d) the TrackChanges decision reports only for a consumer status OK
+tc_ok() {
+  local f="$1" b
+  b=$(fn_body "$f" 'int H3TrackChangesMode(')
+  [ -n "$b" ] || { echo "    H3TrackChangesMode body not found"; return 1; }
+  echo "$b" | grep -q 'consume_status == H3_C_OK' || { echo "    the decision does not test the consumer status OK"; return 1; }
+  [ "$(echo "$b" | grep -c 'return(H3_TC_REPORT)')" = "1" ] || { echo "    H3_TC_REPORT is returned more than once"; return 1; }
+  echo "$b" | grep -B1 'return(H3_TC_REPORT)' | grep -qxE '   if\(consume_status == H3_C_OK\)' || { echo "    H3_TC_REPORT is not guarded by exactly the OK status"; return 1; }
+  return 0
+}
+out=$(tc_ok $HDR) && echo "  PASS: H3TrackChangesMode returns H3_TC_REPORT only for the consumer status OK" || { echo "$out"; echo "  FAIL TrackChanges decision"; FAIL=1; }
+# (e) export text helpers exist and are pure text (CHECK 7 already bans File*/Terminal*/SymbolInfo* in the whole header)
+for fn in 'string H3CsvName(' 'string H3CsvHeader(' 'string H3CsvRow(' 'string H3CsvSafeSymbol('; do
+  fn_body $HDR "$fn" | grep -q . && echo "  PASS: $fn found (pure text building)" || { echo "  FAIL: $fn missing"; FAIL=1; }
+done
+# negative controls for CHECK 14 (each mutation must change the header, and the matching checker must fail for the intended reason)
+N14=$(mktemp -d)
+# mut14 OLD NEW DST : DST = $HDR with the first exact OLD replaced; returns 1 (vacuous) if OLD is absent
+mut14() {
+  python3 -I - "$HDR" "$3" "$1" "$2" <<'PYEOF'
+import sys
+src, dst, old, new = sys.argv[1:5]
+t = open(src, encoding='ascii').read()
+if old not in t:
+    sys.exit(3)
+open(dst, 'w', encoding='ascii').write(t.replace(old, new, 1))
+PYEOF
+}
+neg14() { # neg14 LABEL OLD NEW CHECKFN SUBSTRING
+  local label="$1" old="$2" new="$3" fn="$4" sub="$5" o
+  if ! mut14 "$old" "$new" "$N14/m.mqh"; then echo "  FAIL $label: the mutation target text is absent (vacuous control)"; FAIL=1; return; fi
+  o=$($fn "$N14/m.mqh") && { echo "  FAIL $label: NOT detected"; FAIL=1; return; }
+  echo "$o" | grep -qF -- "$sub" && echo "  PASS $label (detected: $sub)" || { echo "  FAIL $label: failed for another reason: $o"; FAIL=1; }
+}
+neg14 "14a H3Diagnose calls H3Evaluate" '   H3Replay(winA, ev.r_eff, p, repA, trA, evA, keysA, true);' '   H3Replay(winA, ev.r_eff, p, repA, trA, evA, keysA, true); SH3Eval zz; H3Evaluate(bars_all, n_avail, p, zz, trA, evA);' diag_ro_ok 'calls the evaluation'
+neg14 "14b H3Diagnose takes a non-const evaluation" 'const SH3Params &p, const SH3Eval &ev, SH3Diag &d)' 'const SH3Params &p, SH3Eval &ev, SH3Diag &d)' diag_ro_ok 'const SH3Eval &ev'
+neg14 "14c a diagnostic counter inside the state key" '   return("BIAS=" + H3DirName(st.dir) + ";PH=" + ph' '   string nolv_dummy = ""; return("BIAS=" + H3DirName(st.dir) + ";PH=" + ph' key_ok 'uses a diagnostic counter'
+neg14 "14d a changed line of the revision-7 logic" '   if(cnt > shown)' '   if(cnt >= shown)' removed_ok 'removed or changed'
+neg14 "14e a widened report condition" '   if(consume_status == H3_C_OK)
+      return(H3_TC_REPORT);' '   if(consume_status == H3_C_OK || consume_status == H3_C_GAP)
+      return(H3_TC_REPORT);' tc_ok 'not guarded'
+neg14 "14f an unconditional report" '   if(consume_status == H3_C_OK)
+      return(H3_TC_REPORT);
+   return(H3_TC_REDERIVE);' '   return(H3_TC_REPORT);' tc_ok 'does not test the consumer status'
+rm -rf "$N14"
 
 echo "=== CHECK 13: negative controls (every checker must actually detect its problem, for the intended reason) ==="
 NEG=$(mktemp -d)
@@ -309,7 +394,7 @@ grep -q 'DEFERRED.*PASS' "$NEG/dp.txt" && echo "  PASS 13n: a pass-labelled defe
 printf '#include "does_not_exist.mqh"\nvoid F(){}\n' > "$NEG/o.mqh"
 out=$(unresolved_includes "$NEG/o.mqh") && { echo "  FAIL 13o: missing include not detected"; FAIL=1; } || { echo "$out" | grep -q 'does_not_exist' && echo "  PASS 13o: a missing include is detected (intended reason)" || { echo "  FAIL 13o: other reason: $out"; FAIL=1; }; }
 # 13p: a mutated reference model must make the Python run fail, for the intended reason
-mkdir "$NEG/py" && cp tests/t002_reference_test.py "$NEG/py/" && sed 's/if s \* (bar.close - P) > 0:/if s * (bar.close - P) >= 0:/' $PYT > "$NEG/py/t003_reference_test.py"
+mkdir "$NEG/py" && cp tests/t002_reference_test.py tests/t003_replay_csv.py "$NEG/py/" && sed 's/if s \* (bar.close - P) > 0:/if s * (bar.close - P) >= 0:/' $PYT > "$NEG/py/t003_reference_test.py"
 cmp -s "$NEG/py/t003_reference_test.py" $PYT && { echo "  FAIL 13p: the mutation did not change the model (vacuous)"; FAIL=1; }
 ( cd "$NEG/py" && python3 t003_reference_test.py > out.txt 2>&1 ); rcm=$?
 { [ $rcm -ne 0 ] && grep -q 'FAILED: SELL: close exactly on the level is not a break' "$NEG/py/out.txt"; } && echo "  PASS 13p: a model that treats equality as a break fails the Python run (intended check failed)" || { echo "  FAIL 13p: mutated model not detected for the intended reason (rc=$rcm)"; FAIL=1; }
@@ -335,7 +420,7 @@ sed 's/            st.frozen = true;/            st.frozen = false;/' "$NEG/h.mq
 o=$(freeze_ok "$NEG/s4.mqh") && { echo "  FAIL 13s: removal of the freeze was NOT detected"; FAIL=1; } || { echo "$o" | grep -q 'never freezes' && echo "  PASS 13s: removed freeze detected (intended reason)" || { echo "  FAIL 13s: other reason: $o"; FAIL=1; }; }
 # 13t: mutated MODELS must make the Python run fail, for the intended reason
 mutate_py() { # mutate_py SED_EXPR EXPECTED_FAILED_LABEL_REGEX LABEL
-  mkdir -p "$NEG/pm" && cp tests/t002_reference_test.py "$NEG/pm/" && sed "$1" $PYT > "$NEG/pm/t003_reference_test.py"
+  mkdir -p "$NEG/pm" && cp tests/t002_reference_test.py tests/t003_replay_csv.py "$NEG/pm/" && sed "$1" $PYT > "$NEG/pm/t003_reference_test.py"
   if cmp -s "$NEG/pm/t003_reference_test.py" $PYT; then echo "  FAIL 13t ($3): the mutation did not change the model (vacuous)"; FAIL=1; return; fi
   ( cd "$NEG/pm" && python3 t003_reference_test.py > out.txt 2>&1 ); local rcx=$?
   if [ $rcx -ne 0 ] && grep -qE "FAILED: .*$2" "$NEG/pm/out.txt"; then echo "  PASS 13t: $3 -> the Python run fails (intended check: $2)"; else echo "  FAIL 13t ($3): not detected for the intended reason (rc=$rcx)"; FAIL=1; fi

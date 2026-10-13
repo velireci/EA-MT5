@@ -95,6 +95,12 @@
 #define H3_C_NOT_RELIABLE  2
 #define H3_C_REDERIVED     3
 #define H3_C_GAP           4
+#define H3_C_BASELINE      (-1)     // EA only: the baseline was set at this evaluation (no consume call)
+
+//--- what the EA may do with a change between two evaluations (TrackChanges)
+#define H3_TC_BASELINE     0        // no comparable previous snapshot: store it, report nothing
+#define H3_TC_REPORT       1        // exactly the next closed bar and the previous state reproduced: a real change
+#define H3_TC_REDERIVE     2        // rebuild difference, gap or same-bar re-evaluation: never a market change
 
 //--- P10 resolver result
 #define H3_R_NONE          0
@@ -190,6 +196,15 @@ struct SH3Rep
    int               n;
    string            key_before_last;
    datetime          last_time;
+   //--- DIAGNOSTIC counters (behaviour neutral; never part of the state key)
+   datetime          nolv_run_start;   // open time of the first bar of the current run of "bias without a level" (0 = none)
+   int               nolv_run_bars;    // bars in that run
+   string            nolv_cause;       // what started the run: FLIP / BREAK_SET / SEED / LEVEL_DROPPED
+   int               nolv_total;       // bars with a bias and no level, whole replay
+   int               nolv_runs;        // number of such runs
+   int               n_flips;          // FLIP events in the replay
+   datetime          last_flip;        // bar time of the last FLIP (0 = none)
+   int               flips_after_run;  // FLIPs dated after the current run began (structurally 0)
   };
 
 //--- result of the P11 evaluation (scalars)
@@ -332,6 +347,8 @@ string H3ConsumeName(const int v)
       return("NOT_RELIABLE");
    if(v == H3_C_REDERIVED)
       return("REDERIVED");
+   if(v == H3_C_BASELINE)
+      return("BASELINE");
    return("GAP");
   }
 
@@ -1418,6 +1435,70 @@ string H3PreWickIds(const SH3State &st, const SH4Fvg &fv[], const int nf, const 
   }
 
 //+------------------------------------------------------------------+
+//| DIAGNOSTIC counters of a replay (behaviour neutral): flips and    |
+//| runs of bars where a bias exists but has no protecting level.     |
+//+------------------------------------------------------------------+
+void H3DiagTrackBar(SH3Rep &rep, const SH3Event &events[], const int ne0, const datetime open_t)
+  {
+   bool has_flip = false;
+   bool has_break = false;
+   bool has_seed = false;
+   for(int i = ne0; i < rep.ne; i++)
+     {
+      if(events[i].type == H3_EV_FLIP)
+        {
+         has_flip = true;
+         rep.n_flips++;
+         rep.last_flip = events[i].bar_time;
+        }
+      if(events[i].type == H3_EV_BREAK_SET)
+         has_break = true;
+      if(events[i].type == H3_EV_SEED)
+         has_seed = true;
+     }
+   if(rep.st.dir != H3_NONE && !rep.st.has_level)
+     {
+      if(rep.nolv_run_start == 0)
+        {
+         rep.nolv_run_start = open_t;
+         rep.nolv_run_bars  = 0;
+         rep.nolv_runs++;
+         if(has_flip)
+            rep.nolv_cause = "FLIP";
+         else
+            if(has_break)
+               rep.nolv_cause = "BREAK_SET";
+            else
+               if(has_seed)
+                  rep.nolv_cause = "SEED";
+               else
+                  rep.nolv_cause = "LEVEL_DROPPED";
+        }
+      rep.nolv_run_bars++;
+      rep.nolv_total++;
+     }
+   else
+     {
+      rep.nolv_run_start = 0;
+      rep.nolv_run_bars  = 0;
+      rep.nolv_cause     = "";
+     }
+  }
+
+int H3DiagFlipsAfter(const SH3Rep &rep, const SH3Event &events[])
+  {
+   if(rep.nolv_run_start == 0)
+      return(0);
+   int c = 0;
+   for(int i = 0; i < rep.ne; i++)
+     {
+      if(events[i].type == H3_EV_FLIP && events[i].bar_time > rep.nolv_run_start)
+         c++;
+     }
+   return(c);
+  }
+
+//+------------------------------------------------------------------+
 //| H3Replay: replay A or B. Reads bars[0..n-1] only. keys[] gets the |
 //| state key after every bar when want_keys is true.                |
 //+------------------------------------------------------------------+
@@ -1430,6 +1511,14 @@ void H3Replay(const MqlRates &bars[], const int n, const SH3Params &p, SH3Rep &r
    rep.n  = n;
    rep.key_before_last = "";
    rep.last_time = 0;
+   rep.nolv_run_start = 0;
+   rep.nolv_run_bars = 0;
+   rep.nolv_cause = "";
+   rep.nolv_total = 0;
+   rep.nolv_runs = 0;
+   rep.n_flips = 0;
+   rep.last_flip = 0;
+   rep.flips_after_run = 0;
    ArrayResize(tracks, 0);
    ArrayResize(events, 0);
    ArrayResize(keys, 0);
@@ -1446,10 +1535,13 @@ void H3Replay(const MqlRates &bars[], const int n, const SH3Params &p, SH3Rep &r
      {
       if(t == n - 1)
          rep.key_before_last = H3StateKey(rep.st, tracks, rep.nt);
+      int ne0 = rep.ne;
       H3ProcessBar(t, bars, sw, ns, fv, nf, p, rep.st, tracks, rep.nt, events, rep.ne);
       if(want_keys)
          keys[t] = H3StateKey(rep.st, tracks, rep.nt);
+      H3DiagTrackBar(rep, events, ne0, bars[t].time);
      }
+   rep.flips_after_run = H3DiagFlipsAfter(rep, events);
    int nkf = H3KnownCount(sw, ns, p.right, n - 1);
    rep.st.t2dir = H4DirName(H4DeriveDirection(sw, nkf));
    rep.st.pre   = H3PreWickIds(rep.st, fv, nf, n);
@@ -1478,49 +1570,62 @@ int H3BarIndexByTime(const MqlRates &bars[], const int n, const datetime t)
 //--- RECONFIRMED): the source wick, the frozen level's pivots (only if a level exists) and the
 //--- sweep that started an internal wait (0 in HOLD); the origin is ignored (literal task text).
 //--- Otherwise: the origin reference, the level's pivots (if any) and the sweep.
-int H3AnchorRefs(const SH3State &st, datetime &refs[])
+int H3AnchorRefsNamed(const SH3State &st, datetime &refs[], string &names[])
   {
    ArrayResize(refs, 0);
+   ArrayResize(names, 0);
    if(st.dir == H3_NONE)
       return(0);
    datetime lst[];
+   string lnm[];
    int na = 0;
    ArrayResize(lst, 6);
+   ArrayResize(lnm, 6);
    if(st.frozen)
      {
       if(st.has_wick)
         {
          lst[na] = st.wk_src;
+         lnm[na] = "wick";
          na++;
         }
       if(st.has_level)
         {
          lst[na] = st.lv_pivot;
+         lnm[na] = "lv_pivot";
          na++;
          lst[na] = st.lv_ext;
+         lnm[na] = "lv_ext";
          na++;
          lst[na] = st.lv_prev;
+         lnm[na] = "lv_prev";
          na++;
         }
       lst[na] = st.sweep_time;
+      lnm[na] = "sweep";
       na++;
      }
    else
      {
       lst[na] = st.origin_ref;
+      lnm[na] = "origin";
       na++;
       if(st.has_level)
         {
          lst[na] = st.lv_pivot;
+         lnm[na] = "lv_pivot";
          na++;
          lst[na] = st.lv_ext;
+         lnm[na] = "lv_ext";
          na++;
          lst[na] = st.lv_prev;
+         lnm[na] = "lv_prev";
          na++;
         }
       if(st.sweep_time != 0)
         {
          lst[na] = st.sweep_time;
+         lnm[na] = "sweep";
          na++;
         }
      }
@@ -1530,11 +1635,19 @@ int H3AnchorRefs(const SH3State &st, datetime &refs[])
       if(lst[i] != 0)
         {
          ArrayResize(refs, nr + 1);
-         refs[nr] = lst[i];
+         ArrayResize(names, nr + 1);
+         refs[nr]  = lst[i];
+         names[nr] = lnm[i];
          nr++;
         }
      }
    return(nr);
+  }
+
+int H3AnchorRefs(const SH3State &st, datetime &refs[])
+  {
+   string nm[];
+   return(H3AnchorRefsNamed(st, refs, nm));
   }
 
 //--- FINDING 1: earliest bar time the state depends on, by EXISTING bars. Each reference is
@@ -1569,6 +1682,49 @@ datetime H3AnchorTime(const SH3State &st, const SH3Params &p, const MqlRates &ba
       datetime c = bars[ix - p.left].time;
       if(a == 0 || c < a)
          a = c;
+     }
+   return(a);
+  }
+
+//--- DIAGNOSTIC twin of H3AnchorTime: the same anchor, plus WHICH reference gives it (the
+//--- first one in the reference order on a tie). Returns the anchor (0 = not applicable or
+//--- missing history, then 'missing' says why).
+datetime H3AnchorBinding(const SH3State &st, const SH3Params &p, const MqlRates &bars[], const int n,
+                         string &name, datetime &ref, string &missing)
+  {
+   name = "";
+   ref = 0;
+   missing = "";
+   if(st.dir == H3_NONE)
+      return(0);
+   datetime refs[];
+   string names[];
+   int nr = H3AnchorRefsNamed(st, refs, names);
+   datetime a = 0;
+   for(int i = 0; i < nr; i++)
+     {
+      int ix = H3BarIndexByTime(bars, n, refs[i]);
+      if(ix < 0)
+        {
+         missing = "ANCHOR_REF_NOT_IN_SERIES " + H4TimeStamp(refs[i]);
+         name = "";
+         ref = 0;
+         return(0);
+        }
+      if(ix < p.left)
+        {
+         missing = "ANCHOR_NEEDS_" + IntegerToString(p.left) + "_BARS_BEFORE " + H4TimeStamp(refs[i]);
+         name = "";
+         ref = 0;
+         return(0);
+        }
+      datetime c = bars[ix - p.left].time;
+      if(a == 0 || c < a)
+        {
+         a = c;
+         name = names[i];
+         ref = refs[i];
+        }
      }
    return(a);
   }
@@ -1803,6 +1959,661 @@ void H3EvaluateLatest(const MqlRates &bars_all[], const int n, const SH3Params &
             else
                cur.cause = "REDERIVATION:WINDOW_SLID";
            }
+  }
+
+//+------------------------------------------------------------------+
+//| DIAGNOSTICS (behaviour neutral). They EXPLAIN a P11 evaluation:   |
+//| they re-run replays A and B and compare them, and never change    |
+//| H3Evaluate. All times are ABSOLUTE (YYYYMMDDHHMM, server time of   |
+//| the bars). Mirrored by diagnose()/diag_lines() in                 |
+//| tests/t003_reference_test.py and tools/ replay of a real CSV.     |
+//| Every cause named here is a HYPOTHESIS until a real series has    |
+//| been replayed; the report only states what the replays show.      |
+//+------------------------------------------------------------------+
+#define H3_STATE_FIELD_COUNT 11
+
+//--- the state key as an ORDERED list of (label, value); join of "label=value" with ";" == H3StateKey
+void H3StateFields(const SH3State &st, const SH3Track &tracks[], const int nt, string &lab[], string &val[])
+  {
+   ArrayResize(lab, H3_STATE_FIELD_COUNT);
+   ArrayResize(val, H3_STATE_FIELD_COUNT);
+   string lv = "-";
+   if(st.has_level)
+      lv = st.lv_id + "@" + H3Pf(st.lv_price);
+   string ph = "-";
+   string nr = "-";
+   if(st.dir != H3_NONE)
+      ph = H3PhaseName(st.phase);
+   else
+      nr = H3NoneReasonName(st.none_reason);
+   string rec = "-";
+   if(st.rec_id != "")
+      rec = st.rec_id;
+   string rsn = "-";
+   if(st.recon_reason != H3_RR_NONE)
+      rsn = H3ReconReasonName(st.recon_reason);
+   lab[0]  = "BIAS";
+   val[0]  = H3DirName(st.dir);
+   lab[1]  = "PH";
+   val[1]  = ph;
+   lab[2]  = "ORG";
+   val[2]  = H3OriginName(st.origin);
+   lab[3]  = "NR";
+   val[3]  = nr;
+   lab[4]  = "LV";
+   val[4]  = lv;
+   lab[5]  = "FRZ";
+   val[5]  = (st.frozen ? "1" : "0");
+   lab[6]  = "WK";
+   val[6]  = H3WickText(st);
+   lab[7]  = "SW";
+   val[7]  = H3Tx(st.sweep_time);
+   lab[8]  = "REC";
+   val[8]  = rec;
+   lab[9]  = "RSN";
+   val[9]  = rsn;
+   lab[10] = "EL";
+   val[10] = H3TracksText(tracks, nt);
+  }
+
+string H3FieldMeaning(const string label)
+  {
+   if(label == "BIAS")
+      return("dir");
+   if(label == "PH")
+      return("phase");
+   if(label == "ORG")
+      return("origin");
+   if(label == "NR")
+      return("none_reason");
+   if(label == "LV")
+      return("level id@price (id carries the pivot/ext/prev times)");
+   if(label == "FRZ")
+      return("frozen");
+   if(label == "WK")
+      return("wick src/known/detected/retro");
+   if(label == "SW")
+      return("sweep time");
+   if(label == "REC")
+      return("recorded FVG");
+   if(label == "RSN")
+      return("reconfirm reason");
+   return("eligible FVG tracks");
+  }
+
+string H3FieldOrderText(void)
+  {
+   return("BIAS>PH>ORG>NR>LV>FRZ>WK>SW>REC>RSN>EL");
+  }
+
+//--- index of the first differing field in the explicit order, -1 when all are equal
+int H3FirstDiffField(const string &va[], const string &vb[])
+  {
+   for(int i = 0; i < H3_STATE_FIELD_COUNT; i++)
+     {
+      if(va[i] != vb[i])
+         return(i);
+     }
+   return(-1);
+  }
+
+string H3OneTrackText(const SH3Track &t)
+  {
+   string sname = "FRESH";
+   if(t.invalid)
+      sname = "INVALID";
+   else
+      if(t.recorded)
+         sname = "RECORDED";
+   return(t.id + ":" + sname);
+  }
+
+//--- first differing track of two lists: "track #i A=.. B=.. (counts na vs nb)" or ""
+string H3TrackDiffText(const SH3Track &ta[], const int na, const SH3Track &tb[], const int nb)
+  {
+   int m = (na > nb ? na : nb);
+   for(int i = 0; i < m; i++)
+     {
+      string xa = (i < na ? H3OneTrackText(ta[i]) : "-");
+      string xb = (i < nb ? H3OneTrackText(tb[i]) : "-");
+      if(xa != xb)
+         return("track #" + IntegerToString(i) + " A=" + xa + " B=" + xb + " (counts " + IntegerToString(na) +
+                " vs " + IntegerToString(nb) + ")");
+     }
+   return("");
+  }
+
+//--- why a bias of direction d has no protecting level at the end of bars[0..n-1]
+string H3WhyNoLevel(const MqlRates &bars[], const int n, const SH3Params &p, const int d)
+  {
+   SH4Swing sw[];
+   int amb = 0;
+   int ns = H4FindSwings(bars, n, p.left, p.right, p.period, sw, amb);
+   int nk = H3KnownCount(sw, ns, p.right, n - 1);
+   bool has_l, has_e, has_i;
+   SH3Cand lvl, ex, lint;
+   H3DeriveLevel(sw, nk, d, has_l, lvl, has_e, ex, has_i, lint);
+   if(!has_l)
+     {
+      if(!has_e)
+         return("NO_CANDIDATE: no latest " + (d > 0 ? "HH" : "LL") + " in the swings known at the last bar");
+      return("NO_CANDIDATE: " + ex.id + " found but no bounded swing between it and its predecessor");
+     }
+   int s = -d;
+   for(int i = lvl.idx + 1; i < n; i++)
+     {
+      if(s * (bars[i].close - lvl.price) > 0)
+         return("CONSUMED: candidate " + lvl.id + " price " + H3Pf(lvl.price) + " closed beyond at " + H4TimeStamp(bars[i].time));
+     }
+   return("CANDIDATE_DEFINED: " + lvl.id + " price " + H3Pf(lvl.price) + " (not consumed; check the freeze/derive order)");
+  }
+
+//--- one replay as seen by the diagnostics
+struct SH3DiagSide
+  {
+   datetime          start;
+   int               bars;
+   datetime          warm_end;
+   int               dir;
+   int               phase;
+   int               origin;
+   datetime          origin_ref;
+   datetime          bias_start;
+   bool              has_level;
+   string            lv_id;
+   double            lv_price;
+   datetime          lv_pivot;
+   datetime          lv_ext;
+   datetime          lv_prev;
+   datetime          lv_known;
+   bool              frozen;
+   datetime          anchor;
+   string            anchor_name;
+   datetime          anchor_ref;
+   string            anchor_missing;
+   bool              nolv_now;
+   datetime          nolv_since;
+   int               nolv_bars;
+   string            nolv_cause;
+   int               nolv_total;
+   int               nolv_runs;
+   int               flips;
+   datetime          last_flip;
+   int               flips_after_run;
+   string            nolv_why;
+   int               n_events;
+  };
+
+struct SH3Diag
+  {
+   bool              valid;
+   bool              reliable;
+   string            reason;
+   int               n_avail;
+   int               r_eff;
+   int               b_depth;
+   int               warm;
+   int               chk;
+   datetime          series_first;
+   datetime          series_last;
+   SH3DiagSide       a;
+   SH3DiagSide       b;
+   datetime          zone_start;
+   int               field_idx;        // first differing field in the explicit order, -1 = none
+   string            field_label;
+   string            field_a;
+   string            field_b;
+   string            track_diff;
+   int               zone_na;
+   int               zone_nb;
+   int               event_idx;        // first differing event in the zone, -1 = none
+   string            event_a;
+   string            event_b;
+   bool              event_count_diff;
+   string            event_extra;
+   string            event_extra_who;
+   int               common_bars;
+   int               common_diff;
+   datetime          common_first_diff;
+   datetime          common_last_diff;
+  };
+
+void H3DiagSideInit(SH3DiagSide &s)
+  {
+   s.start = 0;
+   s.bars = 0;
+   s.warm_end = 0;
+   s.dir = H3_NONE;
+   s.phase = H3_PH_ACTIVE;
+   s.origin = H3_ORG_NONE;
+   s.origin_ref = 0;
+   s.bias_start = 0;
+   s.has_level = false;
+   s.lv_id = "";
+   s.lv_price = 0.0;
+   s.lv_pivot = 0;
+   s.lv_ext = 0;
+   s.lv_prev = 0;
+   s.lv_known = 0;
+   s.frozen = false;
+   s.anchor = 0;
+   s.anchor_name = "";
+   s.anchor_ref = 0;
+   s.anchor_missing = "";
+   s.nolv_now = false;
+   s.nolv_since = 0;
+   s.nolv_bars = 0;
+   s.nolv_cause = "";
+   s.nolv_total = 0;
+   s.nolv_runs = 0;
+   s.flips = 0;
+   s.last_flip = 0;
+   s.flips_after_run = 0;
+   s.nolv_why = "";
+   s.n_events = 0;
+  }
+
+void H3DiagInit(SH3Diag &d)
+  {
+   d.valid = false;
+   d.reliable = false;
+   d.reason = "";
+   d.n_avail = 0;
+   d.r_eff = 0;
+   d.b_depth = 0;
+   d.warm = 0;
+   d.chk = 0;
+   d.series_first = 0;
+   d.series_last = 0;
+   H3DiagSideInit(d.a);
+   H3DiagSideInit(d.b);
+   d.zone_start = 0;
+   d.field_idx = -1;
+   d.field_label = "";
+   d.field_a = "";
+   d.field_b = "";
+   d.track_diff = "";
+   d.zone_na = 0;
+   d.zone_nb = 0;
+   d.event_idx = -1;
+   d.event_a = "";
+   d.event_b = "";
+   d.event_count_diff = false;
+   d.event_extra = "";
+   d.event_extra_who = "";
+   d.common_bars = 0;
+   d.common_diff = 0;
+   d.common_first_diff = 0;
+   d.common_last_diff = 0;
+  }
+
+void H3DiagFillSide(const SH3Rep &rep, const MqlRates &win[], const int nwin, const MqlRates &bars_all[],
+                    const int n_avail, const SH3Params &p, const int warm, SH3DiagSide &s)
+  {
+   H3DiagSideInit(s);
+   s.start      = win[0].time;
+   s.bars       = nwin;
+   s.warm_end   = (nwin > warm ? win[warm].time : 0);
+   s.dir        = rep.st.dir;
+   s.phase      = rep.st.phase;
+   s.origin     = rep.st.origin;
+   s.origin_ref = rep.st.origin_ref;
+   s.bias_start = rep.st.bias_start;
+   s.has_level  = rep.st.has_level;
+   s.lv_id      = rep.st.lv_id;
+   s.lv_price   = rep.st.lv_price;
+   s.lv_pivot   = rep.st.lv_pivot;
+   s.lv_ext     = rep.st.lv_ext;
+   s.lv_prev    = rep.st.lv_prev;
+   s.lv_known   = rep.st.lv_known;
+   s.frozen     = rep.st.frozen;
+   s.anchor     = H3AnchorBinding(rep.st, p, bars_all, n_avail, s.anchor_name, s.anchor_ref, s.anchor_missing);
+   s.nolv_now   = (rep.st.dir != H3_NONE && !rep.st.has_level);
+   s.nolv_since = rep.nolv_run_start;
+   s.nolv_bars  = rep.nolv_run_bars;
+   s.nolv_cause = rep.nolv_cause;
+   s.nolv_total = rep.nolv_total;
+   s.nolv_runs  = rep.nolv_runs;
+   s.flips      = rep.n_flips;
+   s.last_flip  = rep.last_flip;
+   s.flips_after_run = rep.flips_after_run;
+   s.nolv_why   = (s.nolv_now ? H3WhyNoLevel(win, nwin, p, rep.st.dir) : "");
+   s.n_events   = rep.ne;
+  }
+
+//--- ev is the result of H3Evaluate(bars_all, n_avail, p) on the same arguments
+void H3Diagnose(const MqlRates &bars_all[], const int n_avail, const SH3Params &p, const SH3Eval &ev, SH3Diag &d)
+  {
+   H3DiagInit(d);
+   d.valid    = ev.has_state;
+   d.reliable = ev.reliable;
+   d.reason   = ev.reason;
+   d.n_avail  = n_avail;
+   d.r_eff    = ev.r_eff;
+   d.b_depth  = ev.b_depth;
+   d.warm     = ev.warm;
+   d.chk      = ev.chk;
+   if(!d.valid)
+      return;
+   MqlRates winA[];
+   ArrayResize(winA, ev.r_eff);
+   ArrayCopy(winA, bars_all, 0, n_avail - ev.r_eff, ev.r_eff);
+   MqlRates winB[];
+   ArrayResize(winB, ev.b_depth);
+   ArrayCopy(winB, bars_all, 0, n_avail - ev.b_depth, ev.b_depth);
+   SH3Rep repA;
+   SH3Track trA[];
+   SH3Event evA[];
+   string keysA[];
+   H3Replay(winA, ev.r_eff, p, repA, trA, evA, keysA, true);
+   SH3Rep repB;
+   SH3Track trB[];
+   SH3Event evB[];
+   string keysB[];
+   H3Replay(winB, ev.b_depth, p, repB, trB, evB, keysB, true);
+   d.series_first = bars_all[0].time;
+   d.series_last  = bars_all[n_avail - 1].time;
+   H3DiagFillSide(repA, winA, ev.r_eff, bars_all, n_avail, p, ev.warm, d.a);
+   H3DiagFillSide(repB, winB, ev.b_depth, bars_all, n_avail, p, ev.warm, d.b);
+   d.zone_start = d.b.warm_end;
+   //--- final states: first differing field in the explicit order
+   string la[];
+   string va[];
+   string lb[];
+   string vb[];
+   H3StateFields(repA.st, trA, repA.nt, la, va);
+   H3StateFields(repB.st, trB, repB.nt, lb, vb);
+   d.field_idx = H3FirstDiffField(va, vb);
+   if(d.field_idx >= 0)
+     {
+      d.field_label = la[d.field_idx];
+      d.field_a     = va[d.field_idx];
+      d.field_b     = vb[d.field_idx];
+      if(d.field_label == "EL")
+         d.track_diff = H3TrackDiffText(trA, repA.nt, trB, repB.nt);
+     }
+   //--- events dated inside B's trusted region (the comparison zone)
+   string za[];
+   string zb[];
+   int nza = 0;
+   int nzb = 0;
+   for(int i = 0; i < repA.ne; i++)
+     {
+      if(evA[i].bar_time >= d.zone_start)
+        {
+         ArrayResize(za, nza + 1, 32);
+         za[nza] = H3EventText(evA[i]);
+         nza++;
+        }
+     }
+   for(int j = 0; j < repB.ne; j++)
+     {
+      if(evB[j].bar_time >= d.zone_start)
+        {
+         ArrayResize(zb, nzb + 1, 32);
+         zb[nzb] = H3EventText(evB[j]);
+         nzb++;
+        }
+     }
+   d.zone_na = nza;
+   d.zone_nb = nzb;
+   int mn = (nza < nzb ? nza : nzb);
+   for(int k = 0; k < mn; k++)
+     {
+      if(za[k] != zb[k])
+        {
+         d.event_idx = k;
+         d.event_a   = za[k];
+         d.event_b   = zb[k];
+         break;
+        }
+     }
+   if(d.event_idx < 0 && nza != nzb)
+     {
+      d.event_count_diff = true;
+      if(nza > nzb)
+        {
+         d.event_extra     = za[nzb];
+         d.event_extra_who = "A";
+        }
+      else
+        {
+         d.event_extra     = zb[nza];
+         d.event_extra_who = "B";
+        }
+     }
+   //--- agreement of the state keys on the common bars (B's bars; A has chk more bars in front)
+   int off = ev.r_eff - ev.b_depth;
+   d.common_bars = ev.b_depth;
+   for(int m = 0; m < ev.b_depth; m++)
+     {
+      if(keysA[m + off] != keysB[m])
+        {
+         d.common_diff++;
+         if(d.common_first_diff == 0)
+            d.common_first_diff = winB[m].time;
+         d.common_last_diff = winB[m].time;
+        }
+     }
+  }
+
+string H3DiagTOrDash(const datetime t)
+  {
+   if(t == 0)
+      return("-");
+   return(H3Tx(t));
+  }
+
+string H3DiagDirPhase(const SH3DiagSide &s)
+  {
+   if(s.dir == H3_NONE)
+      return("NONE");
+   return(H3DirName(s.dir) + "/" + H3PhaseName(s.phase));
+  }
+
+string H3DiagSideLine(const string label, const SH3DiagSide &s)
+  {
+   string lv = "none";
+   if(s.has_level)
+      lv = s.lv_id + "@" + H3Pf(s.lv_price) + " known " + H3Tx(s.lv_known) + " pivots " + H3Tx(s.lv_pivot) + "/" +
+           H3Tx(s.lv_ext) + "/" + H3Tx(s.lv_prev) + (s.frozen ? " FROZEN" : "");
+   string anc = "-";
+   if(s.anchor_missing != "")
+      anc = "missing (" + s.anchor_missing + ")";
+   else
+      if(s.anchor != 0)
+         anc = H3Tx(s.anchor) + " via " + s.anchor_name + "@" + H3Tx(s.anchor_ref);
+   return(label + ": " + H3DiagDirPhase(s) + " origin " + H3OriginName(s.origin) + " ref " + H3DiagTOrDash(s.origin_ref) +
+          " since " + H3DiagTOrDash(s.bias_start) + " | level " + lv + " | anchor " + anc);
+  }
+
+string H3DiagNoLevelLine(const string label, const SH3DiagSide &s)
+  {
+   if(!s.nolv_now)
+     {
+      if(s.dir == H3_NONE)
+         return(label + ": no bias (NONE)");
+      return(label + ": level defined at the last bar; bars without a level in the window " + IntegerToString(s.nolv_total) +
+             " in " + IntegerToString(s.nolv_runs) + " run(s); flips " + IntegerToString(s.flips) + " (last " +
+             H3DiagTOrDash(s.last_flip) + ")");
+     }
+   return(label + ": level UNDEFINED since " + H3Tx(s.nolv_since) + " (" + IntegerToString(s.nolv_bars) + " bars, started by " +
+          s.nolv_cause + "); runs " + IntegerToString(s.nolv_runs) + ", bars without level " + IntegerToString(s.nolv_total) +
+          "; flips in window " + IntegerToString(s.flips) + " (last " + H3DiagTOrDash(s.last_flip) +
+          "), flips after the run began " + IntegerToString(s.flips_after_run) + "; why: " + s.nolv_why);
+  }
+
+//--- the diagnostic report, one line per array item (Experts log / replay tool / tests)
+int H3DiagLines(const SH3Diag &d, string &lines[])
+  {
+   ArrayResize(lines, 0);
+   if(!d.valid)
+     {
+      ArrayResize(lines, 1);
+      lines[0] = "DIAG1 no replay ran: " + d.reason + " (bars available " + IntegerToString(d.n_avail) + ")";
+      return(1);
+     }
+   ArrayResize(lines, 8);
+   lines[0] = "DIAG1 " + (d.reliable ? "RELIABLE" : "LIMITED") + " reasons=" + (d.reliable ? "-" : d.reason) +
+              " | series " + H3Tx(d.series_first) + ".." + H3Tx(d.series_last) + " (" + IntegerToString(d.n_avail) + " bars)" +
+              " | A window " + H3Tx(d.a.start) + ".." + H3Tx(d.series_last) + " (" + IntegerToString(d.a.bars) +
+              " bars) warm-up ends " + H3Tx(d.a.warm_end) +
+              " | B window " + H3Tx(d.b.start) + ".." + H3Tx(d.series_last) + " (" + IntegerToString(d.b.bars) +
+              " bars) warm-up ends " + H3Tx(d.b.warm_end) + " | comparison zone from " + H3Tx(d.zone_start);
+   lines[1] = "DIAG2 " + H3DiagSideLine("A", d.a);
+   lines[2] = "DIAG3 " + H3DiagSideLine("B", d.b);
+   if(d.field_idx < 0)
+      lines[3] = "DIAG4 final states A and B: all " + IntegerToString(H3_STATE_FIELD_COUNT) + " fields equal";
+   else
+     {
+      lines[3] = "DIAG4 first differing field of " + H3FieldOrderText() + ": " + d.field_label + " (" +
+                 H3FieldMeaning(d.field_label) + ") A=" + d.field_a + " B=" + d.field_b;
+      if(d.track_diff != "")
+         lines[3] += " | " + d.track_diff;
+     }
+   if(d.event_idx >= 0)
+      lines[4] = "DIAG5 first differing event in the zone: #" + IntegerToString(d.event_idx) + " A=" + d.event_a + " B=" + d.event_b;
+   else
+      if(d.event_count_diff)
+         lines[4] = "DIAG5 events in the zone: count differs: nA " + IntegerToString(d.zone_na) + " vs nB " +
+                    IntegerToString(d.zone_nb) + " (first extra on " + d.event_extra_who + ": " + d.event_extra + ")";
+      else
+         lines[4] = "DIAG5 events in the zone: identical (" + IntegerToString(d.zone_na) + ")";
+   lines[5] = "DIAG6 " + H3DiagNoLevelLine("A", d.a);
+   lines[6] = "DIAG7 " + H3DiagNoLevelLine("B", d.b);
+   if(d.common_diff == 0)
+      lines[7] = "DIAG8 state keys agree on all " + IntegerToString(d.common_bars) + " common bars";
+   else
+      lines[7] = "DIAG8 state keys differ on " + IntegerToString(d.common_diff) + " of " + IntegerToString(d.common_bars) +
+                 " common bars, first " + H3Tx(d.common_first_diff) + ", last " + H3Tx(d.common_last_diff);
+   return(8);
+  }
+
+string H3DiagText(const SH3Diag &d)
+  {
+   string lines[];
+   int n = H3DiagLines(d, lines);
+   string out = "";
+   for(int i = 0; i < n; i++)
+     {
+      if(i > 0)
+         out += "\n";
+      out += lines[i];
+     }
+   return(out);
+  }
+
+//+------------------------------------------------------------------+
+//| TrackChanges decision (pure). A change of bias / T002 direction / |
+//| phase between two RELIABLE evaluations is a market change only    |
+//| when the consumer accepted the step as exactly the next closed    |
+//| bar with the previous state reproduced (H3_C_OK). After a        |
+//| REDERIVED, GAP or NOTHING_NEW step a difference comes from the    |
+//| rebuild (or from missed bars with an unknown date) and is NEVER   |
+//| reported as a market change.                                      |
+//+------------------------------------------------------------------+
+int H3TrackChangesMode(const int consume_status, const bool prev_valid)
+  {
+   if(consume_status == H3_C_BASELINE || !prev_valid)
+      return(H3_TC_BASELINE);
+   if(consume_status == H3_C_OK)
+      return(H3_TC_REPORT);
+   return(H3_TC_REDERIVE);
+  }
+
+//+------------------------------------------------------------------+
+//| Candle export for the diagnostics (pure text building; the file   |
+//| is written by the EA). Closed bars only: the caller passes the    |
+//| closed-bar set the evaluation used.                               |
+//+------------------------------------------------------------------+
+struct SH3Export
+  {
+   string            source;          // who produced the file ("EA" / "SYNTHETIC ...")
+   string            symbol;
+   string            mode;            // LIVE / HISTORICAL
+   datetime          asof;            // input AsOfTime (0 = live)
+   int               digits;
+   int               period;
+   int               left;
+   int               right;
+   int               lookback;
+   int               rebuild;         // R as given by the input
+   int               r_req;
+   int               r_eff;
+   int               b_depth;
+   int               chk;
+   int               warm;
+   int               hard_cap;
+   int               bars;
+   datetime          first;
+   datetime          last;
+   string            flag;
+   string            reason;
+   string            note;
+  };
+
+string H3CsvSafeSymbol(const string symbol)
+  {
+   string out = "";
+   int n = StringLen(symbol);
+   for(int i = 0; i < n; i++)
+     {
+      ushort c = StringGetCharacter(symbol, i);
+      bool ok = (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '.' || c == '_' || c == '-';
+      if(ok)
+         out += ShortToString(c);
+      else
+         out += "_";
+     }
+   return(out);
+  }
+
+//--- documented name: velo_t003_diag_<symbol>_<open time of the last closed bar>.csv
+string H3CsvName(const string symbol, const datetime last)
+  {
+   return("velo_t003_diag_" + H3CsvSafeSymbol(symbol) + "_" + H4TimeStamp(last) + ".csv");
+  }
+
+string H3CsvTimeText(const datetime t)
+  {
+   return(TimeToString(t, TIME_DATE | TIME_MINUTES));
+  }
+
+string H3CsvHeader(const SH3Export &x)
+  {
+   string h = "# velo_t003_diag v1\n";
+   h += "# source=" + x.source + "\n";
+   h += "# symbol=" + x.symbol + "\n";
+   h += "# period=H4\n";
+   h += "# period_seconds=" + IntegerToString(x.period) + "\n";
+   h += "# digits=" + IntegerToString(x.digits) + "\n";
+   h += "# mode=" + x.mode + "\n";
+   h += "# asof_input=" + (x.asof == 0 ? "0" : H3CsvTimeText(x.asof)) + "\n";
+   h += "# first_bar_open=" + H3CsvTimeText(x.first) + "\n";
+   h += "# last_closed_bar_open=" + H3CsvTimeText(x.last) + "\n";
+   h += "# bars=" + IntegerToString(x.bars) + "\n";
+   h += "# left=" + IntegerToString(x.left) + "\n";
+   h += "# right=" + IntegerToString(x.right) + "\n";
+   h += "# lookback=" + IntegerToString(x.lookback) + "\n";
+   h += "# rebuild_input=" + IntegerToString(x.rebuild) + "\n";
+   h += "# r_req=" + IntegerToString(x.r_req) + "\n";
+   h += "# r_eff=" + IntegerToString(x.r_eff) + "\n";
+   h += "# b_depth=" + IntegerToString(x.b_depth) + "\n";
+   h += "# check_depth=" + IntegerToString(x.chk) + "\n";
+   h += "# warm_up=" + IntegerToString(x.warm) + "\n";
+   h += "# hard_cap=" + IntegerToString(x.hard_cap) + "\n";
+   h += "# result_flag=" + x.flag + "\n";
+   h += "# result_reason=" + x.reason + "\n";
+   h += "# note=" + (x.note != "" ? x.note : "-") + "\n";
+   h += "time_epoch,time_server,open,high,low,close,tick_volume,spread,real_volume";
+   return(h);
+  }
+
+string H3CsvRow(const MqlRates &b, const int digits)
+  {
+   return(IntegerToString((long)b.time) + "," + H3CsvTimeText(b.time) + "," + DoubleToString(b.open, digits) + "," +
+          DoubleToString(b.high, digits) + "," + DoubleToString(b.low, digits) + "," + DoubleToString(b.close, digits) + "," +
+          IntegerToString((long)b.tick_volume) + "," + IntegerToString((long)b.spread) + "," + IntegerToString((long)b.real_volume));
   }
 
 //+------------------------------------------------------------------+
