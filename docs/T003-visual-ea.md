@@ -1,5 +1,8 @@
 # T003 visual EA - installation and use
 
+> REVISION 10 NOTE (2026-10-13, PROPOSAL / PROTOTYPE, awaiting the client): `src/include/H4Bias.mqh` changed after this document was written: the protecting level is no longer frozen (`SH3State.frozen` is a deprecated field that is always false, so the FROZEN labels and the dashed level line below never appear), the structure updates in every phase, setups have a `setup_id`, and two new event types exist (`SETUP_ENDED`, diagnostic `SNAPSHOT_CROSSED`). The visual EA files were NOT changed in that round and are byte-identical to `47a25d9`; they use only names and fields that still exist, but their texts (for example 'HOLD: a wick crossed the frozen protecting level') and the DIAG field list below (now BIAS, LV, EX, LI, BS, SU, PH, SRC, WAIT, REC, RSN, EL) are STALE until an integration round after Codex's review. Not compiled in MetaEditor.
+
+
 `src/XauUsdH4Bias.mq5` is a SEPARATE Expert Advisor next to the T001 foundation EA and the T002 map EA. It draws the T003 bias logic (`src/include/H4Bias.mqh`) on an XAUUSD chart so the owner can compare it with the client's examples (task section 10). It contains no trading function at all: it cannot send, modify or close an order, and it opens no M5/M15 series.
 
 STATUS (read this first)

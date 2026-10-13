@@ -7,7 +7,15 @@
 //| CLOSED bars (index 0 = oldest) that the caller provides.         |
 //|                                                                  |
 //| ALL RULES HERE ARE PROPOSALS (tasks/T003-h4-bias-change.md rev.  |
-//| 5, P1-P14) awaiting the client's visual validation. They are not |
+//| 10, P1-P14 and section 11) awaiting the client's visual           |
+//| validation. REVISION 10 is a PROPOSAL / PROTOTYPE, awaiting the   |
+//| client (ratchet / level update): the STRUCTURE (bias, protecting  |
+//| level) updates on every closed bar in every phase and a SETUP     |
+//| context (setup_id, snapshot, wick/sweep record, FVG tracks) is    |
+//| kept apart; variant A (a structure update does not end a setup);  |
+//| the CURRENT level decides FLIP, the snapshot is a reference only; |
+//| RECONF_LOST keeps the setup; SETUP_ENDED only INVALIDATED_BY_FLIP |
+//| and REPLACED; no expiry. They are not |
 //| client answers and not trading rules. Nothing here sends,        |
 //| modifies or closes an order. The entries-block flags are only    |
 //| REPORTED (the sweep-wait one is a technical proposal, F8).       |
@@ -25,12 +33,12 @@
 //+------------------------------------------------------------------+
 //| AMBIGUITY n: marks every place where the task text is unclear and |
 //| the minimal reading was taken (listed in the T003 report):       |
-//|  1 RECONFIRMED(INTERNAL) freezes the level (P3); when its FVG is  |
-//|  lost the level thaws and is re-derived at the end of that bar    |
-//|  (used from the next; rev. 7); 2                                  |
+//|  1 (rev. 10: the freeze of revisions 6-7 is REMOVED, nothing is   |
+//|  frozen; the level follows the ratchet of 11.9); 2                |
 //|  touches only in HOLD/SWEEP_WAIT; 3 which touched FVG is          |
 //|  recorded; 4 no continuation/internal events on a wick bar or in  |
-//|  HOLD/RECONFIRMED; 5 anchor: the references, located by EXISTING  |
+//|  HOLD/RECONFIRMED (rev. 10: observation events in every phase,     |
+//|  INTERNAL_SWEEP setups only from ACTIVE or SWEEP_WAIT); 5 anchor: the references, located by EXISTING  |
 //|  bars (Left bars before each, never time arithmetic), missing     |
 //|  history -> LIMITED_BY_HISTORY, nothing invented (rev. 6); 6 flag |
 //|  for NONE / seeded HOLD; 7 consumer gap; 8 internal events need a |
@@ -38,8 +46,10 @@
 //|  'defined'; 11 ties; 12 'the low before it'; 13 HH/LL candidate;  |
 //|  14 sweep-wait touch start; 15 flip bar scan; 16 retroactive scan |
 //|  range; 17 CONFLICT unreachable; 18 NONE_WICK; 19 wick in         |
-//|  SWEEP_WAIT freezes the then current level; 20 (rev. 7) a touch   |
-//|  while no protecting level is defined is NOT recorded (20a).     |
+//|  SWEEP_WAIT (rev. 10: nothing is frozen any more); 20 (rev. 7) a  |
+//|  touch while no protecting level is defined is NOT recorded (20a):|
+//|  kept as a defensive guard, unreachable in rev. 10 (a setup never |
+//|  exists without a protecting level).                              |
 //+------------------------------------------------------------------+
 #ifndef VELO_H4_BIAS_MQH
 #define VELO_H4_BIAS_MQH
@@ -83,6 +93,11 @@
 #define H3_EV_INT_SWEEP    8
 #define H3_EV_CONTINUATION 9
 #define H3_EV_INT_BREAK    10
+#define H3_EV_SETUP_ENDED  11      // revision 10 (PROPOSAL / PROTOTYPE): reasons INVALIDATED_BY_FLIP, REPLACED only
+#define H3_EV_SNAP_CROSSED 12      // revision 10: diagnostic only (never a market event, not compared by A/B)
+
+//--- default of the optional comparison signature of an event (see H3AddEvent)
+#define H3_SIG_DEFAULT     "<id>"
 
 //--- support flags (P11)
 #define H3_FLAG_CONVERGED  0
@@ -136,6 +151,10 @@ struct SH3Track
   {
    int               f;
    string            id;
+   double            lower;        // bounds and times are part of the SETUP key (revision 10, correction 3)
+   double            upper;
+   datetime          time_a;
+   datetime          conf;         // confirm time of the FVG (close of candle C)
    bool              invalid;
    bool              recorded;
   };
@@ -147,6 +166,7 @@ struct SH3Event
    string            ref;          // level id / FVG id the event is about
    string            detail;
    bool              market;
+   string            sig;          // comparison signature for the A/B check; "" = not compared (diagnostic)
   };
 
 struct SH3State
@@ -165,7 +185,7 @@ struct SH3State
    datetime          lv_ext;
    datetime          lv_prev;
    datetime          lv_known;
-   bool              frozen;
+   bool              frozen;       // DEPRECATED compatibility field (revision 10): nothing is frozen, always false
    bool              has_ext;
    string            ex_id;
    double            ex_price;
@@ -183,8 +203,39 @@ struct SH3State
    datetime          src_time;
    datetime          wait_start;
    string            rec_id;
+   datetime          rec_from;     // close of the touching bar (valid-from of the reconfirmation); read-only context
+   string            setup_id;     // revision 10: "" = no setup (phase ACTIVE)
+   string            setup_type;   // WICK / SWEEP
+   string            snap_id;      // snapshot of the protecting level at the creation of the setup (REFERENCE ONLY)
+   double            snap_price;
+   datetime          snap_known;
    string            pre;
    string            t2dir;
+  };
+
+//--- READ-ONLY context of the live setup for the NEXT module (revision 10, correction 5; PROPOSAL / PROTOTYPE).
+//--- M15_OUTCOME is NOT a market event of the stateless replay (no mechanism is defined).
+struct SH3SetupCtx
+  {
+   bool              valid;
+   string            setup_id;
+   string            direction;
+   string            stype;
+   string            reason;       // STRUCT / INTERNAL
+   string            phase;
+   bool              ready;        // true only in RECONFIRMED
+   string            snap_id;      // snapshot level: REFERENCE ONLY
+   double            snap_price;
+   datetime          snap_known;
+   string            live_id;      // live protecting level: the invalidation reference
+   double            live_price;
+   string            fvg_id;
+   double            fvg_lower;
+   double            fvg_upper;
+   datetime          fvg_conf;
+   datetime          valid_from;
+   datetime          wait_start;
+   datetime          src_time;
   };
 
 //--- result of one replay (scalars); the arrays travel beside it
@@ -325,6 +376,10 @@ string H3EventName(const int v)
       return("INTERNAL_SWEEP");
    if(v == H3_EV_CONTINUATION)
       return("CONTINUATION");
+   if(v == H3_EV_SETUP_ENDED)
+      return("SETUP_ENDED");
+   if(v == H3_EV_SNAP_CROSSED)
+      return("SNAPSHOT_CROSSED");
    return("INTERNAL_BREAK");
   }
 
@@ -355,7 +410,8 @@ string H3ConsumeName(const int v)
 bool H3IsMarketEvent(const int type)
   {
    return(type == H3_EV_BREAK_SET || type == H3_EV_FLIP || type == H3_EV_SEED || type == H3_EV_WICK ||
-          type == H3_EV_RECONFIRMED || type == H3_EV_RECONF_LOST || type == H3_EV_INT_SWEEP);
+          type == H3_EV_RECONFIRMED || type == H3_EV_RECONF_LOST || type == H3_EV_INT_SWEEP ||
+          type == H3_EV_SETUP_ENDED);
   }
 
 string H3Tx(const datetime t)
@@ -436,6 +492,12 @@ void H3StateInit(SH3State &st)
    st.src_time     = 0;
    st.wait_start   = 0;
    st.rec_id       = "";
+   st.rec_from     = 0;
+   st.setup_id     = "";
+   st.setup_type   = "";
+   st.snap_id      = "";
+   st.snap_price   = 0.0;
+   st.snap_known   = 0;
    st.pre          = "";
    st.t2dir        = "UNKNOWN";
   }
@@ -475,6 +537,12 @@ void H3StateCopy(const SH3State &src, SH3State &dst)
    dst.src_time     = src.src_time;
    dst.wait_start   = src.wait_start;
    dst.rec_id       = src.rec_id;
+   dst.rec_from     = src.rec_from;
+   dst.setup_id     = src.setup_id;
+   dst.setup_type   = src.setup_type;
+   dst.snap_id      = src.snap_id;
+   dst.snap_price   = src.snap_price;
+   dst.snap_known   = src.snap_known;
    dst.pre          = src.pre;
    dst.t2dir        = src.t2dir;
   }
@@ -501,8 +569,10 @@ void H3CandCopy(const SH3Cand &src, SH3Cand &dst)
    dst.idx        = src.idx;
   }
 
+//--- sig: the A/B comparison signature. H3_SIG_DEFAULT = the event id; "" = not compared (diagnostic).
+//--- Provenance-only detail tokens (t002=, retro, known=, restart, SEED versus BREAK_SET name) are NOT in it.
 void H3AddEvent(SH3Event &events[], int &ne, const int type, const datetime bar_time,
-                const string ref, const string detail)
+                const string ref, const string detail, const string sig = H3_SIG_DEFAULT)
   {
    ArrayResize(events, ne + 1, 64);
    events[ne].type     = type;
@@ -510,6 +580,7 @@ void H3AddEvent(SH3Event &events[], int &ne, const int type, const datetime bar_
    events[ne].ref      = ref;
    events[ne].detail   = detail;
    events[ne].market   = H3IsMarketEvent(type);
+   events[ne].sig      = (sig == H3_SIG_DEFAULT ? H3EventId(type, bar_time, ref) : sig);
    ne++;
   }
 
@@ -704,12 +775,52 @@ string H3TracksText(const SH3Track &tracks[], const int nt)
    return(out);
   }
 
-//--- what replays A and B must agree on: no window index, no depth
-string H3StateKey(const SH3State &st, const SH3Track &tracks[], const int nt)
+//--- tracks that can still produce events (FRESH / RECORDED), with their bounds and confirm time.
+//--- INVALID tracks cannot produce an event and are NOT compared (11.7). Revision 10, correction 3: the
+//--- bounds and times stay in the compared key although the current phase does not use them.
+string H3TracksKeyText(const SH3Track &tracks[], const int nt)
+  {
+   string out = "";
+   int cnt = 0;
+   for(int i = 0; i < nt; i++)
+     {
+      if(tracks[i].invalid)
+         continue;
+      if(cnt > 0)
+         out += ",";
+      out += tracks[i].id + "[" + H3Pf(tracks[i].lower) + "-" + H3Pf(tracks[i].upper) + "]@" +
+             H3Tx(tracks[i].conf) + ":" + (tracks[i].recorded ? "RECORDED" : "FRESH");
+      cnt++;
+     }
+   if(cnt == 0)
+      return("-");
+   return(out);
+  }
+
+//--- STRUCTURE key (revision 10, PROPOSAL / PROTOTYPE, awaiting the client): bias, protecting level (id carries
+//--- the pivot/ext/prev times, price, known time), the pending candidates with their consumed flags,
+//--- bias_start ONLY while the bias has no protecting level (11.8). The origin NAME is provenance.
+string H3StructKey(const SH3State &st)
   {
    string lv = "-";
    if(st.has_level)
-      lv = st.lv_id + "@" + H3Pf(st.lv_price);
+      lv = st.lv_id + "@" + H3Pf(st.lv_price) + "/" + H3Tx(st.lv_known);
+   string ex = "-";
+   if(st.has_ext)
+      ex = st.ex_id + "@" + H3Pf(st.ex_price) + "/" + (st.ex_consumed ? "1" : "0");
+   string li = "-";
+   if(st.has_lint)
+      li = st.li_id + "@" + H3Pf(st.li_price) + "/" + (st.li_consumed ? "1" : "0");
+   string bs = "-";
+   if(st.dir != H3_NONE && !st.has_level)
+      bs = H3Tx(st.bias_start);
+   return("BIAS=" + H3DirName(st.dir) + ";LV=" + lv + ";EX=" + ex + ";LI=" + li + ";BS=" + bs);
+  }
+
+//--- SETUP key: what the setup context will do next. wait_start and the source time stay compared in every
+//--- phase (also RECONFIRMED) because they decide which touches count after RECONF_LOST.
+string H3SetupKey(const SH3State &st, const SH3Track &tracks[], const int nt)
+  {
    string rec = "-";
    if(st.rec_id != "")
       rec = st.rec_id;
@@ -717,14 +828,32 @@ string H3StateKey(const SH3State &st, const SH3Track &tracks[], const int nt)
    if(st.recon_reason != H3_RR_NONE)
       rsn = H3ReconReasonName(st.recon_reason);
    string ph = "-";
-   string nr = "-";
    if(st.dir != H3_NONE)
       ph = H3PhaseName(st.phase);
-   else
+   string su = "-";
+   if(st.setup_id != "")
+      su = st.setup_id;
+   return("SU=" + su + ";PH=" + ph + ";SRC=" + H3Tx(st.src_time) + ";WAIT=" + H3Tx(st.wait_start) +
+          ";REC=" + rec + ";RSN=" + rsn + ";EL=" + H3TracksKeyText(tracks, nt));
+  }
+
+//--- PROVENANCE / diagnostics: NOT compared by the A/B check, REPORTED (ORG_DIFF ...)
+string H3ProvKey(const SH3State &st)
+  {
+   string nr = "-";
+   if(st.dir == H3_NONE)
       nr = H3NoneReasonName(st.none_reason);
-   return("BIAS=" + H3DirName(st.dir) + ";PH=" + ph + ";ORG=" + H3OriginName(st.origin) + ";NR=" + nr +
-          ";LV=" + lv + ";FRZ=" + (st.frozen ? "1" : "0") + ";WK=" + H3WickText(st) + ";SW=" + H3Tx(st.sweep_time) +
-          ";REC=" + rec + ";RSN=" + rsn + ";EL=" + H3TracksText(tracks, nt));
+   string bsp = "-";
+   if(st.dir != H3_NONE && st.has_level)
+      bsp = H3Tx(st.bias_start);
+   return("ORG=" + H3OriginName(st.origin) + ";NR=" + nr + ";RETRO=" + (st.wk_retro ? "1" : "0") +
+          ";OREF=" + H3Tx(st.origin_ref) + ";BSP=" + bsp);
+  }
+
+//--- what replays A and B must agree on (STRUCTURE key + SETUP key): no window index, no depth
+string H3StateKey(const SH3State &st, const SH3Track &tracks[], const int nt)
+  {
+   return(H3StructKey(st) + ";" + H3SetupKey(st, tracks, nt));
   }
 
 //--- S3 (client): new entries of the previous setup are blocked in HOLD
@@ -742,7 +871,8 @@ bool H3SweepBlock(const SH3State &st)
 
 string H3StateText(const SH3State &st, const SH3Track &tracks[], const int nt)
   {
-   return(H3StateKey(st, tracks, nt) + ";LI=" + (st.has_lint ? st.li_id : "-") + ";PRE=" + (st.pre != "" ? st.pre : "-") +
+   return(H3StateKey(st, tracks, nt) + ";" + H3ProvKey(st) + ";WK=" + H3WickText(st) + ";SW=" + H3Tx(st.sweep_time) +
+          ";ALL=" + H3TracksText(tracks, nt) + ";PRE=" + (st.pre != "" ? st.pre : "-") +
           ";T2=" + st.t2dir + ";BLKH=" + (H3HoldBlock(st) ? "1" : "0") + ";BLKS=" + (H3SweepBlock(st) ? "1" : "0"));
   }
 
@@ -765,9 +895,84 @@ string H3EventsText(const SH3Event &events[], const int ne, const datetime t_fro
    return(out);
   }
 
+//--- the events the A/B check compares (by ABSOLUTE bar time, type, subject id, resulting direction / reason):
+//--- provenance-only tokens and diagnostic events (sig == "") are left out
+string H3EventsSigText(const SH3Event &events[], const int ne, const datetime t_from)
+  {
+   string out = "";
+   int cnt = 0;
+   for(int i = 0; i < ne; i++)
+     {
+      if(events[i].bar_time >= t_from && events[i].sig != "")
+        {
+         if(cnt > 0)
+            out += "|";
+         out += events[i].sig;
+         cnt++;
+        }
+     }
+   if(cnt == 0)
+      return("-");
+   return(out);
+  }
+
+//--- READ-ONLY setup context for the next module (revision 10, correction 5)
+void H3SetupContext(const SH3State &st, const SH3Track &tracks[], const int nt, SH3SetupCtx &c)
+  {
+   c.valid      = (st.dir != H3_NONE && st.setup_id != "");
+   c.setup_id   = st.setup_id;
+   c.direction  = (c.valid ? H3DirName(st.dir) : "NONE");
+   c.stype      = st.setup_type;
+   c.reason     = "";
+   if(c.valid)
+      c.reason = (st.setup_type == "WICK" ? "STRUCT" : "INTERNAL");
+   c.phase      = (st.dir != H3_NONE ? H3PhaseName(st.phase) : "-");
+   c.ready      = (c.valid && st.phase == H3_PH_RECONFIRMED);
+   c.snap_id    = st.snap_id;
+   c.snap_price = st.snap_price;
+   c.snap_known = st.snap_known;
+   c.live_id    = (st.has_level ? st.lv_id : "");
+   c.live_price = (st.has_level ? st.lv_price : 0.0);
+   c.fvg_id     = "";
+   c.fvg_lower  = 0.0;
+   c.fvg_upper  = 0.0;
+   c.fvg_conf   = 0;
+   c.valid_from = 0;
+   if(c.ready)
+     {
+      for(int i = 0; i < nt; i++)
+        {
+         if(tracks[i].recorded && tracks[i].id == st.rec_id)
+           {
+            c.fvg_id    = tracks[i].id;
+            c.fvg_lower = tracks[i].lower;
+            c.fvg_upper = tracks[i].upper;
+            c.fvg_conf  = tracks[i].conf;
+           }
+        }
+      c.valid_from = (st.rec_from > st.wait_start ? st.rec_from : st.wait_start);
+     }
+   c.wait_start = st.wait_start;
+   c.src_time   = st.src_time;
+  }
+
+string H3SetupContextText(const SH3SetupCtx &c)
+  {
+   if(!c.valid)
+      return("CTX=-");
+   return("CTX=" + c.setup_id + "/" + c.direction + "/" + c.stype + "/" + c.reason + "/" + c.phase +
+          "/ready=" + (c.ready ? "1" : "0") + "/snap=" + c.snap_id + "@" + H3Pf(c.snap_price) + "/" + H3Tx(c.snap_known) +
+          "/live=" + (c.live_id != "" ? c.live_id : "-") + "@" + (c.live_id != "" ? H3Pf(c.live_price) : "-") +
+          "/fvg=" + (c.fvg_id != "" ? c.fvg_id : "-") + "[" + H3Pf(c.fvg_lower) + "-" + H3Pf(c.fvg_upper) + "]@" +
+          H3Tx(c.fvg_conf) + "/from=" + H3Tx(c.valid_from) + "/wait=" + H3Tx(c.wait_start) + "/src=" + H3Tx(c.src_time));
+  }
+
 string H3ReplayText(const SH3Rep &rep, const SH3Track &tracks[], const SH3Event &events[])
   {
-   return("REPLAY;ST=" + H3StateText(rep.st, tracks, rep.nt) + ";EV=" + H3EventsText(events, rep.ne, 0));
+   SH3SetupCtx ctx;
+   H3SetupContext(rep.st, tracks, rep.nt, ctx);
+   return("REPLAY;ST=" + H3StateText(rep.st, tracks, rep.nt) + ";" + H3SetupContextText(ctx) +
+          ";EV=" + H3EventsText(events, rep.ne, 0));
   }
 
 //+------------------------------------------------------------------+
@@ -821,6 +1026,31 @@ bool H3FvgEligible(const SH4Fvg &f, const SH3State &st, const bool bull)
    return(f.bullish == bull && f.time_a >= st.src_time);
   }
 
+//--- one track from one FVG (bounds and times are part of the SETUP key)
+void H3TrackFill(SH3Track &tr, const int fi, const SH4Fvg &f)
+  {
+   tr.f        = fi;
+   tr.id       = f.id;
+   tr.lower    = f.lower;
+   tr.upper    = f.upper;
+   tr.time_a   = f.time_a;
+   tr.conf     = f.confirm_time;
+   tr.invalid  = false;
+   tr.recorded = false;
+  }
+
+void H3TrackCopy(const SH3Track &src, SH3Track &dst)
+  {
+   dst.f        = src.f;
+   dst.id       = src.id;
+   dst.lower    = src.lower;
+   dst.upper    = src.upper;
+   dst.time_a   = src.time_a;
+   dst.conf     = src.conf;
+   dst.invalid  = src.invalid;
+   dst.recorded = src.recorded;
+  }
+
 //--- AMBIGUITY 14: the sweep wait counts touches from the close of the sweep bar
 //--- (wait_start); eligible FVGs have candle A at or after the sweep bar's open.
 //--- (re)build the eligible FVG tracks for the current wait (P5 / P14).
@@ -851,10 +1081,8 @@ void H3BuildTracks(const SH3State &st, SH3Track &tracks[], int &nt, const SH4Fvg
            }
         }
       ArrayResize(tracks, nt + 1, 16);
-      tracks[nt].f        = fi;
-      tracks[nt].id       = fv[fi].id;
+      H3TrackFill(tracks[nt], fi, fv[fi]);
       tracks[nt].invalid  = invalid;
-      tracks[nt].recorded = false;
       nt++;
      }
   }
@@ -992,7 +1220,8 @@ void H3NoneStep(const int t, const MqlRates &bars[], const SH4Swing &sw[], const
                st.origin_ref = x;
            }
          H3AddEvent(events, ne, H3_EV_BREAK_SET, open_t, up[0].id,
-                    "dir=" + H3DirName(d2) + ";from=NONE;known=" + H4TimeStamp(up[0].known) + ";t002=" + t2n);
+                    "dir=" + H3DirName(d2) + ";from=NONE;known=" + H4TimeStamp(up[0].known) + ";t002=" + t2n,
+                    "START@" + H4TimeStamp(open_t) + "#" + H3DirName(d2));
         }
       else
         {
@@ -1004,7 +1233,8 @@ void H3NoneStep(const int t, const MqlRates &bars[], const SH4Swing &sw[], const
                st.origin_ref = y;
            }
          H3AddEvent(events, ne, H3_EV_BREAK_SET, open_t, dn[0].id,
-                    "dir=" + H3DirName(d2) + ";from=NONE;known=" + H4TimeStamp(dn[0].known) + ";t002=" + t2n);
+                    "dir=" + H3DirName(d2) + ";from=NONE;known=" + H4TimeStamp(dn[0].known) + ";t002=" + t2n,
+                    "START@" + H4TimeStamp(open_t) + "#" + H3DirName(d2));
         }
       return;
      }
@@ -1047,12 +1277,49 @@ void H3NoneStep(const int t, const MqlRates &bars[], const SH4Swing &sw[], const
       st.bias_start = close_t;
       st.origin_ref = H3OriginRef(lo, refs);
       H3AddEvent(events, ne, H3_EV_SEED, open_t, seed_lvl.id,
-                 "dir=" + H3DirName(d3) + ";t002=" + t2n);
+                 "dir=" + H3DirName(d3) + ";t002=" + t2n,
+                 "START@" + H4TimeStamp(open_t) + "#" + H3DirName(d3));
      }
+  }
+
+//--- no setup: phase ACTIVE. The STRUCTURE (level, candidates) is untouched.
+void H3ClearSetup(SH3State &st, SH3Track &tracks[], int &nt)
+  {
+   st.phase        = H3_PH_ACTIVE;
+   st.recon_reason = H3_RR_NONE;
+   st.has_wick     = false;
+   st.wk_retro     = false;
+   st.sweep_time   = 0;
+   st.src_time     = 0;
+   st.wait_start   = 0;
+   st.rec_id       = "";
+   st.rec_from     = 0;
+   st.setup_id     = "";
+   st.setup_type   = "";
+   st.snap_id      = "";
+   st.snap_price   = 0.0;
+   st.snap_known   = 0;
+   nt = 0;
+   ArrayResize(tracks, 0);
+  }
+
+//--- SETUP_ENDED(reason) for the live setup, if any (PROPOSAL / PROTOTYPE, awaiting the client). Only
+//--- INVALIDATED_BY_FLIP and REPLACED exist; RECONF_LOST is never an end.
+void H3SetupEnded(const SH3State &st, const datetime open_t, const string reason, const string new_id,
+                  SH3Event &events[], int &ne)
+  {
+   if(st.setup_id == "")
+      return;
+   string detail = "reason=" + reason + ";setup=" + st.setup_id;
+   if(new_id != "")
+      detail += ";new=" + new_id;
+   H3AddEvent(events, ne, H3_EV_SETUP_ENDED, open_t, st.setup_id, detail,
+              "SETUP_ENDED@" + H4TimeStamp(open_t) + "#" + st.setup_id + "#" + reason);
   }
 
 //--- AMBIGUITY 15: after a flip the new bias has no level and origin BREAK; the level is
 //--- derived at the end of the flip bar and the retroactive scan includes the flip bar.
+//--- Revision 10: the flip also ENDS the live setup (INVALIDATED_BY_FLIP, after the FLIP event).
 void H3DoFlip(const int t, const MqlRates &bars[], const SH3Params &p, SH3State &st,
               SH3Track &tracks[], int &nt, SH3Event &events[], int &ne)
   {
@@ -1061,6 +1328,7 @@ void H3DoFlip(const int t, const MqlRates &bars[], const SH3Params &p, SH3State 
    int old = st.dir;
    string ref = st.lv_id;
    datetime known = st.lv_known;
+   string old_setup = st.setup_id;
    SH3Cand c;
    H3CandInit(c);
    c.pivot_time = st.lv_pivot;
@@ -1069,37 +1337,39 @@ void H3DoFlip(const int t, const MqlRates &bars[], const SH3Params &p, SH3State 
    st.origin_ref = H3OriginRef(open_t, c);
    st.dir          = -old;
    st.origin       = H3_ORG_BREAK;
-   st.phase        = H3_PH_ACTIVE;
-   st.recon_reason = H3_RR_NONE;
    st.bias_start   = close_t;
    st.has_level    = false;
    st.lv_id        = "";
-   st.frozen       = false;
    st.has_ext      = false;
    st.has_lint     = false;
-   st.has_wick     = false;
-   st.wk_retro     = false;
-   st.sweep_time   = 0;
-   st.src_time     = 0;
-   st.wait_start   = 0;
-   st.rec_id       = "";
-   nt = 0;
-   ArrayResize(tracks, 0);
    H3AddEvent(events, ne, H3_EV_FLIP, open_t, ref,
-              "dir=" + H3DirName(st.dir) + ";from=" + H3DirName(old) + ";known=" + H4TimeStamp(known));
+              "dir=" + H3DirName(st.dir) + ";from=" + H3DirName(old) + ";known=" + H4TimeStamp(known),
+              "FLIP@" + H4TimeStamp(open_t) + "#" + ref + "#" + H3DirName(st.dir));
+   if(old_setup != "")
+      H3AddEvent(events, ne, H3_EV_SETUP_ENDED, open_t, old_setup,
+                 "reason=INVALIDATED_BY_FLIP;setup=" + old_setup,
+                 "SETUP_ENDED@" + H4TimeStamp(open_t) + "#" + old_setup + "#INVALIDATED_BY_FLIP");
+   H3ClearSetup(st, tracks, nt);
   }
 
-//--- common part of every HOLD start (wick at t, restart, retroactive).
-//--- AMBIGUITY 19: a wick during SWEEP_WAIT starts HOLD with the then current level frozen (it
-//--- was not frozen before). A wick during RECONFIRMED already meets a frozen level.
+//--- common part of every structural-wick setup start (wick at t, restart, retroactive): a NEW setup with
+//--- a new setup_id; a live setup is ENDED with reason REPLACED first. The snapshot is the protecting
+//--- level at this moment (REFERENCE ONLY). The structure is not touched.
 void H3StartHold(const int t, const MqlRates &bars[], const SH3Params &p, const SH4Fvg &fv[], const int nf,
-                 SH3State &st, SH3Track &tracks[], int &nt, const datetime wk_src, const datetime wk_det,
-                 const bool retro)
+                 SH3State &st, SH3Track &tracks[], int &nt, SH3Event &events[], int &ne,
+                 const datetime wk_src, const datetime wk_det, const bool retro)
   {
+   string new_id = "WICK@" + H4TimeStamp(wk_src) + "#" + st.lv_id;
+   H3SetupEnded(st, bars[t].time, "REPLACED", new_id, events, ne);
    st.phase        = H3_PH_HOLD;
-   st.frozen       = true;
+   st.setup_id     = new_id;
+   st.setup_type   = "WICK";
+   st.snap_id      = st.lv_id;
+   st.snap_price   = st.lv_price;
+   st.snap_known   = st.lv_known;
    st.recon_reason = H3_RR_NONE;
    st.rec_id       = "";
+   st.rec_from     = 0;
    st.has_wick     = true;
    st.wk_src       = wk_src;
    st.wk_known     = wk_src + p.period;
@@ -1108,8 +1378,6 @@ void H3StartHold(const int t, const MqlRates &bars[], const SH3Params &p, const 
    st.sweep_time   = 0;
    st.src_time     = wk_src;
    st.wait_start   = wk_det;
-   st.has_ext      = false;
-   st.has_lint     = false;
    H3BuildTracks(st, tracks, nt, fv, nf, bars, t, st.dir == H3_BULL);
   }
 
@@ -1118,10 +1386,13 @@ void H3AddWickEvent(const datetime open_t, const SH3State &st, const bool restar
    H3AddEvent(events, ne, H3_EV_WICK, open_t, st.lv_id,
               "dir=" + H3DirName(st.dir) + ";lvl=" + st.lv_id + ";sw=" + H4TimeStamp(st.wk_src) +
               ";sk=" + H4TimeStamp(st.wk_known) + ";det=" + H4TimeStamp(st.wk_det) +
-              ";retro=" + (st.wk_retro ? "1" : "0") + ";restart=" + (restart ? "1" : "0"));
+              ";retro=" + (st.wk_retro ? "1" : "0") + ";restart=" + (restart ? "1" : "0"),
+              "WICK@" + H4TimeStamp(open_t) + "#" + st.lv_id + "#" + H4TimeStamp(st.wk_src));
   }
 
 //--- step (2) of the order inside one bar. Returns true when the bias flipped.
+//--- PROPOSAL / PROTOTYPE (revision 10, awaiting the client): the CURRENT protecting level decides, in
+//--- every phase; the snapshot is a reference only (SNAPSHOT_CROSSED is a diagnostic).
 bool H3BiasStep(const int t, const MqlRates &bars[], const SH3Params &p, const SH4Fvg &fv[], const int nf,
                 SH3State &st, SH3Track &tracks[], int &nt, SH3Event &events[], int &ne)
   {
@@ -1141,15 +1412,19 @@ bool H3BiasStep(const int t, const MqlRates &bars[], const SH3Params &p, const S
       if(s * (H3AdverseExt(bars[t], s) - P) > 0)
         {
          bool restart = (ph == H3_PH_HOLD || ph == H3_PH_RECONFIRMED);
-         H3StartHold(t, bars, p, fv, nf, st, tracks, nt, open_t, close_t, false);
+         H3StartHold(t, bars, p, fv, nf, st, tracks, nt, events, ne, open_t, close_t, false);
          H3AddWickEvent(open_t, st, restart, events, ne);
          return(false);
         }
+      if(ph != H3_PH_ACTIVE && st.snap_id != "" && s * (bars[t].close - st.snap_price) > 0)
+        {
+         //--- diagnostic only: a close beyond the snapshot that is not beyond the current level. With the
+         //--- ratchet this is unreachable (the current level is never farther than the snapshot).
+         H3AddEvent(events, ne, H3_EV_SNAP_CROSSED, open_t, st.setup_id,
+                    "snap=" + st.snap_id + ";price=" + H3Pf(st.snap_price) + ";cur=" + st.lv_id, "");
+        }
      }
-   //--- AMBIGUITY 4: continuation / internal events and sweeps are produced only in ACTIVE and
-   //--- SWEEP_WAIT (the state table lists them under ACTIVE) and never on a wick bar.
-   if(ph != H3_PH_ACTIVE && ph != H3_PH_SWEEP_WAIT)
-      return(false);
+   //--- observation events: the structure runs in EVERY phase (a setup does not freeze it)
    if(st.has_ext && !st.ex_consumed && d * (bars[t].close - st.ex_price) > 0)
      {
       st.ex_consumed = true;
@@ -1165,14 +1440,26 @@ bool H3BiasStep(const int t, const MqlRates &bars[], const SH3Params &p, const S
                     "dir=" + H3DirName(d) + ";lint=" + st.li_id);
         }
       else
-         if(s * (H3AdverseExt(bars[t], s) - st.li_price) > 0)
+         if(s * (H3AdverseExt(bars[t], s) - st.li_price) > 0 && (ph == H3_PH_ACTIVE || ph == H3_PH_SWEEP_WAIT))
            {
+            //--- a new INTERNAL_SWEEP setup is created only from ACTIVE or SWEEP_WAIT (11.5 open point)
             bool restart2 = (ph == H3_PH_SWEEP_WAIT);
-            st.phase      = H3_PH_SWEEP_WAIT;
-            st.sweep_time = open_t;
-            st.src_time   = open_t;
-            st.wait_start = close_t;
-            st.rec_id     = "";
+            string new_id2 = "SWEEP@" + H4TimeStamp(open_t) + "#" + st.lv_id;
+            H3SetupEnded(st, open_t, "REPLACED", new_id2, events, ne);
+            st.phase        = H3_PH_SWEEP_WAIT;
+            st.setup_id     = new_id2;
+            st.setup_type   = "SWEEP";
+            st.snap_id      = st.lv_id;
+            st.snap_price   = st.lv_price;
+            st.snap_known   = st.lv_known;
+            st.has_wick     = false;
+            st.wk_retro     = false;
+            st.sweep_time   = open_t;
+            st.src_time     = open_t;
+            st.wait_start   = close_t;
+            st.rec_id       = "";
+            st.rec_from     = 0;
+            st.recon_reason = H3_RR_NONE;
             H3BuildTracks(st, tracks, nt, fv, nf, bars, t, d == H3_BULL);
             H3AddEvent(events, ne, H3_EV_INT_SWEEP, open_t, st.li_id,
                        "dir=" + H3DirName(d) + ";lint=" + st.li_id + ";sweep=" + H4TimeStamp(open_t) +
@@ -1182,11 +1469,12 @@ bool H3BiasStep(const int t, const MqlRates &bars[], const SH3Params &p, const S
    return(false);
   }
 
-//--- step (3): FVG eligibility / invalidation / touch for bar t (revision 7).
-//--- RECONFIRMED(INTERNAL) freezes the level known before bar t; when its FVG is lost the level
-//--- thaws on this bar and the derive step (4) of the SAME bar re-derives it (used from bar
-//--- t+1) unless another FVG is touched on this bar (frozen again). AMBIGUITY 1, P3/P14.
-void H3FvgStep(const int t, const MqlRates &bars[], const SH4Fvg &fv[], const int nf,
+//--- step (3): FVG eligibility / invalidation / touch for bar t.
+//--- PROPOSAL / PROTOTYPE (revision 10, awaiting the client): nothing freezes or thaws the structure.
+//--- RECONF_LOST removes the readiness and returns the setup to waiting (STRUCT -> HOLD, INTERNAL ->
+//--- SWEEP_WAIT) KEEPING setup_id, snapshot, wick/sweep record, wait_start and the other valid tracks;
+//--- rec_id is cleared. It is NEVER a SETUP_ENDED.
+void H3FvgStep(const int t, const MqlRates &bars[], const SH4Fvg &fv[], const int nf, const SH3Params &p,
                SH3State &st, SH3Track &tracks[], int &nt, SH3Event &events[], int &ne)
   {
    datetime open_t = bars[t].time;
@@ -1206,10 +1494,7 @@ void H3FvgStep(const int t, const MqlRates &bars[], const SH4Fvg &fv[], const in
          if(fv[fi].index_a == a && H3FvgEligible(fv[fi], st, d == H3_BULL))
            {
             ArrayResize(tracks, nt + 1, 16);
-            tracks[nt].f        = fi;
-            tracks[nt].id       = fv[fi].id;
-            tracks[nt].invalid  = false;
-            tracks[nt].recorded = false;
+            H3TrackFill(tracks[nt], fi, fv[fi]);
             nt++;
            }
         }
@@ -1242,16 +1527,12 @@ void H3FvgStep(const int t, const MqlRates &bars[], const SH4Fvg &fv[], const in
             tracks[m].recorded = false;
             int to_ph = (st.recon_reason == H3_RR_STRUCT ? H3_PH_HOLD : H3_PH_SWEEP_WAIT);
             H3AddEvent(events, ne, H3_EV_RECONF_LOST, open_t, tracks[m].id,
-                       "fvg=" + tracks[m].id + ";to=" + H3PhaseName(to_ph));
-            if(st.recon_reason == H3_RR_INTERNAL)
-              {
-               //--- THAW: the level was frozen by the internal reconfirmation only. The derive
-               //--- step of THIS bar re-derives it from the closed bars up to t (used from t+1).
-               st.frozen = false;
-              }
+                       "fvg=" + tracks[m].id + ";to=" + H3PhaseName(to_ph),
+                       "RECONF_LOST@" + H4TimeStamp(open_t) + "#" + tracks[m].id + "#" + H3PhaseName(to_ph));
             st.phase        = to_ph;
             st.recon_reason = H3_RR_NONE;
             st.rec_id       = "";
+            st.rec_from     = 0;
            }
         }
      }
@@ -1263,9 +1544,9 @@ void H3FvgStep(const int t, const MqlRates &bars[], const SH4Fvg &fv[], const in
       double bestd = 0.0;
       for(int q = 0; q < nt; q++)
         {
-         //--- AMBIGUITY 20a (rev. 7): a touch while NO protecting level is defined is not
-         //--- recorded (no trustworthy RECONFIRMED(INTERNAL) without a level to freeze); a later
-         //--- touch with a level can record. HOLD always has a level.
+         //--- AMBIGUITY 20a (kept as a defensive guard): a touch while NO protecting level is defined is
+         //--- not recorded. With the revision 10 structure this state cannot arise inside a setup (the
+         //--- level is never dropped, only a flip ends the setup).
          if(st.phase == H3_PH_SWEEP_WAIT && !st.has_level)
             break;
          if(tracks[q].invalid)
@@ -1285,26 +1566,51 @@ void H3FvgStep(const int t, const MqlRates &bars[], const SH4Fvg &fv[], const in
         }
       if(best >= 0)
         {
-         //--- AMBIGUITY 1 (rev. 6): P3 says the level is frozen during HOLD and RECONFIRMED, also
-         //--- when the reason is INTERNAL; SWEEP_WAIT keeps updating it (P14 proposal). At the
-         //--- touch the level KNOWN BEFORE the touching candle is frozen: this bar's derive step
-         //--- is skipped (frozen), so a swing confirmed by the touching candle cannot change it.
          int reason = (st.phase == H3_PH_HOLD ? H3_RR_STRUCT : H3_RR_INTERNAL);
-         //--- the continuation / interior candidates are kept (unused while RECONFIRMED, refreshed
-         //--- by the derive step of the thaw bar), so no event is lost on the bar after a thaw.
-         if(reason == H3_RR_INTERNAL)
-            st.frozen = true;
          st.phase        = H3_PH_RECONFIRMED;
          st.recon_reason = reason;
          st.rec_id       = tracks[best].id;
+         st.rec_from     = open_t + p.period;
          tracks[best].recorded = true;
          H3AddEvent(events, ne, H3_EV_RECONFIRMED, open_t, tracks[best].id,
-                    "fvg=" + tracks[best].id + ";reason=" + H3ReconReasonName(reason));
+                    "fvg=" + tracks[best].id + ";reason=" + H3ReconReasonName(reason),
+                    "RECONFIRMED@" + H4TimeStamp(open_t) + "#" + tracks[best].id + "#" + H3ReconReasonName(reason));
         }
      }
   }
 
-//--- step (4): candidates for the NEXT bar from the prefix including bar t.
+//--- PL update, the revision 10 RATCHET (11.9), PROPOSAL / PROTOTYPE awaiting the client's answer (does the
+//--- protecting level move to the new high/low or does the old one stay?). Decides whether the P2 candidate
+//--- lvl, derived from the swings confirmed by the close of bar t, becomes the protecting level (used from
+//--- bar t+1).
+//---   (i)   it comes from confirmed swings known at t (H3DeriveLevel only uses those);
+//---   (ii)  its extreme pivot is LATER than the extreme pivot of the current level;
+//---   (iii) it is strictly more advanced in the trend direction (bear: lower, bull: higher);
+//---   (iv)  no closed bar between its pivot and t closed beyond it.
+//--- Without a current level only (i) and (iv) apply (P2 retroactive rule, unchanged).
+bool H3AcceptCandidate(const SH3Cand &lvl, const SH3State &st, const MqlRates &bars[], const int t, int &wick_idx)
+  {
+   int s = -st.dir;
+   bool body;
+   H3ScanLevel(bars, lvl.idx + 1, t, lvl.price, s, body, wick_idx);
+   if(body)
+     {
+      wick_idx = -1;
+      return(false);
+     }
+   if(st.has_level)
+     {
+      if(!(lvl.ext_time > st.lv_ext && s * lvl.price < s * st.lv_price))
+        {
+         wick_idx = -1;
+         return(false);
+        }
+     }
+   return(true);
+  }
+
+//--- step (4): candidates for the NEXT bar from the prefix including bar t. Runs in EVERY phase. A new level
+//--- is used only from the FOLLOWING bar (events of bar t were judged against the level known before t).
 //--- AMBIGUITY 8: the interior level exists only together with a defined protecting level
 //--- (P14), so INTERNAL_SWEEP / INTERNAL_BREAK are never raised for a bias without a level.
 //--- AMBIGUITY 16: the retroactive scan covers the bars after the level's pivot up to and
@@ -1313,7 +1619,7 @@ void H3DeriveStep(const int t, const MqlRates &bars[], const SH4Swing &sw[], con
                   const SH4Fvg &fv[], const int nf, SH3State &st, SH3Track &tracks[], int &nt,
                   SH3Event &events[], int &ne)
   {
-   if(st.dir == H3_NONE || st.frozen)
+   if(st.dir == H3_NONE)
       return;
    datetime open_t = bars[t].time;
    int d = st.dir;
@@ -1333,47 +1639,42 @@ void H3DeriveStep(const int t, const MqlRates &bars[], const SH4Swing &sw[], con
       st.ex_consumed  = H3CloseBeyondAny(bars, ex.idx + 1, t, ex.price, d);
      }
    //--- protecting level
-   if(!has_l)
+   if(has_l && !(st.has_level && st.lv_id == lvl.id))
      {
-      st.has_level = false;
-      st.has_lint  = false;
-      return;
-     }
-   if(!(st.has_level && st.lv_id == lvl.id))
-     {
-      bool body;
       int wick_idx;
-      H3ScanLevel(bars, lvl.idx + 1, t, lvl.price, s, body, wick_idx);
-      if(body)
+      if(H3AcceptCandidate(lvl, st, bars, t, wick_idx))
         {
-         st.has_level = false;
-         st.has_lint  = false;
-         return;
-        }
-      st.has_level = true;
-      st.lv_id     = lvl.id;
-      st.lv_price  = lvl.price;
-      st.lv_pivot  = lvl.pivot_time;
-      st.lv_ext    = lvl.ext_time;
-      st.lv_prev   = lvl.prev_time;
-      st.lv_known  = lvl.known;
-      if(wick_idx >= 0)
-        {
-         //--- retroactive wick: HOLD starts at detected_at, not at the wick
-         datetime wk_src   = bars[wick_idx].time;
-         datetime wk_known = wk_src + p.period;
-         datetime det = lvl.known;
-         if(wk_known > det)
-            det = wk_known;
-         if(st.bias_start > det)
-            det = st.bias_start;
-         H3StartHold(t, bars, p, fv, nf, st, tracks, nt, wk_src, det, det > wk_known);
-         H3AddWickEvent(open_t, st, false, events, ne);
-         return;
+         st.has_level = true;
+         st.lv_id     = lvl.id;
+         st.lv_price  = lvl.price;
+         st.lv_pivot  = lvl.pivot_time;
+         st.lv_ext    = lvl.ext_time;
+         st.lv_prev   = lvl.prev_time;
+         st.lv_known  = lvl.known;
+         if(wick_idx >= 0)
+           {
+            //--- retroactive wick: HOLD starts at detected_at, not at the wick. If this physical bar is
+            //--- already the source of the live WICK setup (the bar judged now against the previous level)
+            //--- no second setup is created (revision 10 decision). A SWEEP setup of the same bar IS
+            //--- replaced: the interior high became the protecting level (structural wick).
+            datetime wk_src = bars[wick_idx].time;
+            if(!(st.setup_type == "WICK" && st.src_time == wk_src))
+              {
+               datetime wk_known = wk_src + p.period;
+               datetime det = lvl.known;
+               if(wk_known > det)
+                  det = wk_known;
+               if(st.bias_start > det)
+                  det = st.bias_start;
+               H3StartHold(t, bars, p, fv, nf, st, tracks, nt, events, ne, wk_src, det, det > wk_known);
+               H3AddWickEvent(open_t, st, false, events, ne);
+              }
+           }
         }
      }
-   //--- interior liquidity (needs the protecting level)
-   if(!has_i)
+   //--- interior liquidity (needs the protecting level and lies strictly inside the range: between the
+   //--- latest extreme and the protecting level)
+   if(!has_i || !st.has_level || !(s * lint.price < s * st.lv_price))
       st.has_lint = false;
    else
      {
@@ -1395,7 +1696,7 @@ void H3ProcessBar(const int t, const MqlRates &bars[], const SH4Swing &sw[], con
       bool flipped = H3BiasStep(t, bars, p, fv, nf, st, tracks, nt, events, ne);
       if(!flipped)
         {
-         H3FvgStep(t, bars, fv, nf, st, tracks, nt, events, ne);
+         H3FvgStep(t, bars, fv, nf, p, st, tracks, nt, events, ne);
         }
      }
    H3DeriveStep(t, bars, sw, ns, p, fv, nf, st, tracks, nt, events, ne);
@@ -1581,53 +1882,34 @@ int H3AnchorRefsNamed(const SH3State &st, datetime &refs[], string &names[])
    int na = 0;
    ArrayResize(lst, 6);
    ArrayResize(lnm, 6);
-   if(st.frozen)
+   //--- revision 10: no frozen branch (the structure is never frozen). References: the origin, the level's
+   //--- pivots (if a level exists), the source wick of a structural setup, the sweep of an internal one.
+   lst[na] = st.origin_ref;
+   lnm[na] = "origin";
+   na++;
+   if(st.has_level)
      {
-      if(st.has_wick)
-        {
-         lst[na] = st.wk_src;
-         lnm[na] = "wick";
-         na++;
-        }
-      if(st.has_level)
-        {
-         lst[na] = st.lv_pivot;
-         lnm[na] = "lv_pivot";
-         na++;
-         lst[na] = st.lv_ext;
-         lnm[na] = "lv_ext";
-         na++;
-         lst[na] = st.lv_prev;
-         lnm[na] = "lv_prev";
-         na++;
-        }
+      lst[na] = st.lv_pivot;
+      lnm[na] = "lv_pivot";
+      na++;
+      lst[na] = st.lv_ext;
+      lnm[na] = "lv_ext";
+      na++;
+      lst[na] = st.lv_prev;
+      lnm[na] = "lv_prev";
+      na++;
+     }
+   if(st.has_wick)
+     {
+      lst[na] = st.wk_src;
+      lnm[na] = "wick";
+      na++;
+     }
+   if(st.sweep_time != 0)
+     {
       lst[na] = st.sweep_time;
       lnm[na] = "sweep";
       na++;
-     }
-   else
-     {
-      lst[na] = st.origin_ref;
-      lnm[na] = "origin";
-      na++;
-      if(st.has_level)
-        {
-         lst[na] = st.lv_pivot;
-         lnm[na] = "lv_pivot";
-         na++;
-         lst[na] = st.lv_ext;
-         lnm[na] = "lv_ext";
-         na++;
-         lst[na] = st.lv_prev;
-         lnm[na] = "lv_prev";
-         na++;
-        }
-      if(st.sweep_time != 0)
-        {
-         lst[na] = st.sweep_time;
-         lnm[na] = "sweep";
-         na++;
-        }
      }
    int nr = 0;
    for(int i = 0; i < na; i++)
@@ -1733,13 +2015,22 @@ datetime H3AnchorBinding(const SH3State &st, const SH3Params &p, const MqlRates 
 //--- event texts dated inside B's trusted region only.
 //--- AMBIGUITY 9: events before B's trusted region (its first non-warm-up bar) are not
 //--- compared; an event is compared by its full text (type, bar time, reference, details).
-string H3AbReasons(const string keyA, const string keyB, const string evA, const string evB,
+//--- P11 (ii)/(iii) by FUNCTION (revision 10, 11.7; PROPOSAL / PROTOTYPE): why a rebuild is not reliable
+//--- ("" = reliable). evSigA/B are the event signatures dated inside B's trusted region only.
+string H3AbReasons(const string structA, const string structB, const string setupA, const string setupB,
+                   const string evSigA, const string evSigB,
                    const int dirA, const datetime anchorA, const datetime trustedA, const string anchorMissing)
   {
    string why = "";
-   if(keyA != keyB)
-      why += "AB_STATE_DIFF";
-   if(evA != evB)
+   if(structA != structB)
+      why += "AB_STRUCTURE_DIFF";
+   if(setupA != setupB)
+     {
+      if(why != "")
+         why += "+";
+      why += "AB_SETUP_DIFF";
+     }
+   if(evSigA != evSigB)
      {
       if(why != "")
          why += "+";
@@ -1759,6 +2050,22 @@ string H3AbReasons(const string keyA, const string keyB, const string evA, const
          why += "ANCHOR_IN_WARMUP";
         }
    return(why);
+  }
+
+//--- the comparison used by H3Evaluate: reasons ("" = none) and the informational ORG_DIFF text (provenance:
+//--- the origin NAME, never a reason)
+string H3AbCompare(const SH3Rep &repA, const SH3Track &trA[], const SH3Event &evA[],
+                   const SH3Rep &repB, const SH3Track &trB[], const SH3Event &evB[],
+                   const datetime zone_from, const datetime anchor_a, const datetime trusted_a,
+                   const string anchor_missing, string &org_note)
+  {
+   org_note = "";
+   if(repA.st.origin != repB.st.origin && (repA.st.dir != H3_NONE || repB.st.dir != H3_NONE))
+      org_note = "ORG_DIFF A=" + H3OriginName(repA.st.origin) + " B=" + H3OriginName(repB.st.origin);
+   return(H3AbReasons(H3StructKey(repA.st), H3StructKey(repB.st),
+                      H3SetupKey(repA.st, trA, repA.nt), H3SetupKey(repB.st, trB, repB.nt),
+                      H3EventsSigText(evA, repA.ne, zone_from), H3EventsSigText(evB, repB.ne, zone_from),
+                      repA.st.dir, anchor_a, trusted_a, anchor_missing));
   }
 
 //--- the state before the latest bar counts only if it was RELIABLE and the
@@ -1856,10 +2163,12 @@ void H3Evaluate(const MqlRates &bars_all[], const int n_avail, const SH3Params &
    string keyB = H3StateKey(repB.st, trB, repB.nt);
    //--- the anchor is located in the FULL available series (not only in window A)
    ev.anchor = H3AnchorTime(repA.st, p, bars_all, n_avail, ev.anchor_missing);
-   string why = H3AbReasons(keyA, keyB, H3EventsText(evA, repA.ne, trusted_b), H3EventsText(evB, repB.ne, trusted_b),
-                            repA.st.dir, ev.anchor, trusted_a, ev.anchor_missing);
+   string org_note;
+   string why = H3AbCompare(repA, trA, evA, repB, trB, evB, trusted_b, ev.anchor, trusted_a, ev.anchor_missing, org_note);
    if(ev.anchor_missing != "")
       ev.note += (ev.note != "" ? ";" : "") + "missing history: " + ev.anchor_missing;
+   if(org_note != "")
+      ev.note += (ev.note != "" ? ";" : "") + org_note;
    ev.has_state    = true;
    ev.key          = keyA;
    ev.key_prev     = repA.key_before_last;
@@ -1870,21 +2179,16 @@ void H3Evaluate(const MqlRates &bars_all[], const int n_avail, const SH3Params &
    if(why == "")
      {
       ev.reliable = true;
-      //--- AMBIGUITY 6: NONE and any HOLD / frozen RECONFIRMED are CONVERGED (also with a seed
-      //--- origin); SEEDED is a reliable ACTIVE-like state whose origin is the T002 seed.
-      if(repA.st.dir != H3_NONE && repA.st.origin == H3_ORG_SEED && !repA.st.frozen)
+      //--- AMBIGUITY 6 (revision 10): NONE is CONVERGED; SEEDED is a reliable state whose origin is the
+      //--- T002 seed (weaker, may change with more history), in every phase (nothing is frozen any more).
+      if(repA.st.dir != H3_NONE && repA.st.origin == H3_ORG_SEED)
          ev.flag = H3_FLAG_SEEDED;
       else
          ev.flag = H3_FLAG_CONVERGED;
       ev.reason = "converged at depth " + IntegerToString(ev.r_eff) + " vs " + IntegerToString(ev.b_depth);
       ArrayResize(tracks, repA.nt);
       for(int i = 0; i < repA.nt; i++)
-        {
-         tracks[i].f        = trA[i].f;
-         tracks[i].id       = trA[i].id;
-         tracks[i].invalid  = trA[i].invalid;
-         tracks[i].recorded = trA[i].recorded;
-        }
+         H3TrackCopy(trA[i], tracks[i]);
       ArrayResize(events, repA.ne);
       for(int j = 0; j < repA.ne; j++)
         {
@@ -1893,6 +2197,7 @@ void H3Evaluate(const MqlRates &bars_all[], const int n_avail, const SH3Params &
          events[j].ref      = evA[j].ref;
          events[j].detail   = evA[j].detail;
          events[j].market   = evA[j].market;
+         events[j].sig      = evA[j].sig;
         }
       ev.ne = repA.ne;
      }
@@ -1903,12 +2208,7 @@ void H3Evaluate(const MqlRates &bars_all[], const int n_avail, const SH3Params &
       //--- keep the diagnostic tracks for the report, but no event
       ArrayResize(tracks, repA.nt);
       for(int q = 0; q < repA.nt; q++)
-        {
-         tracks[q].f        = trA[q].f;
-         tracks[q].id       = trA[q].id;
-         tracks[q].invalid  = trA[q].invalid;
-         tracks[q].recorded = trA[q].recorded;
-        }
+         H3TrackCopy(trA[q], tracks[q]);
       ev.ne = 0;
      }
   }
@@ -1970,80 +2270,63 @@ void H3EvaluateLatest(const MqlRates &bars_all[], const int n, const SH3Params &
 //| Every cause named here is a HYPOTHESIS until a real series has    |
 //| been replayed; the report only states what the replays show.      |
 //+------------------------------------------------------------------+
-#define H3_STATE_FIELD_COUNT 11
+#define H3_STATE_FIELD_COUNT 12
+#define H3_STRUCT_FIELD_COUNT 5     // BIAS LV EX LI BS = the STRUCTURE key; the rest is the SETUP key
 
-//--- the state key as an ORDERED list of (label, value); join of "label=value" with ";" == H3StateKey
+//--- the compared key as an ORDERED list of (label, value); join of "label=value" with ";" == H3StateKey
+//--- (first the STRUCTURE fields, then the SETUP fields)
 void H3StateFields(const SH3State &st, const SH3Track &tracks[], const int nt, string &lab[], string &val[])
   {
    ArrayResize(lab, H3_STATE_FIELD_COUNT);
    ArrayResize(val, H3_STATE_FIELD_COUNT);
-   string lv = "-";
-   if(st.has_level)
-      lv = st.lv_id + "@" + H3Pf(st.lv_price);
-   string ph = "-";
-   string nr = "-";
-   if(st.dir != H3_NONE)
-      ph = H3PhaseName(st.phase);
-   else
-      nr = H3NoneReasonName(st.none_reason);
-   string rec = "-";
-   if(st.rec_id != "")
-      rec = st.rec_id;
-   string rsn = "-";
-   if(st.recon_reason != H3_RR_NONE)
-      rsn = H3ReconReasonName(st.recon_reason);
-   lab[0]  = "BIAS";
-   val[0]  = H3DirName(st.dir);
-   lab[1]  = "PH";
-   val[1]  = ph;
-   lab[2]  = "ORG";
-   val[2]  = H3OriginName(st.origin);
-   lab[3]  = "NR";
-   val[3]  = nr;
-   lab[4]  = "LV";
-   val[4]  = lv;
-   lab[5]  = "FRZ";
-   val[5]  = (st.frozen ? "1" : "0");
-   lab[6]  = "WK";
-   val[6]  = H3WickText(st);
-   lab[7]  = "SW";
-   val[7]  = H3Tx(st.sweep_time);
-   lab[8]  = "REC";
-   val[8]  = rec;
-   lab[9]  = "RSN";
-   val[9]  = rsn;
-   lab[10] = "EL";
-   val[10] = H3TracksText(tracks, nt);
+   string parts[];
+   int n = StringSplit(H3StateKey(st, tracks, nt), ';', parts);
+   for(int i = 0; i < H3_STATE_FIELD_COUNT; i++)
+     {
+      lab[i] = "";
+      val[i] = "";
+      if(i < n)
+        {
+         int e = StringFind(parts[i], "=");
+         if(e >= 0)
+           {
+            lab[i] = StringSubstr(parts[i], 0, e);
+            val[i] = StringSubstr(parts[i], e + 1);
+           }
+        }
+     }
   }
 
 string H3FieldMeaning(const string label)
   {
    if(label == "BIAS")
       return("dir");
+   if(label == "LV")
+      return("protecting level id@price/known (id carries the pivot/ext/prev times)");
+   if(label == "EX")
+      return("pending latest HH/LL candidate id@price/consumed");
+   if(label == "LI")
+      return("pending interior candidate id@price/consumed");
+   if(label == "BS")
+      return("bias_start (only while the bias has no level)");
+   if(label == "SU")
+      return("setup_id");
    if(label == "PH")
       return("phase");
-   if(label == "ORG")
-      return("origin");
-   if(label == "NR")
-      return("none_reason");
-   if(label == "LV")
-      return("level id@price (id carries the pivot/ext/prev times)");
-   if(label == "FRZ")
-      return("frozen");
-   if(label == "WK")
-      return("wick src/known/detected/retro");
-   if(label == "SW")
-      return("sweep time");
+   if(label == "SRC")
+      return("wick / sweep source time");
+   if(label == "WAIT")
+      return("wait_start");
    if(label == "REC")
       return("recorded FVG");
    if(label == "RSN")
       return("reconfirm reason");
-   return("eligible FVG tracks");
+   return("live eligible FVG tracks with bounds and confirm time");
   }
 
 string H3FieldOrderText(void)
   {
-   return("BIAS>PH>ORG>NR>LV>FRZ>WK>SW>REC>RSN>EL");
+   return("BIAS>LV>EX>LI>BS>SU>PH>SRC>WAIT>REC>RSN>EL");
   }
 
 //--- index of the first differing field in the explicit order, -1 when all are equal
@@ -2105,7 +2388,7 @@ string H3WhyNoLevel(const MqlRates &bars[], const int n, const SH3Params &p, con
       if(s * (bars[i].close - lvl.price) > 0)
          return("CONSUMED: candidate " + lvl.id + " price " + H3Pf(lvl.price) + " closed beyond at " + H4TimeStamp(bars[i].time));
      }
-   return("CANDIDATE_DEFINED: " + lvl.id + " price " + H3Pf(lvl.price) + " (not consumed; check the freeze/derive order)");
+   return("CANDIDATE_DEFINED: " + lvl.id + " price " + H3Pf(lvl.price) + " (not consumed; check the derive order)");
   }
 
 //--- one replay as seen by the diagnostics
@@ -2164,6 +2447,7 @@ struct SH3Diag
    string            field_a;
    string            field_b;
    string            track_diff;
+   string            org_diff;         // "ORG_DIFF A=.. B=.." (provenance, not compared) or ""
    int               zone_na;
    int               zone_nb;
    int               event_idx;        // first differing event in the zone, -1 = none
@@ -2233,6 +2517,7 @@ void H3DiagInit(SH3Diag &d)
    d.field_a = "";
    d.field_b = "";
    d.track_diff = "";
+   d.org_diff = "";
    d.zone_na = 0;
    d.zone_nb = 0;
    d.event_idx = -1;
@@ -2266,7 +2551,7 @@ void H3DiagFillSide(const SH3Rep &rep, const MqlRates &win[], const int nwin, co
    s.lv_ext     = rep.st.lv_ext;
    s.lv_prev    = rep.st.lv_prev;
    s.lv_known   = rep.st.lv_known;
-   s.frozen     = rep.st.frozen;
+   s.frozen     = false;      // DEPRECATED (revision 10: nothing is frozen)
    s.anchor     = H3AnchorBinding(rep.st, p, bars_all, n_avail, s.anchor_name, s.anchor_ref, s.anchor_missing);
    s.nolv_now   = (rep.st.dir != H3_NONE && !rep.st.has_level);
    s.nolv_since = rep.nolv_run_start;
@@ -2332,26 +2617,35 @@ void H3Diagnose(const MqlRates &bars_all[], const int n_avail, const SH3Params &
       if(d.field_label == "EL")
          d.track_diff = H3TrackDiffText(trA, repA.nt, trB, repB.nt);
      }
-   //--- events dated inside B's trusted region (the comparison zone)
+   if(repA.st.origin != repB.st.origin && (repA.st.dir != H3_NONE || repB.st.dir != H3_NONE))
+      d.org_diff = "ORG_DIFF A=" + H3OriginName(repA.st.origin) + " B=" + H3OriginName(repB.st.origin);
+   //--- events dated inside B's trusted region (the comparison zone): SIGNATURES are compared (provenance-only
+   //--- tokens and diagnostic events are left out, as the A/B check does); the texts of the differing events are shown
    string za[];
    string zb[];
+   string sa[];
+   string sb[];
    int nza = 0;
    int nzb = 0;
    for(int i = 0; i < repA.ne; i++)
      {
-      if(evA[i].bar_time >= d.zone_start)
+      if(evA[i].bar_time >= d.zone_start && evA[i].sig != "")
         {
          ArrayResize(za, nza + 1, 32);
+         ArrayResize(sa, nza + 1, 32);
          za[nza] = H3EventText(evA[i]);
+         sa[nza] = evA[i].sig;
          nza++;
         }
      }
    for(int j = 0; j < repB.ne; j++)
      {
-      if(evB[j].bar_time >= d.zone_start)
+      if(evB[j].bar_time >= d.zone_start && evB[j].sig != "")
         {
          ArrayResize(zb, nzb + 1, 32);
+         ArrayResize(sb, nzb + 1, 32);
          zb[nzb] = H3EventText(evB[j]);
+         sb[nzb] = evB[j].sig;
          nzb++;
         }
      }
@@ -2360,7 +2654,7 @@ void H3Diagnose(const MqlRates &bars_all[], const int n_avail, const SH3Params &
    int mn = (nza < nzb ? nza : nzb);
    for(int k = 0; k < mn; k++)
      {
-      if(za[k] != zb[k])
+      if(sa[k] != sb[k])
         {
          d.event_idx = k;
          d.event_a   = za[k];
@@ -2416,7 +2710,7 @@ string H3DiagSideLine(const string label, const SH3DiagSide &s)
    string lv = "none";
    if(s.has_level)
       lv = s.lv_id + "@" + H3Pf(s.lv_price) + " known " + H3Tx(s.lv_known) + " pivots " + H3Tx(s.lv_pivot) + "/" +
-           H3Tx(s.lv_ext) + "/" + H3Tx(s.lv_prev) + (s.frozen ? " FROZEN" : "");
+           H3Tx(s.lv_ext) + "/" + H3Tx(s.lv_prev);
    string anc = "-";
    if(s.anchor_missing != "")
       anc = "missing (" + s.anchor_missing + ")";
@@ -2463,14 +2757,17 @@ int H3DiagLines(const SH3Diag &d, string &lines[])
    lines[1] = "DIAG2 " + H3DiagSideLine("A", d.a);
    lines[2] = "DIAG3 " + H3DiagSideLine("B", d.b);
    if(d.field_idx < 0)
-      lines[3] = "DIAG4 final states A and B: all " + IntegerToString(H3_STATE_FIELD_COUNT) + " fields equal";
+      lines[3] = "DIAG4 final states A and B: all " + IntegerToString(H3_STATE_FIELD_COUNT) + " compared fields equal";
    else
      {
-      lines[3] = "DIAG4 first differing field of " + H3FieldOrderText() + ": " + d.field_label + " (" +
+      lines[3] = "DIAG4 first differing field of " + H3FieldOrderText() + ": " + d.field_label + " [" +
+                 (d.field_idx < H3_STRUCT_FIELD_COUNT ? "STRUCTURE" : "SETUP") + "] (" +
                  H3FieldMeaning(d.field_label) + ") A=" + d.field_a + " B=" + d.field_b;
       if(d.track_diff != "")
          lines[3] += " | " + d.track_diff;
      }
+   if(d.org_diff != "")
+      lines[3] += " | " + d.org_diff + " (provenance, not compared)";
    if(d.event_idx >= 0)
       lines[4] = "DIAG5 first differing event in the zone: #" + IntegerToString(d.event_idx) + " A=" + d.event_a + " B=" + d.event_b;
    else
@@ -2655,6 +2952,7 @@ int H3ConsumeNew(const SH3Eval &ev, const SH3Event &events[], const datetime cur
          out[nout].ref      = events[i].ref;
          out[nout].detail   = events[i].detail;
          out[nout].market   = events[i].market;
+         out[nout].sig      = events[i].sig;
          nout++;
         }
      }

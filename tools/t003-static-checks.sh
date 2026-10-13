@@ -1,5 +1,5 @@
 #!/bin/bash
-# Static checks for T003 (tasks/T003-h4-bias-change.md, revision 5).
+# Static checks for T003 (tasks/T003-h4-bias-change.md, revision 10 PROPOSAL / PROTOTYPE, awaiting the client).
 #
 # These are NOT a compiler and NOT a runtime test. They prove only what can be
 # read from the source: no trading API / Sleep / clock in the T003 logic and
@@ -187,7 +187,7 @@ check_unmodified() {
 # The T003-owned files are legitimately edited in the working tree before they are committed
 # (the T003 code files, the visual EA and its tools, the replay tools, the T003 task/report/doc, the hand-updated STATE). Every OTHER tracked file
 # must be identical to HEAD; the base-commit comparison below covers all code paths of T001/T002.
-T003_OWNED='^(src/include/H4Bias\.mqh|src/tests/T003_LogicTest\.mq5|tests/t003_reference_test\.py|tests/t003_replay_csv\.py|tests/t003_explore_synthetic\.py|tools/t003-static-checks\.sh|tools/t003-visual-static-checks\.sh|tools/t003-visual-check\.py|src/XauUsdH4Bias\.mq5|src/include/H4BiasDrawer\.mqh|docs/T003-visual-ea\.md|tasks/T003-h4-bias-change\.md|reports/T003-verification\.md|docs/STATE\.md)$'
+T003_OWNED='^(src/include/H4Bias\.mqh|src/tests/T003_LogicTest\.mq5|tests/t003_reference_test\.py|tests/t003_replay_csv\.py|tests/t003_explore_synthetic\.py|tools/t003-static-checks\.sh|tools/t003-xlate-check\.sh|tools/t003_xlate/[A-Za-z0-9_.]+|tools/t003-visual-static-checks\.sh|tools/t003-visual-check\.py|src/XauUsdH4Bias\.mq5|src/include/H4BiasDrawer\.mqh|docs/T003-visual-ea\.md|tasks/T003-h4-bias-change\.md|reports/T003-verification\.md|docs/STATE\.md)$'
 EXISTING=$(git ls-files | grep -vE "$T003_OWNED")
 tracked_new=0
 if check_unmodified . $EXISTING; then
@@ -221,24 +221,51 @@ anchor_ok() {
   return 0
 }
 out=$(anchor_ok $HDR) && echo "  PASS: H3AnchorTime searches the reference by absolute time in the series, uses the Left existing bars before it, has no period arithmetic; H3Evaluate passes the series; missing history has its own reason" || { echo "$out"; echo "  FAIL: FINDING 1 pattern"; FAIL=1; }
-# freeze/thaw (revision 7): the internal touch freezes, the loss thaws WITHOUT skipping the derive step of
-# that bar (re-derivation at the end of T, used from T+1), no candidates are cleared, and a touch while no
-# level is defined is not recorded
-freeze_ok() {
-  local f="$1" b pb
+# revision 10 (PROPOSAL / PROTOTYPE): nothing is frozen or thawed; the structure updates in every phase through the
+# ratchet; RECONF_LOST keeps the setup; SETUP_ENDED has only the reasons INVALIDATED_BY_FLIP and REPLACED
+structure_ok() {
+  local f="$1" b pb ab bb db
   b=$(fn_body "$f" 'void H3FvgStep(')
   [ -n "$b" ] || { echo "    H3FvgStep body not found"; return 1; }
-  echo "$b" | grep -qE 'st\.frozen +=+ +true' || { echo "    H3FvgStep never freezes"; return 1; }
-  echo "$b" | grep -qE 'st\.frozen +=+ +false' || { echo "    H3FvgStep never thaws"; return 1; }
-  echo "$b" | grep -qE 'skip_derive' && { echo "    the derive step of the thaw bar is skipped (revision 7 re-derives at the end of T)"; return 1; }
-  echo "$b" | grep -qE 'st\.has_(ext|lint) += +false' && { echo "    candidates are cleared (events on T+1 would be lost)"; return 1; }
-  echo "$b" | grep -qE 'if\(st\.phase == H3_PH_SWEEP_WAIT && !st\.has_level\)' || { echo "    a touch without a defined level is not excluded"; return 1; }
+  echo "$b" | grep -qE 'st\.frozen +=' && { echo "    H3FvgStep still writes st.frozen (the freeze/thaw of revisions 6-7 was removed in revision 10)"; return 1; }
+  echo "$b" | grep -qE 'skip_derive' && { echo "    a derive step is skipped"; return 1; }
+  echo "$b" | grep -qE 'H3ClearSetup\(|st\.setup_id +=|H3SetupEnded\(|H3_EV_SETUP_ENDED' && { echo "    H3FvgStep ends or clears the setup (RECONF_LOST must keep it)"; return 1; }
+  echo "$b" | grep -qE 'st\.rec_id += +S?""|st\.rec_id += +""' || { echo "    RECONF_LOST does not clear rec_id"; return 1; }
+  echo "$b" | grep -qE 'if\(st\.phase == H3_PH_SWEEP_WAIT && !st\.has_level\)' || { echo "    the defensive no-level guard of a touch is missing"; return 1; }
   pb=$(fn_body "$f" 'void H3ProcessBar(')
   echo "$pb" | grep -q 'H3FvgStep(' || { echo "    H3ProcessBar does not call H3FvgStep"; return 1; }
   echo "$pb" | grep -q 'return;' && { echo "    H3ProcessBar returns before the derive step"; return 1; }
+  db=$(fn_body "$f" 'void H3DeriveStep(')
+  [ -n "$db" ] || { echo "    H3DeriveStep body not found"; return 1; }
+  echo "$db" | grep -q 'st\.frozen' && { echo "    H3DeriveStep reads st.frozen (the structure must run in every phase)"; return 1; }
+  echo "$db" | grep -q 'H3AcceptCandidate(' || { echo "    H3DeriveStep does not use the ratchet acceptance"; return 1; }
+  ab=$(fn_body "$f" 'bool H3AcceptCandidate(')
+  [ -n "$ab" ] || { echo "    H3AcceptCandidate body not found"; return 1; }
+  echo "$ab" | grep -q 'lvl.ext_time > st.lv_ext' || { echo "    ratchet (ii) missing: the extreme pivot must be later than the current level's"; return 1; }
+  echo "$ab" | grep -q 's \* lvl.price < s \* st.lv_price' || { echo "    ratchet (iii) missing: the candidate must be strictly more advanced"; return 1; }
+  echo "$ab" | grep -q 'body' || { echo "    ratchet (iv) missing: a candidate crossed by a close must be rejected"; return 1; }
+  bb=$(fn_body "$f" 'bool H3BiasStep(')
+  [ -n "$bb" ] || { echo "    H3BiasStep body not found"; return 1; }
+  echo "$bb" | grep -qE 'ph != H3_PH_ACTIVE && ph != H3_PH_SWEEP_WAIT' && { echo "    H3BiasStep returns early outside ACTIVE/SWEEP_WAIT (observation events must run in every phase)"; return 1; }
+  [ "$(echo "$bb" | grep -vE 'st\.snap_price +=' | grep -o 'snap_price' | wc -l)" = "2" ] || { echo "    the snapshot price is read outside the SNAPSHOT_CROSSED diagnostic (it is a reference only)"; return 1; }
+  echo "$bb" | grep -q 'H3_EV_SNAP_CROSSED' || { echo "    SNAPSHOT_CROSSED diagnostic missing"; return 1; }
+  echo "$bb" | tr '\n' ' ' | grep -qE 'H3AddEvent\(events, ne, H3_EV_SNAP_CROSSED.*st\.lv_id, ""\);' || { echo "    SNAPSHOT_CROSSED must have an empty comparison signature (not compared by A/B)"; return 1; }
+  fn_body "$f" 'void H3DoFlip(' | grep -q 'INVALIDATED_BY_FLIP' || { echo "    a flip does not end the setup with INVALIDATED_BY_FLIP"; return 1; }
+  fn_body "$f" 'void H3StartHold(' | grep -q 'H3SetupEnded(st, bars\[t\].time, S\?"REPLACED"\|H3SetupEnded(st, bars\[t\].time, "REPLACED"' || { echo "    a new setup does not end the previous one with REPLACED"; return 1; }
+  strip_comments "$f" | grep -nE 'SUPERSEDED_BY_STRUCTURE|M15_OUTCOME' && { echo "    SUPERSEDED_BY_STRUCTURE / M15_OUTCOME must not be implemented in this round"; return 1; }
+  strip_comments "$f" | grep -niE 'expir|max_age|bar_count_limit|age_bars' && { echo "    an expiry / age limit exists (no arbitrary expiry is allowed)"; return 1; }
+  [ "$(strip_comments "$f" | grep -oE '"(INVALIDATED_BY_FLIP|REPLACED)"|reason=[A-Z_]+' | sort -u | tr '\n' ' ')" = '"REPLACED" reason=INVALIDATED_BY_FLIP ' ] || { echo "    SETUP_ENDED reasons other than INVALIDATED_BY_FLIP / REPLACED: $(strip_comments "$f" | grep -oE '"(INVALIDATED_BY_FLIP|REPLACED)"|reason=[A-Z_]+' | sort -u | tr '\n' ' ')"; return 1; }
   return 0
 }
-out=$(freeze_ok $HDR) && echo "  PASS: H3FvgStep freezes at the internal touch, thaws on loss and skips that bar's derive step; H3ProcessBar honours it" || { echo "$out"; echo "  FAIL: FINDING 2 pattern"; FAIL=1; }
+out=$(structure_ok $HDR) && echo "  PASS: revision 10 structure present: no freeze/thaw, ratchet (ii)-(iv) in H3AcceptCandidate, H3DeriveStep runs in every phase, observation events in every phase, snapshot used only by the diagnostic SNAPSHOT_CROSSED (empty signature), RECONF_LOST keeps the setup, flip ends it (INVALIDATED_BY_FLIP), new setup REPLACES the old, no SUPERSEDED/M15_OUTCOME, no expiry" || { echo "$out"; echo "  FAIL: revision 10 structure pattern"; FAIL=1; }
+# the visual EA files must stay byte-identical to the base of this round (47a25d9): the pure-logic API change must not touch them
+VIS_BASE=47a25d9
+vis_identical() { git diff --quiet "$VIS_BASE" -- src/XauUsdH4Bias.mq5 src/include/H4BiasDrawer.mqh 2>/dev/null; }
+if git cat-file -e "$VIS_BASE^{commit}" 2>/dev/null; then
+  vis_identical && echo "  PASS: src/XauUsdH4Bias.mq5 and src/include/H4BiasDrawer.mqh are byte-identical to $VIS_BASE (the visual EA is not touched in this round)" || { echo "  FAIL: a visual EA file differs from $VIS_BASE"; FAIL=1; }
+else
+  echo "  INFO: base $VIS_BASE not available here; the parent must verify that the visual EA files are unchanged"
+fi
 
 echo "=== CHECK 14: diagnostics, candle export text and the TrackChanges decision are read-only / behaviour neutral (static reading) ==="
 # (a) H3Diagnose takes the evaluation as const and never calls the evaluation itself
@@ -255,7 +282,7 @@ out=$(diag_ro_ok $HDR) && echo "  PASS: H3Diagnose takes 'const SH3Eval &ev', do
 # (b) the diagnostic counters of a replay are not part of the state key / state text
 key_ok() {
   local f="$1" fn b
-  for fn in 'string H3StateKey(' 'string H3StateText(' 'string H3EventsText(' 'string H3EvalText('; do
+  for fn in 'string H3StateKey(' 'string H3StructKey(' 'string H3SetupKey(' 'string H3ProvKey(' 'string H3StateText(' 'string H3EventsText(' 'string H3EventsSigText(' 'string H3EvalText('; do
     b=$(fn_body "$f" "$fn")
     [ -n "$b" ] || { echo "    body not found: $fn"; return 1; }
     echo "$b" | grep -qE 'nolv_|n_flips|last_flip|flips_after_run' && { echo "    $fn uses a diagnostic counter"; return 1; }
@@ -263,22 +290,15 @@ key_ok() {
   return 0
 }
 out=$(key_ok $HDR) && echo "  PASS: the state key, state text, events text and evaluation text do not use the diagnostic counters (the A/B comparison cannot change)" || { echo "$out"; echo "  FAIL key purity"; FAIL=1; }
-# (c) against the revision-7 logic (62a0747) H4Bias.mqh only GREW: the only removed lines are the two of the H3AnchorRefs refactor
-H62=62a0747
-removed_ok() {
-  local f="$1" rem
-  git cat-file -e "$H62^{commit}" 2>/dev/null || { echo "    base $H62 not available"; return 2; }
-  git show "$H62:$HDR" > "$TMPD/base62.mqh"
-  rem=$(diff "$TMPD/base62.mqh" "$f" | grep '^< ' | sed 's/^< //')
-  [ "$(echo "$rem" | grep -c .)" -le 2 ] || { echo "    more than 2 lines of the revision-7 logic were removed or changed:"; echo "$rem" | head -5; return 1; }
-  echo "$rem" | grep -vqE '^(int H3AnchorRefs\(const SH3State &st, datetime &refs\[\]\)|         refs\[nr\] = lst\[i\];|)$' && { echo "    an unexpected line of the revision-7 logic was removed or changed:"; echo "$rem" | head -5; return 1; }
+# (c) REPLACED in revision 10: the old check required H4Bias.mqh to have only GROWN against the revision-7 logic
+# (62a0747). Revision 10 changes the logic ON PURPOSE (no freeze, ratchet, setup layer, A/B by function); that
+# change is guarded by structure_ok (CHECK 12b), the transcripts (CHECK 10) and the Python/C++ runs instead.
+removed_ok() { # kept only as the checker used by the negative control 14d: the diagnostics helpers must not change the replay
+  local f="$1"
+  fn_body "$f" 'void H3ProcessBar(' | grep -q 'H3DeriveStep(' || { echo "    H3ProcessBar does not run the derive step (changed or removed line)"; return 1; }
   return 0
 }
-if git cat-file -e "$H62^{commit}" 2>/dev/null; then
-  out=$(removed_ok $HDR) && echo "  PASS: against $H62 (revision-7 logic) H4Bias.mqh only gained lines; the two replaced lines are the H3AnchorRefs wrapper (behaviour: the generated transcripts of all earlier cases are unchanged, CHECK 10)" || { echo "$out"; echo "  FAIL logic changed beyond the diagnostics"; FAIL=1; }
-else
-  echo "  INFO: base $H62 not available here; the parent must verify that H4Bias.mqh only gained lines"
-fi
+out=$(removed_ok $HDR) && echo "  PASS: H3ProcessBar still runs bias, FVG and derive steps in the documented order (the revision-7 'only grew' rule was replaced, see the comment)" || { echo "$out"; echo "  FAIL process order"; FAIL=1; }
 # (d) the TrackChanges decision reports only for a consumer status OK
 tc_ok() {
   local f="$1" b
@@ -315,8 +335,9 @@ neg14() { # neg14 LABEL OLD NEW CHECKFN SUBSTRING
 }
 neg14 "14a H3Diagnose calls H3Evaluate" '   H3Replay(winA, ev.r_eff, p, repA, trA, evA, keysA, true);' '   H3Replay(winA, ev.r_eff, p, repA, trA, evA, keysA, true); SH3Eval zz; H3Evaluate(bars_all, n_avail, p, zz, trA, evA);' diag_ro_ok 'calls the evaluation'
 neg14 "14b H3Diagnose takes a non-const evaluation" 'const SH3Params &p, const SH3Eval &ev, SH3Diag &d)' 'const SH3Params &p, SH3Eval &ev, SH3Diag &d)' diag_ro_ok 'const SH3Eval &ev'
-neg14 "14c a diagnostic counter inside the state key" '   return("BIAS=" + H3DirName(st.dir) + ";PH=" + ph' '   string nolv_dummy = ""; return("BIAS=" + H3DirName(st.dir) + ";PH=" + ph' key_ok 'uses a diagnostic counter'
-neg14 "14d a changed line of the revision-7 logic" '   if(cnt > shown)' '   if(cnt >= shown)' removed_ok 'removed or changed'
+neg14 "14c a diagnostic counter inside the structure key" '   return("BIAS=" + H3DirName(st.dir) + ";LV=" + lv' '   string nolv_dummy = ""; return("BIAS=" + H3DirName(st.dir) + ";LV=" + lv' key_ok 'uses a diagnostic counter'
+neg14 "14d the derive step removed from the bar order" '   H3DeriveStep(t, bars, sw, ns, p, fv, nf, st, tracks, nt, events, ne);
+  }' '  }' removed_ok 'derive step'
 neg14 "14e a widened report condition" '   if(consume_status == H3_C_OK)
       return(H3_TC_REPORT);' '   if(consume_status == H3_C_OK || consume_status == H3_C_GAP)
       return(H3_TC_REPORT);' tc_ok 'not guarded'
@@ -410,26 +431,78 @@ sed 's/ix = H3BarIndexByTime(bars, n, refs\[i\])/ix = 0/' "$NEG/h.mqh" > "$NEG/s
 o=$(anchor_ok "$NEG/s1.mqh") && { echo "  FAIL 13s: an anchor that does not locate the reference by time was NOT detected"; FAIL=1; } || { echo "$o" | grep -q 'does not locate the reference' && echo "  PASS 13s: anchor without the series search detected (intended reason)" || { echo "  FAIL 13s: other reason: $o"; FAIL=1; }; }
 sed 's/datetime c = bars\[ix - p.left\].time;/datetime c = refs[i] - (datetime)(p.left * p.period);/' "$NEG/h.mqh" > "$NEG/s2.mqh"
 o=$(anchor_ok "$NEG/s2.mqh") && { echo "  FAIL 13s: period arithmetic in the anchor was NOT detected"; FAIL=1; } || { echo "$o" | grep -qE 'Left existing bars|period arithmetic' && echo "  PASS 13s: time arithmetic instead of existing bars detected (intended reason)" || { echo "  FAIL 13s: other reason: $o"; FAIL=1; }; }
-sed 's/               st.frozen = false;/               st.frozen = false; skip_derive = true;/' "$NEG/h.mqh" > "$NEG/s3.mqh"
-o=$(freeze_ok "$NEG/s3.mqh") && { echo "  FAIL 13s: a thaw that skips the derive step was NOT detected"; FAIL=1; } || { echo "$o" | grep -q 'derive step of the thaw bar is skipped' && echo "  PASS 13s: thaw skipping the derive step detected (intended reason)" || { echo "  FAIL 13s: other reason: $o"; FAIL=1; }; }
-sed 's/            st.frozen = true;/            st.frozen = true; st.has_lint = false;/' "$NEG/h.mqh" > "$NEG/s5.mqh"
-o=$(freeze_ok "$NEG/s5.mqh") && { echo "  FAIL 13s: candidate clearing was NOT detected"; FAIL=1; } || { echo "$o" | grep -q 'candidates are cleared' && echo "  PASS 13s: candidate clearing at the freeze detected (intended reason)" || { echo "  FAIL 13s: other reason: $o"; FAIL=1; }; }
-sed 's/if(st.phase == H3_PH_SWEEP_WAIT \&\& !st.has_level)/if(false)/' "$NEG/h.mqh" > "$NEG/s6.mqh"
-o=$(freeze_ok "$NEG/s6.mqh") && { echo "  FAIL 13s: removal of the no-level guard was NOT detected"; FAIL=1; } || { echo "$o" | grep -q 'without a defined level' && echo "  PASS 13s: removed no-level guard detected (intended reason)" || { echo "  FAIL 13s: other reason: $o"; FAIL=1; }; }
-sed 's/            st.frozen = true;/            st.frozen = false;/' "$NEG/h.mqh" > "$NEG/s4.mqh"
-o=$(freeze_ok "$NEG/s4.mqh") && { echo "  FAIL 13s: removal of the freeze was NOT detected"; FAIL=1; } || { echo "$o" | grep -q 'never freezes' && echo "  PASS 13s: removed freeze detected (intended reason)" || { echo "  FAIL 13s: other reason: $o"; FAIL=1; }; }
+# revision 10: the structure checker must detect each of its own patterns being broken
+neg_struct() { # neg_struct LABEL SED_EXPR SUBSTRING
+  local label="$1" expr="$2" sub="$3" o
+  sed "$expr" "$NEG/h.mqh" > "$NEG/st.mqh"
+  if cmp -s "$NEG/st.mqh" "$NEG/h.mqh"; then echo "  FAIL 13s ($label): the mutation did not change the header (vacuous)"; FAIL=1; return; fi
+  o=$(structure_ok "$NEG/st.mqh") && { echo "  FAIL 13s ($label): NOT detected"; FAIL=1; return; }
+  echo "$o" | grep -qF -- "$sub" && echo "  PASS 13s ($label): detected (intended reason: $sub)" || { echo "  FAIL 13s ($label): other reason: $o"; FAIL=1; }
+}
+neg_struct "a freeze comes back in H3FvgStep" 's/         st.rec_from     = open_t + p.period;/         st.rec_from     = open_t + p.period; st.frozen = true;/' 'still writes st.frozen'
+neg_struct "the derive step reads frozen" 's/   if(st.dir == H3_NONE)\r\?$/   if(st.dir == H3_NONE || st.frozen)/' 'reads st.frozen'
+neg_struct "ratchet (iii) removed" 's/ \&\& s \* lvl.price < s \* st.lv_price//' 'ratchet (iii) missing'
+neg_struct "ratchet (ii) removed" 's/lvl.ext_time > st.lv_ext \&\& //' 'ratchet (ii) missing'
+neg_struct "RECONF_LOST ends the setup" 's/            st.rec_from     = 0;\r\?$/            st.rec_from     = 0; H3ClearSetup(st, tracks, nt);/' 'ends or clears the setup'
+neg_struct "a SUPERSEDED reason appears" 's/"REPLACED", new_id2/"SUPERSEDED_BY_STRUCTURE", new_id2/' 'SUPERSEDED_BY_STRUCTURE'
+neg_struct "an expiry appears" 's/   if(st.dir == H3_NONE)\r\?$/   int max_age = 100; if(st.dir == H3_NONE)/' 'expiry'
+neg_struct "the snapshot becomes an invalidation" 's/      if(ph != H3_PH_ACTIVE \&\& st.snap_id != "" \&\& s \* (bars\[t\].close - st.snap_price) > 0)/      if(ph != H3_PH_ACTIVE \&\& st.snap_id != "" \&\& s * (bars[t].close - st.snap_price) > 0 \&\& s * (bars[t].low - st.snap_price) > 0)/' 'snapshot price is read outside'
+neg_struct "observation events limited to ACTIVE/SWEEP_WAIT again" 's/   \/\/--- observation events: the structure runs in EVERY phase (a setup does not freeze it)/   if(ph != H3_PH_ACTIVE \&\& ph != H3_PH_SWEEP_WAIT) return(false);/' 'returns early outside ACTIVE/SWEEP_WAIT'
+# the visual EA identity check must detect a change (temporary repository)
+mkdir "$NEG/vrepo" && git -C "$NEG/vrepo" init -q && mkdir -p "$NEG/vrepo/src/include" && echo a > "$NEG/vrepo/src/XauUsdH4Bias.mq5" && echo b > "$NEG/vrepo/src/include/H4BiasDrawer.mqh" && git -C "$NEG/vrepo" add -A && git -C "$NEG/vrepo" -c user.email=x@x -c user.name=x commit -q -m base
+vb=$(git -C "$NEG/vrepo" rev-parse HEAD)
+git -C "$NEG/vrepo" diff --quiet "$vb" -- src/XauUsdH4Bias.mq5 src/include/H4BiasDrawer.mqh && echo "  PASS 13s: an unchanged visual EA pair passes the identity test" || { echo "  FAIL 13s: unchanged pair flagged"; FAIL=1; }
+echo c >> "$NEG/vrepo/src/include/H4BiasDrawer.mqh"
+git -C "$NEG/vrepo" diff --quiet "$vb" -- src/XauUsdH4Bias.mq5 src/include/H4BiasDrawer.mqh && { echo "  FAIL 13s: a modified drawer was NOT detected"; FAIL=1; } || echo "  PASS 13s: a modified visual EA file is detected by the identity test"
 # 13t: mutated MODELS must make the Python run fail, for the intended reason
 mutate_py() { # mutate_py SED_EXPR EXPECTED_FAILED_LABEL_REGEX LABEL
   mkdir -p "$NEG/pm" && cp tests/t002_reference_test.py tests/t003_replay_csv.py "$NEG/pm/" && sed "$1" $PYT > "$NEG/pm/t003_reference_test.py"
   if cmp -s "$NEG/pm/t003_reference_test.py" $PYT; then echo "  FAIL 13t ($3): the mutation did not change the model (vacuous)"; FAIL=1; return; fi
   ( cd "$NEG/pm" && python3 t003_reference_test.py > out.txt 2>&1 ); local rcx=$?
-  if [ $rcx -ne 0 ] && grep -qE "FAILED: .*$2" "$NEG/pm/out.txt"; then echo "  PASS 13t: $3 -> the Python run fails (intended check: $2)"; else echo "  FAIL 13t ($3): not detected for the intended reason (rc=$rcx)"; FAIL=1; fi
+  if [ $rcx -ne 0 ] && grep -qE "(^  FAIL |FAILED: ).*$2" "$NEG/pm/out.txt"; then echo "  PASS 13t: $3 -> the Python run fails (intended check: $2)"; else echo "  FAIL 13t ($3): not detected for the intended reason (rc=$rcx)"; FAIL=1; fi
 }
-mutate_py 's/^                st\.frozen = True$/                st.frozen = False/' '\(a\): ' 'no freeze at the internal touch'
-mutate_py 's/^                    st\.frozen = False$/                    st.frozen = True/' '\(b\): ' 'no thaw when the FVG is lost'
-mutate_py "s/            if st.phase == 'SWEEP_WAIT' and not st.has_level:/            if False:/" '\(e\): ' 'a touch without a defined level is recorded'
+mutate_py2() { # mutate_py2 OLD NEW EXPECTED_FAILED_LABEL_REGEX LABEL : exact text replacement in the model, the Python run must fail
+  mkdir -p "$NEG/pm" && cp tests/t002_reference_test.py tests/t003_replay_csv.py "$NEG/pm/"
+  python3 -I - "$PYT" "$NEG/pm/t003_reference_test.py" "$1" "$2" <<'PYEOF2'
+import sys
+src, dst, old, new = sys.argv[1:5]
+t = open(src, encoding='ascii').read()
+if old not in t:
+    sys.exit(3)
+open(dst, 'w', encoding='ascii').write(t.replace(old, new, 1))
+PYEOF2
+  if [ $? -ne 0 ]; then echo "  FAIL 13t ($4): the mutation target text is absent (vacuous)"; FAIL=1; return; fi
+  ( cd "$NEG/pm" && python3 t003_reference_test.py > out.txt 2>&1 ); local rcy=$?
+  if [ $rcy -ne 0 ] && grep -qE "(^  FAIL |FAILED: ).*$3" "$NEG/pm/out.txt"; then echo "  PASS 13t: $4 -> the Python run fails (intended check: $3)"; else echo "  FAIL 13t ($4): not detected for the intended reason (rc=$rcy)"; FAIL=1; fi
+}
+mutate_py2 "        if not (lvl.ext_time > st.lv_ext and s * lvl.price < s * st.lv_price):" "        if False:" 'R2|R13|R14' 'the ratchet is removed (a wick top can raise the level)'
+mutate_py2 "                st.phase = to
+                st.recon_reason = ''
+                st.rec_id = ''
+                st.rec_from = 0" "                st.phase = to
+                st.recon_reason = ''
+                st.rec_id = ''
+                st.rec_from = 0
+                setup_ended(st, open_t, 'RECONF_LOST', events)
+                clear_setup(st, tracks)" 'RECONF_LOST' 'RECONF_LOST ends the setup'
+mutate_py2 "    if struct_a != struct_b:
+        why.append('AB_STRUCTURE_DIFF')" "    if False:
+        why.append('AB_STRUCTURE_DIFF')" 'SC-1|R17|R18' 'the A/B check ignores the STRUCTURE key'
+mutate_py2 "    if setup_a != setup_b:
+        why.append('AB_SETUP_DIFF')" "    if False:
+        why.append('AB_SETUP_DIFF')" 'R17|R18' 'the A/B check ignores the SETUP key'
+mutate_py2 "        tx(st.src_time), tx(st.wait_start)," "        tx(st.src_time), '0'," 'wait_start' 'wait_start removed from the compared key'
+mutate_py2 "        out.append('%s[%s-%s]@%s:%s' % (tr.id, pf(tr.lower), pf(tr.upper), tx(tr.conf)," "        out.append('%s[%s-%s]@%s:%s' % (tr.id, '0', '0', tx(tr.conf)," 'FVG bound' 'FVG bounds removed from the compared key'
+mutate_py2 "        ('%s@%s/%d' % (st.ex_id, pf(st.ex_price), 1 if st.ex_consumed else 0)) if st.has_ext else '-'," "        ('%s@%s/%d' % (st.ex_id, pf(st.ex_price), 0)) if st.has_ext else '-'," 'R21' 'the consumed flag of the continuation candidate removed from the key'
+mutate_py2 "        ('%s@%s/%d' % (st.li_id, pf(st.li_price), 1 if st.li_consumed else 0)) if st.has_lint else '-'," "        ('%s@%s/%d' % (st.li_id, pf(st.li_price), 0)) if st.has_lint else '-'," 'R21' 'the consumed flag of the interior candidate removed from the key'
+mutate_py2 "    setup_ended(st, open_t, END_REPLACED, events, new_id)
+    st.phase = 'HOLD'" "    st.phase = 'HOLD'" 'REPLACED|R16|second wick' 'a new wick no longer ends the previous setup'
+mutate_py2 "    if old_setup != '':
+        # the structure flipped: the setup is over for good (INVALIDATED_BY_FLIP)" "    if False:
+        # the structure flipped: the setup is over for good (INVALIDATED_BY_FLIP)" 'body break during' 'a flip no longer ends the setup'
 mutate_py 's/        c = bars\[i - p\.left\]\.time/        c = r - p.left * p.period/' '(weekend gap|history gap)' 'anchor by time arithmetic instead of existing bars'
 mutate_py "s/        if i < p\.left:/        if False:/" 'window start' 'no missing-history report when fewer than Left bars exist'
+mutate_py2 "                if sx.confirm_time != bars[sx.index + right].time + PERIOD:" "                if sx.confirm_time != sx.pivot_time + (right + 1) * PERIOD:" 'confirm_time' 'confirm_time checked by pivot + (Right+1) periods (the revision 9 wording) fails across a weekend'
 rm -rf "$NEG"
 
 echo "=== RESULT ==="
