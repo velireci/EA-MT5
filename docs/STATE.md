@@ -4,14 +4,14 @@
 
 Updated: 2026-10-13 (Europe/Tirane)
 
-- Phase: T001 foundation compiled by Codex and partly observed in MT5 (PR #1 open); T002 H4 map prototype compiled and partly observed (PR #2 draft); T003 H4 direction-change specification DRAFTED from the client's 2026-10-13 text clarifications (documents only, not implemented). Awaiting Codex's review of the specification and the owner's decisions.
-- Current task: documents only: tasks/T003-h4-bias-change.md (DRAFT), docs/STRATEGY_SPEC.md and docs/DECISIONS.md separate client statements S1-S6, earlier authorised decisions, proposals and open questions. PR velireci/EA-MT5#1 (T001, `main`) is open and NOT merged; tested version `763227d494115126a801d7e9cebe48a49977eb76`. T003 is NOT started and nothing in it may be implemented or reported as passed.
+- Phase: T001 foundation compiled by Codex and partly observed in MT5 (PR #1 open); T002 H4 map prototype compiled and partly observed (PR #2 draft); T003 H4 direction-change specification drafted (revision 2) from the client's 2026-10-13 text clarifications and BUY example, with Codex's remarks applied (documents only, not implemented). Awaiting Codex's review of the specification and the owner's decisions.
+- Current task: documents only: tasks/T003-h4-bias-change.md (DRAFT rev. 2), docs/STRATEGY_SPEC.md and docs/DECISIONS.md separate client statements (S1-S6, BUY example E1-E5), earlier authorised decisions, proposals (P1-P12) and open questions (F1-F7). PR velireci/EA-MT5#1 (T001, `main`) is open and NOT merged; tested version `763227d494115126a801d7e9cebe48a49977eb76`. T003 is NOT started; nothing in it is implemented or tested, and neither T002 nor T003 is complete.
 - Branch: `claude/t002-h4-map` (PR #2). No agent owns an active edit; the T001 branch `claude/amazing-darwin-icpcjd` is unchanged.
 - Source: inputs/client-E27N93/pergjigjet.json and associated TXT/photos.
 - Strategy review completed; no strategy logic implemented and none invented.
 - Client approval: broad questionnaire answers supplied; disputed/undefined rules remain open.
-- Current strategy dependency: Q01-Q04. New client text clarifications (2026-10-13, S1-S6) are in DECISIONS.md. Client screenshots are illustrations; text takes priority and no screenshot level is a rule. Still open: M5 role, policy below 2R.
-- Next owner action: have Codex review tasks/T003-h4-bias-change.md; answer or defer its open questions D1-D6 (intrabar wick blocking, the 'rule documented earlier' for the touching candle, post-wick FVG inside the interval, positions already open, M5/2R, level re-derivation); decide about PR #1 and PR #2.
+- Current strategy dependency: Q01-Q04. Client clarifications of 2026-10-13 (S1-S6, BUY example E1-E5) are in DECISIONS.md. Screenshots are illustrations (not stored in the repo); text takes priority; no screenshot level is a rule; BOS counts and the example's target are not rules. Still open: M5 role, policy below 2R.
+- Next owner action: have Codex review tasks/T003-h4-bias-change.md rev. 2; decide or defer F1-F7 (exact time definition of the new FVG after the wick, M5/M15, policy below 2R, positions already open, ERL selection and reconfirmation validity, whether the intrabar block proposed by Codex is wanted, how an entry module treats LIMITED_BY_HISTORY); supply the candles the client marked for the section-10 visual comparison; decide about PR #1 and PR #2.
 - Next developer action: none until Codex's review of the T003 specification and the owner's go. No MQL5, `src/` or `tools/` change was made in this documentation step.
 
 ## Files added in T001

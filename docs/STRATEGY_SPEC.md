@@ -54,36 +54,35 @@ C. PROPOSED (developer proposals, NOT client answers; implemented only as drawin
 
 D. STILL OPEN (not implemented, not decided): exact M5/M15 confirmation relation; policy when the target is below 2R. A suggestion to skip below 2R exists and is NOT an approved decision. Also open inside the proposal: whether an IRL FVG must also lie inside the swing leg in time; size filters for FVG; reuse limits; whether TAKEN should use live price.
 
-## H4 direction change and reconfirmation (T003 draft) - four kinds of content, kept apart
-Source of the client statements: the client's text clarifications of 2026-10-13, relayed by the owner. The client's screenshots are ILLUSTRATIONS: no price, date or candle index in them is a rule, and where a text clarification exists it takes priority over how the arrows or shapes might be read. In particular, the zone drawn in the screenshot is not assumed to be the "new FVG after the wick"; that requirement was confirmed separately in text (S4).
+## H4 direction change and reconfirmation (T003 draft, revision 2) - four kinds of content, kept apart
+Sources: the client's text clarifications and the BUY example of 2026-10-13, relayed by the owner. Client screenshots are ILLUSTRATIONS: no price, date or candle index in them is a rule, and where a text clarification exists it takes priority over how arrows or shapes might be read. The screenshots are not stored in the repository. Full text, state table, acceptance criteria and tests: tasks/T003-h4-bias-change.md (nothing implemented).
 
-A. CLIENT STATEMENTS (see DECISIONS.md, 2026-10-13):
-- S1. A change from bearish to bullish direction requires a break of the relevant H4 structural level. In the client's picture the first marked level is enough; breaking the higher high as well is not required. "First level" does not automatically mean the nearest high or any small swing; the algorithmic choice of the level is still to be formalised.
-- S2. The pass must be with the candle body. A wick-only pass does not confirm a change of direction and may be a liquidity grab.
-- S3. SELL: after a wick above the structural level the robot stops NEW entries from the previous setup and waits for reconfirmation. This does not say what happens to positions that are already open.
-- S4. SELL reconfirmation needs a NEW bearish H4 FVG formed AFTER the wick. An FVG that existed before the wick is not enough, even if it is touched again.
-- S5. After the new H4 FVG: wait for the touch (a wick touch is allowed); wait for the close of the touching candle, per the rule documented earlier; then look for a new M15 structure break; entry stays at the M15 FVG after the break. The H4 FVG/IRL is context, not entry. Setups remain in the trend direction only, IRL -> ERL.
-- S6. Still open: the role of M5 in the M15 confirmation, and the policy when the ERL target is below 2R.
+A. CLIENT STATEMENTS (DECISIONS.md, 2026-10-13):
+- S1. A change from bearish to bullish needs a break of the relevant H4 structural level; in the client's first picture the first marked level is enough and the higher high need not be broken. "First level" is not automatically the nearest high or a small swing; its algorithmic choice is still to be formalised.
+- S2. The pass must be with the body; a wick-only pass does not confirm a change and may be a liquidity grab.
+- S3. SELL: after a wick above the structural level the robot stops NEW entries from the previous setup and waits for reconfirmation. Silent about open positions.
+- S4. SELL reconfirmation needs a NEW bearish H4 FVG formed AFTER the wick; a pre-wick FVG is not enough even if touched again.
+- S5. After the new H4 FVG: the touch is at that H4 FVG (wick allowed) and we wait for the close of the H4 candle that touched it (an earlier client clarification relayed by the owner; original wording not in the repository); then a new M15 structure break; entry at the M15 FVG after the break. H4 FVG/IRL is context, not entry; trend-direction setups only, IRL -> ERL.
+- S6. Open: M5 role; policy below 2R.
+- E1-E5 (BUY example, H4): price rising with two consecutive BOS; in the circled part price looked as if it had broken the structure down but was only a liquidity grab; after the grab the next H4 FVG formed; price touched it and then made another BOS up; the red arrow is the expected rise; the client said the entry is at the FVG and the target is the top of the third broken structure.
+  Limits (owner's instructions): evidence on the BUY side for wick/grab versus confirmed structure change; "two/third BOS" is the order in this example, not a condition (no fixed number of BOS); the green zone is the H4 FVG formed after the grab; the arrow is an expectation, not a signal; "entry at the FVG" does not cancel S5 (H4 is context, entry is at the M15 FVG after the break); the target is the top of the broken structure in this example only, not a universal ERL rule; the BUY/SELL mirror details are NOT client confirmations.
 
-B. AUTHORISED EARLIER DECISIONS: the owner's authorisation (2026-10-07) to propose mechanical rules for what the client selects visually, as proposals awaiting visual validation; the T002 proposals above (swing 2/2, direction test, interval, FVG states, ERL taken, ordering) stand unchanged and unvalidated. T002's closed-bar-only rule is the nearest documented rule for "close of the touching candle" (see D2).
+B. AUTHORISED EARLIER DECISIONS: the owner's authorisation (2026-10-07) to propose mechanical rules for what the client selects visually, as proposals awaiting visual validation; the T002 proposals (swing 2/2, direction test, interval, FVG states, ERL taken, ordering) stand unchanged and unvalidated.
 
-C. PROPOSED, NOT CLIENT ANSWERS (full text and state table in tasks/T003-h4-bias-change.md; nothing implemented):
-- "With the body" = an H4 candle CLOSE strictly beyond the structural level (equality does not count). High above, close not beyond = WICK_ONLY.
-- Structural level (bearish context): the highest confirmed swing high of the leg that produced the latest confirmed swing low, i.e. between the previous confirmed swing low and the latest one; small swings inside the leg do not become the level. Mirror for a bullish context. No level without both bounding swings: state "no evidence", not a guess.
-- A bias layer with hysteresis next to T002's swing-based direction: once BEARISH (or BULLISH), the bias stays until a body break of the structural level; T002's direction is still displayed and may disagree.
-- Wick event: wick bar and the time it becomes known (close of that bar); new entries from the previous setup are blocked from then on; FVGs that existed before the wick are ineligible for reconfirmation.
-- "New FVG after the wick": candle A is the wick candle or later, and candle C closes after the wick candle; no candle before the wick candle takes part.
-- A body break during the wait flips the bias; a further wick restarts the wait from the latest wick; an invalidated new FVG is dropped; the touch counts at the close of the touching candle.
-- BUY is the mirror image; this is a proposal because the clarification was given for SELL.
-- Live and historical use the same replay over closed bars; nothing after the evaluation time is read.
+C. PROPOSED, NOT CLIENT ANSWERS (T003 P1-P12; labelled "proposed" everywhere):
+- P1 Body = H4 close strictly beyond the level (equality is not a break); high beyond with the close not beyond = wick-only; "level crossed without a confirmed change" means wick-only.
+- P2 Structural level (bearish context): the highest confirmed swing high between the latest lower low and the low before it; minor swings inside the leg and corrective lows do not become the level; missing bounds or an already-touched level = undefined. Mirror for bullish. Validated only by visual comparison with the client's examples (T003 section 10), never claimed validated.
+- P3 Bias layer with hysteresis next to T002's direction: kept until a body break, whatever T002 says.
+- P4/P5/P6/P7 Wick event with its known time and the entry block; an eligible FVG has candle A on the wick candle or later (working interpretation, see F1); touch counts at the close of the touching H4 candle (client information); transitions for repeated wicks, body breaks and invalidations.
+- P8 BUY mirror (a proposal; the BUY example supports only the distinction in E1-E5).
+- P9 One causal replay over closed bars for live and historical.
+- P10 Bias from the history of breaks, so that a window starting mid-trend can give a bias even when T002 shows MIXED at the evaluation time; no bar after the evaluation time.
+- P11 Continuity: anchored window that is not cut under an active state, bars identified by time, restart equivalence, LIMITED_BY_HISTORY, and window-caused changes reported as RE-DERIVATION, never as a market event.
+- P12 Intrabar block (Codex's technical proposal, awaiting the owner's decision): a strict crossing of the held level by the forming H4 candle blocks new entries immediately and only restricts; the direction change is confirmed only by an H4 close beyond the level. At the close: wick-only becomes the closed-bar HOLD; a body break ends the block in the flip; equality is not a crossing. Live only; historical mode cannot reproduce it.
 
 D. STILL OPEN:
-- D1. Intrabar wick: the closed-bar rule can delay the block of new entries by up to one H4 bar; whether the forming bar's high must block immediately is undecided.
-- D2. The H4 touch/close rule the client calls "documented earlier" was not found in the repository documents; the proposal reuses T002's closed-bar touch rule and needs the client's confirmation.
-- D3. Whether the new FVG must lie inside T002's interval, and how ERL/target are chosen after a flip.
-- D4. What happens to positions that are already open (client S3 is silent).
-- D5. M5 role and the policy below 2R (S6). An alternative skip-below-2R recommendation is NOT an approved decision.
-- D6. Whether the level frozen at the wick should be re-derived after a new lower low during the wait; whether the BUY mirror is what the client wants.
+- F1 exact time definition of "new FVG after the wick"; F2 M5/M15 relation; F3 policy below 2R (a skip recommendation is NOT an approved decision); F4 positions already open; F5 ERL selection and reconfirmation validity (inside T002's interval or not, how long it stays valid, re-deriving the frozen level, target rule); F6 whether an intrabar block is wanted; F7 how an entry module treats LIMITED_BY_HISTORY.
+- Resolved: the touch rule is client information (S5), no longer a question.
 
 ## Approval policy
 Record client-confirmed additions with date and source in DECISIONS.md and then update this specification. Developer proposals must be visibly labeled PROPOSED and confined to visual/experimental work until confirmed. A platform constraint may require a documented client choice; it is not permission to silently change strategy.
