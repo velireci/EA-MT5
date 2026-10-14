@@ -113,8 +113,16 @@ neg "state constant differs from the fixture table" parity $MOD "#define TP_NEWS
 neg "positions boundary made exclusive in MQL5" guards $MOD "snap.open_positions>=lim.max_positions" "snap.open_positions>lim.max_positions" "guard expression missing in MQL5" $REF
 negpy "trades boundary made exclusive in Python" guards "snap.trades_today >= limits.max_trades_per_day" "snap.trades_today > limits.max_trades_per_day" "guard expression missing in Python"
 neg "registering also on BLOCK in MQL5" guards $MOD "      return(false);
-   reg_ids[reg_count]=plan.signal_id;" "      {}
-   reg_ids[reg_count]=plan.signal_id;" "guard expression missing in MQL5" $REF
+   int capacity=ArraySize(reg_ids);" "      {}
+   int capacity=ArraySize(reg_ids);" "guard expression missing in MQL5" $REF
+neg "naive overflowing risk sum reintroduced in MQL5" guards $MOD "TP_RiskExceeded(snap.existing_risk,plan.risk_model,lim.risk_cap))" "snap.existing_risk+plan.risk_model>lim.risk_cap)" "naive" $REF
+neg "plan stage check removed in MQL5" guards $MOD "plan.status==TP_OK && plan.stage==TP_STAGE_COMPLETE" "plan.status==TP_OK" "guard expression missing in MQL5" $REF
+neg "plan value validation removed in MQL5" guards $MOD "bool values_ok=TP_PlanValuesOk(plan);" "bool values_ok=true;" "guard expression missing in MQL5" $REF
+neg "final registry bounds guard removed in MQL5" guards $MOD "if(reg_count<0 || reg_count>=capacity)     //" "if(false)     //" "guard expression missing in MQL5" $REF
+negpy "plan id validation removed in Python" guards "ids_ok = not (_blank(getattr(plan, 'signal_id', None)) or _blank(getattr(plan, 'setup_id', None)))" "ids_ok = True" "guard expression missing in Python"
+negpy "registry capacity check removed in Python" guards "    elif registry.count >= capacity:
+        reasons.append('REGISTRY_FULL')" "    elif False:
+        reasons.append('REGISTRY_FULL')" "guard expression missing in Python"
 neg "POLICY_UNSET guard disabled in MQL5" guards $MOD 'if(!lim.max_positions_set) TP_AddReason(out,"POLICY_UNSET:max_positions");' 'if(false) TP_AddReason(out,"POLICY_UNSET:max_positions");' "guard expression missing in MQL5" $REF
 neg "own normalization of the plan volume in MQL5" guards $MOD "out.volume_out=siz.volume_out;" "out.volume_out=NormalizeDouble(siz.volume_out,2);" "does its own rounding" $REF
 neg "positions_untouched can become false in MQL5" guards $MOD "out.positions_untouched=true;" "out.positions_untouched=false;" "positions_untouched" $REF

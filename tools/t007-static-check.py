@@ -9,8 +9,9 @@ Usage: t007-static-check.py trading|nofeed|nopersist|contract|parity|guards FILE
   contract  : header statements present; labels are returned by code (FILE... = .mqh then reference .py)
   parity    : (FILE... = .mqh then reference .py) statuses, stages, cancel statuses, plan/permit/cancel reason tags in the SAME
               first-occurrence order, event order, numeric constants, state constants (also versus the fixtures), labels
-  guards    : (FILE... = .mqh then reference .py) boundary comparisons, registration only after an ALLOW, POLICY_UNSET guards,
-              geometry before sizing, positions_untouched, no rounding/normalization of its own
+  guards    : (FILE... = .mqh then reference .py) boundary comparisons, registration only after an ALLOW and a final bounds guard,
+              POLICY_UNSET guards, plan stage/id/value validation, the overflow-free risk comparison (no naive sum), registry
+              capacity checks, geometry before sizing, positions_untouched, no rounding/normalization of its own
 Exit 0 = pass, 1 = findings printed.
 """
 import importlib.util
@@ -24,7 +25,7 @@ t5 = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(t5)
 
 PLAN_TAGS = ['INVALID_SIGNAL_ID', 'INVALID_SETUP_ID', 'GEOMETRY_REFUSED', 'SIZING_REFUSED']
-PERMIT_TAGS = ['PLAN_NOT_OK', 'DATA_UNRELIABLE', 'DATA_NOT_READY', 'DATA_UNKNOWN', 'INVALID_SNAPSHOT:data_state',
+PERMIT_TAGS = ['PLAN_NOT_OK', 'PLAN_INVALID_ID', 'PLAN_INVALID_VALUES', 'DATA_UNRELIABLE', 'DATA_NOT_READY', 'DATA_UNKNOWN', 'INVALID_SNAPSHOT:data_state',
                'SESSION_CLOSED', 'SESSION_UNKNOWN', 'INVALID_SNAPSHOT:session_state', 'NEWS_BLOCK', 'NEWS_UNKNOWN',
                'INVALID_SNAPSHOT:news_state', 'SPREAD_BLOCK', 'SPREAD_UNKNOWN', 'INVALID_SNAPSHOT:spread_state',
                'REGISTRY_INVALID', 'DUPLICATE_SIGNAL', 'REGISTRY_FULL',
@@ -175,26 +176,43 @@ def check_guards(files):
     mqh = t5.strip(read(files[0]), keep_strings=True)
     ref = pycode(read(files[1]))
     bad = 0
+    fields = ('e_out', 's_out', 'tp', 'level_2r', 'partial_price', 'r_geom', 'volume_out', 'risk_model')
     must_mqh = [r'snap\.open_positions>=lim\.max_positions', r'snap\.trades_today>=lim\.max_trades',
-                r'plan_ok && snap\.existing_risk\+plan\.risk_model>lim\.risk_cap\+TP_RISK_ULPS\*DBL_EPSILON\*MathMax\(1\.0,lim\.risk_cap\)',
-                r'if\(!TP_CheckPermit\(plan,snap,lim,reg_ids,reg_count,out\)\)\s*return\(false\);\s*reg_ids\[reg_count\]=plan\.signal_id;\s*reg_count\+\+;',
+                r'plan_ok && TP_RiskExceeded\(snap\.existing_risk,plan\.risk_model,lim\.risk_cap\)',
+                r'double tol=TP_RISK_ULPS\*DBL_EPSILON\*MathMax\(1\.0,cap\);\s*double remaining=cap-existing;',
+                r'if\(remaining>=0\.0\) return\(\(risk-remaining\)>tol\);\s*double over=-remaining;\s*return\(!\(over<=tol && risk<=tol-over\)\);',
+                r'bool plan_complete=\(plan\.status==TP_OK && plan\.stage==TP_STAGE_COMPLETE\);',
+                r'bool ids_ok=\(!TP_IsBlank\(plan\.signal_id\) && !TP_IsBlank\(plan\.setup_id\)\);',
+                r'bool values_ok=TP_PlanValuesOk\(plan\);', r'bool plan_ok=\(plan_complete && ids_ok && values_ok\);',
+                r'if\(!plan_complete\) TP_AddReason\(out,"PLAN_NOT_OK"\);\s*else\s*\{\s*if\(!ids_ok\) TP_AddReason\(out,"PLAN_INVALID_ID"\);\s*if\(!values_ok\) TP_AddReason\(out,"PLAN_INVALID_VALUES"\);',
+                r'bool TP_PosFinite\(const double v\) \{return\(TG_Finite\(v\) && v>0\.0\);\}'] + \
+               [r'TP_PosFinite\(p\.%s\)' % f for f in fields] + [
+                r'if\(!TP_CheckPermit\(plan,snap,lim,reg_ids,reg_count,out\)\)\s*return\(false\);\s*int capacity=ArraySize\(reg_ids\);\s*if\(reg_count<0 \|\| reg_count>=capacity\)[^{]*\{[^}]*return\(false\);\s*\}\s*reg_ids\[reg_count\]=plan\.signal_id;\s*reg_count\+\+;',
                 r'if\(!lim\.max_positions_set\) TP_AddReason\(out,"POLICY_UNSET:max_positions"\)',
                 r'if\(!lim\.max_trades_set\) TP_AddReason\(out,"POLICY_UNSET:max_trades_per_day"\)',
                 r'if\(!lim\.risk_cap_set\) TP_AddReason\(out,"POLICY_UNSET:combined_risk_cap"\)',
                 r'out\.positions_untouched=true;', r'events<0 \|\| \(events & ~TP_EV_ALL\)!=0',
-                r'if\(dup\) TP_AddReason\(out,"DUPLICATE_SIGNAL"\);\s*else if\(reg_count>=capacity\) TP_AddReason\(out,"REGISTRY_FULL"\)',
+                r'if\(capacity<0 \|\| reg_count<0 \|\| reg_count>capacity\) TP_AddReason\(out,"REGISTRY_INVALID"\);\s*else if\(dup\) TP_AddReason\(out,"DUPLICATE_SIGNAL"\);\s*else if\(reg_count>=capacity\) TP_AddReason\(out,"REGISTRY_FULL"\);',
                 r'TG_Compute\([^;]*\);\s*if\(geo\.status!=TG_OK\)', r'PS_Compute\(geo,risk_budget,tick_value,volume_min,volume_step,volume_max,cap_lots,siz\);\s*if\(siz\.status!=PS_OK\)',
-                r'out\.risk_model=siz\.risk_realized;', r'bool plan_ok=\(plan\.status==TP_OK\);']
+                r'out\.risk_model=siz\.risk_realized;']
     must_py = [r'snap\.open_positions >= limits\.max_positions', r'snap\.trades_today >= limits\.max_trades_per_day',
-               r'plan_ok and snap\.existing_risk \+ plan\.risk_model > cap \+ RISK_ULPS \* DBL_EPSILON \* max\(1\.0, cap\)',
-               r'if permit\.decision != ALLOW:\n\s+return permit\n\s+registry\.ids\[registry\.count\] = plan\.signal_id\n\s+registry\.count \+= 1',
+               r'plan_ok and _risk_exceeded\(snap\.existing_risk, plan\.risk_model, cap\)',
+               r'tol = RISK_ULPS \* DBL_EPSILON \* max\(1\.0, cap\)\n\s+remaining = cap - existing',
+               r'if remaining >= 0\.0:\n\s+return \(risk - remaining\) > tol\n\s+over = -remaining\n\s+return not \(over <= tol and risk <= tol - over\)',
+               r"plan_complete = getattr\(plan, 'status', None\) == OK and getattr\(plan, 'stage', None\) == STAGE_COMPLETE",
+               r"ids_ok = not \(_blank\(getattr\(plan, 'signal_id', None\)\) or _blank\(getattr\(plan, 'setup_id', None\)\)\)",
+               r"values_ok = all\(_pos_finite\(getattr\(plan, f, None\)\) for f in PLAN_REQUIRED\)", r'plan_ok = plan_complete and ids_ok and values_ok',
+               r"if not plan_complete:\n\s+reasons\.append\('PLAN_NOT_OK'\)\n\s+else:\n\s+if not ids_ok:\n\s+reasons\.append\('PLAN_INVALID_ID'\)\n\s+if not values_ok:\n\s+reasons\.append\('PLAN_INVALID_VALUES'\)",
+               r'math\.isfinite\(v\) and v > 0',
+               r"PLAN_REQUIRED = \(%s\)" % ', '.join("'%s'" % f for f in fields),
+               r'if permit\.decision != ALLOW:\n\s+return permit\n\s+if not _count_ok\(registry\.count\) or registry\.count >= len\(registry\.ids\):[^\n]*\n\s+return Permit\(decision=BLOCK, primary_reason=.REGISTRY_FULL.[^\n]*\n\s+registry\.ids\[registry\.count\] = plan\.signal_id\n\s+registry\.count \+= 1',
                r"if limits\.max_positions is None:\n\s+reasons\.append\('POLICY_UNSET:max_positions'\)",
                r"if limits\.max_trades_per_day is None:\n\s+reasons\.append\('POLICY_UNSET:max_trades_per_day'\)",
                r"if cap is None:\n\s+reasons\.append\('POLICY_UNSET:combined_risk_cap'\)",
                r'positions_untouched: bool = True', r'\(events & ~EV_ALL\) != 0',
-               r"if sid in registry\.ids\[:registry\.count\]:\n\s+reasons\.append\('DUPLICATE_SIGNAL'\)\n\s+elif registry\.count >= capacity:\n\s+reasons\.append\('REGISTRY_FULL'\)",
+               r"if capacity < 0 or not _count_ok\(registry\.count\) or registry\.count > capacity:\n\s+reasons\.append\('REGISTRY_INVALID'\)\n\s+elif not _blank\(sid\) and sid in registry\.ids\[:registry\.count\]:\n\s+reasons\.append\('DUPLICATE_SIGNAL'\)\n\s+elif registry\.count >= capacity:\n\s+reasons\.append\('REGISTRY_FULL'\)",
                r'geo = g5\.compute\([^\n]*\n\s+if geo\.status != g5\.OK:', r'siz = p6\.size\(geo, risk_budget, tick_value, volume_min, volume_step, volume_max, cap_lots\)\n\s+if siz\.status != p6\.OK:',
-               r'risk_model=siz\.risk_realized', r"plan_ok = getattr\(plan, 'status', None\) == OK"]
+               r'risk_model=siz\.risk_realized']
     for pat in must_mqh:
         if not re.search(pat, mqh):
             print('%s: guard expression missing in MQL5: %s' % (files[0], pat))
@@ -202,6 +220,10 @@ def check_guards(files):
     for pat in must_py:
         if not re.search(pat, ref):
             print('%s: guard expression missing in Python: %s' % (files[1], pat))
+            bad = 1
+    for lang, text in (('MQL5', mqh), ('Python', ref)):
+        if re.search(r'existing_risk\s*\+\s*plan\.risk_model', text):
+            print('%s code forms the naive overflowing sum existing_risk + plan.risk_model (use the overflow-free comparison)' % lang)
             bad = 1
     for lang, text, forb in (('MQL5', mqh, OWN_ROUNDING_MQL), ('Python', ref, OWN_ROUNDING_PY)):
         m = forb.search(text)

@@ -25,6 +25,18 @@ PERMIT rows: BASIC plans have risk_model 1231.25. Limits positions 3 (allow <3),
   3768.75 + 1231.25 = 5000.00 exactly at the cap (ALLOWED, proposal); 3768.76 + 1231.25 = 5000.01 (BLOCK).
   Binary noise: SELL_TICK005 plan risk is 1998.8 (stored as 1998.8000000000002); existing 0.01, cap 1998.81: decimal sum 1998.81 =
   cap (allowed; the binary sum is 1 ulp above the cap); existing 0.02 is a real excess (1 cent) and blocks.
+PLAN VALIDATION rows (check_permit requires status OK + stage COMPLETE + non-blank ids + the 8 plan numbers finite and > 0):
+  the plan is BUY_BASIC with one MODIFICATION (mod): ZERO_INPUT = the all-zero struct (status OK, stage INPUT, blank ids, zeros) ->
+  PLAN_NOT_OK only; ZERO_COMPLETE = same with stage COMPLETE -> PLAN_INVALID_ID|PLAN_INVALID_VALUES; STAGE_* -> PLAN_NOT_OK;
+  blank/empty signal or setup id -> PLAN_INVALID_ID; ('FIELD', name, kind) with kind NAN/INF/NEGINF/NEG(-1)/ZERO -> PLAN_INVALID_VALUES.
+  Every permit row is also run through authorize on a second copy of the registry: ALLOW appends exactly the signal id, every
+  refusal leaves ids and count identical (count override cnt: a registry count that does not match the ids, e.g. 3 with capacity 2).
+OVERFLOW rows (real T005/T006 plans, E 2, SL 1, tick 1, digits 0, point 1, volume 1/1/1/1): R_geom 1, level_2R = 2 + 2 = 4 = TP,
+  budget = tick_value = B -> loss/lot B, volume 1.0, risk_model B.
+  B = 1e308, existing 1e308, cap DBL_MAX (1.7976931348623157e308): the true sum 2e308 > cap -> BLOCK (a naive float sum is inf and
+  inf > inf is false). Mirror: existing 7e307 + 1e308 = 1.7e308 <= cap -> ALLOW; existing 8e307 + 1e308 = 1.8e308 > cap -> BLOCK.
+  B = 4e307: existing 4e307, cap 8e307 -> exactly at the cap -> ALLOW; existing 4.1e307 -> 8.1e307 > 8e307 -> BLOCK; existing 5e307
+  with cap 4e307 (already above the cap) -> BLOCK. existing DBL_MAX + plan 1e308 with cap DBL_MAX -> BLOCK (existing + 1231.25 would be absorbed by float resolution: tolerance there is 7e292).
 CANCEL rows: events bitmask 1 DIRECTION_CHANGE, 2 OPPOSITE_SIGNAL, 4 SESSION_END, 8 NEWS_BLOCK, 16 DAILY_LIMIT; 12 = SESSION_END+NEWS_BLOCK;
   17 = DIRECTION_CHANGE+DAILY_LIMIT; 31 = all; 32 and above, negative: unknown.
 """
@@ -113,17 +125,30 @@ plan('ID_EMPTY_SETUP', BUY, 1950.40, 1944.15, INV, S_INPUT, why='INVALID_SETUP_I
 plan('ID_BOTH_EMPTY_SIGNAL_FIRST', BUY, 1950.40, 1944.15, INV, S_INPUT, why='INVALID_SIGNAL_ID', sid='', setup='')
 plan('ID_WINS_OVER_GEOMETRY', BUY, 1950.40, 1955.00, INV, S_INPUT, why='INVALID_SETUP_ID', setup='')
 
+# --- overflow plans: real T005/T006 results with huge budgets -------------------------------------------------------------
+SYM1 = (1.0, 0, 1.0, 0)
+UNIT = VOL(vmin=1.0, step=1.0, vmax=1.0, cap=1.0)
+plan('OVR_1E308', BUY, 2.0, 1.0, OKS, S_DONE, ok(2.0, 1.0, 4.0, 4.0, 1.0, 1.0, 1e308), budget=1e308, tv=1e308, sym=SYM1, vol=UNIT)
+plan('HUGE_4E307', BUY, 2.0, 1.0, OKS, S_DONE, ok(2.0, 1.0, 4.0, 4.0, 1.0, 1.0, 4e307), budget=4e307, tv=4e307, sym=SYM1, vol=UNIT)
+
 # --- permit rows -----------------------------------------------------------------------------------------------------
 PERMIT_CASES = []
 LIM = dict(pos=3, trd=5, cap=5000.0)
 
 
+DBL_MAX = 1.7976931348623157e308
+PLAN_FIELDS = ('e_out', 's_out', 'tp', 'level_2r', 'partial_price', 'r_geom', 'volume_out', 'risk_model')
+MOD_KINDS = ('ZERO_INPUT', 'ZERO_COMPLETE', 'STAGE_INPUT', 'STAGE_GEOMETRY', 'STAGE_SIZING', 'SIGNAL_BLANK', 'SIGNAL_EMPTY',
+             'SETUP_EMPTY', 'SETUP_BLANK')                  # MQL codes 1..9, FIELD = 10
+VALUE_KINDS = ('NAN', 'INF', 'NEG', 'ZERO', 'NEGINF')       # MQL codes 0..4
+
+
 def permit(name, plan_name, dec, reasons='', data='READY', rel=True, sess='OPEN', news='CLEAR', spr='CLEAR', pos=0, trd=0,
-           risk=0.0, lim=None, reg=(), capacity=4):
+           risk=0.0, lim=None, reg=(), capacity=4, mod=None, cnt=None):
     L = dict(LIM)
     L.update(lim or {})
     PERMIT_CASES.append(dict(name=name, plan=plan_name, dec=dec, reasons=reasons, data=data, rel=rel, sess=sess, news=news,
-                             spr=spr, pos=pos, trd=trd, risk=risk, lim=L, reg=tuple(reg), capacity=capacity))
+                             spr=spr, pos=pos, trd=trd, risk=risk, lim=L, reg=tuple(reg), capacity=capacity, mod=mod, cnt=cnt))
 
 
 permit('ALLOW_BUY', 'BUY_BASIC', 'ALLOW')
@@ -187,6 +212,35 @@ permit('REGISTRY_FULL_NEW_ID', 'BUY_BASIC', 'BLOCK', 'REGISTRY_FULL', reg=('A', 
 permit('REGISTRY_FULL_BUT_DUPLICATE', 'BUY_BASIC', 'BLOCK', 'DUPLICATE_SIGNAL', reg=('SIG-1', 'B'), capacity=2)
 permit('REGISTRY_CAPACITY_ZERO', 'BUY_BASIC', 'BLOCK', 'REGISTRY_FULL', capacity=0)
 permit('REGISTRY_LAST_SLOT_FREE', 'BUY_BASIC', 'ALLOW', reg=('A',), capacity=2)
+permit('REGISTRY_COUNT_ABOVE_CAPACITY', 'BUY_BASIC', 'BLOCK', 'REGISTRY_INVALID', capacity=2, cnt=3)
+permit('REGISTRY_COUNT_NEGATIVE', 'BUY_BASIC', 'BLOCK', 'REGISTRY_INVALID', capacity=2, cnt=-1)
+permit('REGISTRY_CAPACITY_ZERO_COUNT_ONE', 'BUY_BASIC', 'BLOCK', 'REGISTRY_INVALID', capacity=0, cnt=1)
+permit('REGISTRY_FULL_WITH_BLANK_ID', 'BUY_BASIC', 'BLOCK', 'PLAN_INVALID_ID|REGISTRY_FULL', capacity=0, mod='SIGNAL_BLANK')
+# plan validation: an incomplete or malformed plan never gets ALLOW (and never reaches the registry)
+permit('PLAN_ZERO_INPUT', 'BUY_BASIC', 'BLOCK', 'PLAN_NOT_OK', mod='ZERO_INPUT')
+permit('PLAN_ZERO_COMPLETE', 'BUY_BASIC', 'BLOCK', 'PLAN_INVALID_ID|PLAN_INVALID_VALUES', mod='ZERO_COMPLETE')
+permit('PLAN_ZERO_INPUT_REGISTRY_CAPACITY_ZERO', 'BUY_BASIC', 'BLOCK', 'PLAN_NOT_OK|REGISTRY_FULL', mod='ZERO_INPUT', capacity=0)
+permit('PLAN_ZERO_COMPLETE_REGISTRY_CAPACITY_ZERO', 'BUY_BASIC', 'BLOCK', 'PLAN_INVALID_ID|PLAN_INVALID_VALUES|REGISTRY_FULL',
+       mod='ZERO_COMPLETE', capacity=0)
+permit('PLAN_STAGE_INPUT', 'BUY_BASIC', 'BLOCK', 'PLAN_NOT_OK', mod='STAGE_INPUT')
+permit('PLAN_STAGE_GEOMETRY', 'BUY_BASIC', 'BLOCK', 'PLAN_NOT_OK', mod='STAGE_GEOMETRY')
+permit('PLAN_STAGE_SIZING', 'BUY_BASIC', 'BLOCK', 'PLAN_NOT_OK', mod='STAGE_SIZING')
+permit('PLAN_SIGNAL_BLANK', 'BUY_BASIC', 'BLOCK', 'PLAN_INVALID_ID', mod='SIGNAL_BLANK')
+permit('PLAN_SIGNAL_EMPTY', 'BUY_BASIC', 'BLOCK', 'PLAN_INVALID_ID', mod='SIGNAL_EMPTY')
+permit('PLAN_SETUP_EMPTY', 'BUY_BASIC', 'BLOCK', 'PLAN_INVALID_ID', mod='SETUP_EMPTY')
+permit('PLAN_SETUP_BLANK', 'BUY_BASIC', 'BLOCK', 'PLAN_INVALID_ID', mod='SETUP_BLANK')
+for _f in PLAN_FIELDS:
+    for _k in VALUE_KINDS:
+        permit('PLAN_FIELD_%s_%s' % (_f.upper(), _k), 'BUY_BASIC', 'BLOCK', 'PLAN_INVALID_VALUES', mod=('FIELD', _f, _k))
+# combined risk at huge magnitudes: no overflow to infinity (real T005/T006 plans OVR_1E308 and HUGE_4E307)
+permit('RISK_OVERFLOW_1E308', 'OVR_1E308', 'BLOCK', 'COMBINED_RISK_EXCEEDED', risk=1e308, lim=dict(cap=DBL_MAX))
+permit('RISK_OVERFLOW_MIRROR_ALLOW', 'OVR_1E308', 'ALLOW', risk=7e307, lim=dict(cap=DBL_MAX))
+permit('RISK_OVERFLOW_MIRROR_BLOCK', 'OVR_1E308', 'BLOCK', 'COMBINED_RISK_EXCEEDED', risk=8e307, lim=dict(cap=DBL_MAX))
+permit('RISK_PLAN_ALONE_UNDER_DBL_MAX', 'OVR_1E308', 'ALLOW', lim=dict(cap=DBL_MAX))
+permit('RISK_EXISTING_DBL_MAX_PLUS_BIG_PLAN', 'OVR_1E308', 'BLOCK', 'COMBINED_RISK_EXCEEDED', risk=DBL_MAX, lim=dict(cap=DBL_MAX))
+permit('RISK_LARGE_EXACT_BOUNDARY', 'HUGE_4E307', 'ALLOW', risk=4e307, lim=dict(cap=8e307))
+permit('RISK_LARGE_OVER', 'HUGE_4E307', 'BLOCK', 'COMBINED_RISK_EXCEEDED', risk=4.1e307, lim=dict(cap=8e307))
+permit('RISK_LARGE_EXISTING_ABOVE_CAP', 'HUGE_4E307', 'BLOCK', 'COMBINED_RISK_EXCEEDED', risk=5e307, lim=dict(cap=4e307))
 # several reasons together, fixed order
 ALL_BAD = dict(data='NOT_READY', sess='CLOSED', news='BLOCKED', spr='BLOCKED', pos=3, trd=5, risk=4000.0, reg=('SIG-1',))
 permit('ALL_REASONS_IN_FIXED_ORDER', 'BUY_BASIC', 'BLOCK',
@@ -302,6 +356,15 @@ def emit_mql():
     arr('int', 'M_LCS', ['0' if c['lim']['cap'] is None else '1' for c in M])
     arr('double', 'M_LC', [_num(c['lim']['cap'] or 0.0) for c in M])
     arr('string', 'M_REG', [q('|'.join(c['reg'])) for c in M])
+    arr('int', 'M_CNT', ['-1000' if c['cnt'] is None else str(c['cnt']) for c in M])   # -1000 = count is len(reg)
+
+    def modk(m):
+        if m is None:
+            return 0
+        return 10 if isinstance(m, tuple) else 1 + MOD_KINDS.index(m)
+    arr('int', 'M_MODK', [str(modk(c['mod'])) for c in M])
+    arr('int', 'M_MODF', [str(PLAN_FIELDS.index(c['mod'][1]) if isinstance(c['mod'], tuple) else 0) for c in M])
+    arr('int', 'M_MODV', [str(VALUE_KINDS.index(c['mod'][2]) if isinstance(c['mod'], tuple) else 0) for c in M])
     arr('int', 'M_CAPREG', [str(c['capacity']) for c in M])
     arr('string', 'MX_DEC', [q(c['dec']) for c in M])
     arr('string', 'MX_REASONS', [q(c['reasons']) for c in M])

@@ -17,10 +17,10 @@ PART 1 TRADE PLAN  build_plan(...)
   PLAN_ONLY / NOT_AN_ORDER. On ANY refusal every numeric plan field is 0 and reason names the stage.
 
 PART 2 PERMIT CHECKS  check_permit(...) pure, authorize(...) = check_permit + registration
-  Inputs: the plan (must be OK), a SNAPSHOT supplied by the caller (no clock, no feed inside), the LIMITS (each a value or
+  Inputs: the plan (must be a COMPLETE, well-formed OK plan), a SNAPSHOT supplied by the caller (no clock, no feed inside), the LIMITS (each a value or
   UNSET = None) and a caller-owned in-memory REGISTRY of used signal_ids. Output: decision ALLOW/BLOCK, primary reason (the
   first one, '' on ALLOW) and the list of ALL blocking reasons in this FIXED order, one tag at most per group:
-    1 PLAN_NOT_OK
+    1 plan:     PLAN_NOT_OK | PLAN_INVALID_ID | PLAN_INVALID_VALUES
     2 data:     DATA_NOT_READY | DATA_UNKNOWN | DATA_UNRELIABLE (state READY but the reliability flag is not True)
     3 session:  SESSION_CLOSED | SESSION_UNKNOWN
     4 news:     NEWS_BLOCK | NEWS_UNKNOWN
@@ -29,6 +29,12 @@ PART 2 PERMIT CHECKS  check_permit(...) pure, authorize(...) = check_permit + re
     7 positions: POLICY_UNSET:max_positions | INVALID_SNAPSHOT:max_positions | INVALID_SNAPSHOT:open_positions | MAX_POSITIONS_REACHED
     8 trades:    POLICY_UNSET:max_trades_per_day | INVALID_SNAPSHOT:max_trades_per_day | INVALID_SNAPSHOT:trades_today | MAX_TRADES_REACHED
     9 risk:      POLICY_UNSET:combined_risk_cap | INVALID_SNAPSHOT:combined_risk_cap | INVALID_SNAPSHOT:existing_risk | COMBINED_RISK_EXCEEDED
+  PLAN VALIDATION (group 1, pure, finiteness/positivity and blankness only: NO recomputation of any geometry or sizing formula):
+  PLAN_NOT_OK when status != OK or stage != COMPLETE (then no other plan tag: a refused plan has blank ids / zero numbers by
+  design); otherwise PLAN_INVALID_ID when signal_id or setup_id is blank (same blank rule as build_plan) and PLAN_INVALID_VALUES
+  when ANY of e_out, s_out, tp, level_2r, partial_price, r_geom, volume_out, risk_model is not a finite number > 0 (the direction
+  and the labels are not relied on by the permit and are not checked). The two tags may appear together. An uninitialized / zero
+  plan, a NaN risk_model or a hand-built plan can therefore never be ALLOWED.
   A state outside the documented values gives INVALID_SNAPSHOT:data_state / session_state / news_state / spread_state. Every
   uncertainty blocks (fail closed). A limit that is UNSET ALWAYS gives POLICY_UNSET:<name>: this module never invents the
   2-vs-3 trades, what counts as a win, the pending-order risk reservation or the manual-trade handling; those arrive only
@@ -37,13 +43,20 @@ PART 2 PERMIT CHECKS  check_permit(...) pure, authorize(...) = check_permit + re
   trades_today < max_trades_per_day allows, == blocks; existing_risk + plan.risk_model <= combined_risk_cap allows
   (exactly at the cap is ALLOWED: "maximum 2%"), tolerance only binary noise (RISK_ULPS = 4 ulps of max(1, cap)), so a
   sum a real cent above the cap blocks. The combined-risk comparison is skipped (not blocked a second time) when the plan
-  is not OK: PLAN_NOT_OK already blocks and there is no plan risk. max_* limits are integers >= 0, the cap is finite >= 0;
+  is not valid: a plan tag already blocks and there is no usable plan risk.
+  OVERFLOW-FREE COMPARISON (existing >= 0, risk > 0, cap >= 0, all finite; tol = RISK_ULPS * DBL_EPSILON * max(1, cap)):
+  remaining = cap - existing; if remaining >= 0: exceeded iff risk - remaining > tol; else over = -remaining and exceeded iff
+  NOT (over <= tol and risk <= tol - over). The sum existing + risk and cap + tol are never formed, so nothing can overflow
+  to infinity; every step is a difference of non-negative finite numbers or a sum bounded by DBL_MAX. A non-finite
+  intermediate (not reachable by valid operands) counts as exceeded (COMBINED_RISK_EXCEEDED); no separate overflow tag. max_* limits are integers >= 0, the cap is finite >= 0;
   counts are integers >= 0 and existing_risk finite >= 0 (an unknown count is passed as an invalid value and blocks).
   ALLOW is a PERMIT RESULT ONLY, never an executed order.
   REGISTRY: a caller-owned list of ids (length = capacity) plus a count, in memory only. NOT atomic, NOT persistent, no
   broker recovery, no restart recovery. authorize() records the plan signal_id ONLY on ALLOW (a BLOCK never consumes the id).
-  At capacity a new id is BLOCKED with REGISTRY_FULL, never dropped silently. A registry whose count is outside 0..capacity is
-  REGISTRY_INVALID. A duplicate is checked before capacity.
+  At capacity (including capacity 0) a new id is BLOCKED with REGISTRY_FULL, never dropped silently, checked INDEPENDENTLY of
+  the id. A registry whose count is outside 0..capacity (capacity = len(ids)) is REGISTRY_INVALID. A duplicate is checked before
+  capacity. authorize writes ONLY when the decision is ALLOW AND 0 <= count < capacity; a final defensive guard returns BLOCK
+  REGISTRY_FULL without writing otherwise. Every refusal leaves ids and count unchanged.
 
 PART 3 PENDING CANCEL DECISION  cancel_decision(...)
   Inputs: pending_exists, its signal_id, position_exists, and EXPLICIT external events as a bitmask: DIRECTION_CHANGE 1,
@@ -91,6 +104,8 @@ BLOCK = 'BLOCK'
 DBL_EPSILON = 2.220446049250313e-16
 RISK_ULPS = 4.0           # binary-noise tolerance of the combined-risk comparison, in ulps of max(1, cap)
 MAX_REASONS = 12
+DBL_MAX = 1.7976931348623157e308
+PLAN_REQUIRED = ('e_out', 's_out', 'tp', 'level_2r', 'partial_price', 'r_geom', 'volume_out', 'risk_model')
 
 EV_DIRECTION_CHANGE = 1
 EV_OPPOSITE_SIGNAL = 2
@@ -209,11 +224,40 @@ def _money_ok(v):
     return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and v >= 0
 
 
+def _pos_finite(v):
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return False
+    try:
+        return math.isfinite(v) and v > 0
+    except OverflowError:
+        return False
+
+
+def _risk_exceeded(existing, risk, cap):
+    """Overflow-free test of existing + risk > cap + tolerance (existing >= 0, risk > 0, cap >= 0, all finite)."""
+    tol = RISK_ULPS * DBL_EPSILON * max(1.0, cap)
+    remaining = cap - existing
+    if not (math.isfinite(tol) and math.isfinite(remaining) and math.isfinite(risk)):
+        return True
+    if remaining >= 0.0:
+        return (risk - remaining) > tol
+    over = -remaining
+    return not (over <= tol and risk <= tol - over)
+
+
 def check_permit(plan, snap, limits, registry):
     reasons = []
-    plan_ok = getattr(plan, 'status', None) == OK
-    if not plan_ok:
+    plan_complete = getattr(plan, 'status', None) == OK and getattr(plan, 'stage', None) == STAGE_COMPLETE
+    ids_ok = not (_blank(getattr(plan, 'signal_id', None)) or _blank(getattr(plan, 'setup_id', None)))
+    values_ok = all(_pos_finite(getattr(plan, f, None)) for f in PLAN_REQUIRED)
+    plan_ok = plan_complete and ids_ok and values_ok
+    if not plan_complete:
         reasons.append('PLAN_NOT_OK')
+    else:
+        if not ids_ok:
+            reasons.append('PLAN_INVALID_ID')
+        if not values_ok:
+            reasons.append('PLAN_INVALID_VALUES')
     # data
     if snap.data_state == DATA_READY:
         if snap.data_reliable is not True:
@@ -246,13 +290,12 @@ def check_permit(plan, snap, limits, registry):
     # registry
     capacity = len(registry.ids)
     sid = getattr(plan, 'signal_id', '')
-    if not _count_ok(registry.count) or registry.count > capacity:
+    if capacity < 0 or not _count_ok(registry.count) or registry.count > capacity:
         reasons.append('REGISTRY_INVALID')
-    elif not _blank(sid):
-        if sid in registry.ids[:registry.count]:
-            reasons.append('DUPLICATE_SIGNAL')
-        elif registry.count >= capacity:
-            reasons.append('REGISTRY_FULL')
+    elif not _blank(sid) and sid in registry.ids[:registry.count]:
+        reasons.append('DUPLICATE_SIGNAL')
+    elif registry.count >= capacity:
+        reasons.append('REGISTRY_FULL')
     # positions
     if limits.max_positions is None:
         reasons.append('POLICY_UNSET:max_positions')
@@ -279,7 +322,7 @@ def check_permit(plan, snap, limits, registry):
         reasons.append('INVALID_SNAPSHOT:combined_risk_cap')
     elif not _money_ok(snap.existing_risk):
         reasons.append('INVALID_SNAPSHOT:existing_risk')
-    elif plan_ok and snap.existing_risk + plan.risk_model > cap + RISK_ULPS * DBL_EPSILON * max(1.0, cap):
+    elif plan_ok and _risk_exceeded(snap.existing_risk, plan.risk_model, cap):
         reasons.append('COMBINED_RISK_EXCEEDED')
     if reasons:
         return Permit(decision=BLOCK, primary_reason=reasons[0], reasons=tuple(reasons))
@@ -291,6 +334,8 @@ def authorize(plan, snap, limits, registry):
     permit = check_permit(plan, snap, limits, registry)
     if permit.decision != ALLOW:
         return permit
+    if not _count_ok(registry.count) or registry.count >= len(registry.ids):    # defensive: never write out of range
+        return Permit(decision=BLOCK, primary_reason='REGISTRY_FULL', reasons=('REGISTRY_FULL',))
     registry.ids[registry.count] = plan.signal_id
     registry.count += 1
     return Permit(decision=permit.decision, primary_reason='', reasons=(), registered=True)

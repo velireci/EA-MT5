@@ -13,27 +13,39 @@
 //  and risk_model (= T006 risk_realized, LINEAR_MODEL, COSTS_NOT_MODELLED) and the label PLAN_ONLY / NOT_AN_ORDER. On any refusal
 //  every numeric field is 0 and reason names the stage.
 //
-// PART 2 PERMIT CHECKS (TP_CheckPermit pure, TP_Authorize = check + registration). Inputs: the plan (must be OK), a SNAPSHOT
+// PART 2 PERMIT CHECKS (TP_CheckPermit pure, TP_Authorize = check + registration). Inputs: the plan (must be a COMPLETE, well-formed OK plan), a SNAPSHOT
 //  supplied by the caller (no clock, no feed inside), the LIMITS (each a value or UNSET) and a caller-owned in-memory registry of
 //  used signal_ids. Output: ALLOW/BLOCK, the primary (first) reason and ALL blocking reasons in this FIXED order, one tag at most
 //  per group:
-//   1 PLAN_NOT_OK  2 data: DATA_UNRELIABLE (state READY, reliability flag false) | DATA_NOT_READY | DATA_UNKNOWN
+//   1 plan: PLAN_NOT_OK | PLAN_INVALID_ID | PLAN_INVALID_VALUES  2 data: DATA_UNRELIABLE (state READY, reliability flag false) | DATA_NOT_READY | DATA_UNKNOWN
 //   3 session: SESSION_CLOSED | SESSION_UNKNOWN  4 news: NEWS_BLOCK | NEWS_UNKNOWN  5 spread: SPREAD_BLOCK | SPREAD_UNKNOWN
 //   6 registry: REGISTRY_INVALID | DUPLICATE_SIGNAL | REGISTRY_FULL
 //   7 positions: POLICY_UNSET:max_positions | INVALID_SNAPSHOT:max_positions | INVALID_SNAPSHOT:open_positions | MAX_POSITIONS_REACHED
 //   8 trades: POLICY_UNSET:max_trades_per_day | INVALID_SNAPSHOT:max_trades_per_day | INVALID_SNAPSHOT:trades_today | MAX_TRADES_REACHED
 //   9 risk: POLICY_UNSET:combined_risk_cap | INVALID_SNAPSHOT:combined_risk_cap | INVALID_SNAPSHOT:existing_risk | COMBINED_RISK_EXCEEDED
+//  PLAN VALIDATION (group 1, finiteness/positivity and blankness only, NO recomputation of any geometry or sizing formula):
+//  PLAN_NOT_OK when status != OK or stage != COMPLETE (then no other plan tag: a refused plan has blank ids / zero numbers by
+//  design); otherwise PLAN_INVALID_ID when signal_id or setup_id is blank (same blank rule as TP_BuildPlan) and PLAN_INVALID_VALUES
+//  when ANY of e_out, s_out, tp, level_2r, partial_price, r_geom, volume_out, risk_model is not a finite number > 0 (direction and
+//  labels are not relied on by the permit and are not checked). The two tags may appear together. An uninitialized / zero plan, a
+//  NaN risk_model or a hand-built plan can therefore never be ALLOWED.
 //  A state outside the documented values gives INVALID_SNAPSHOT:data_state / session_state / news_state / spread_state. Every
 //  uncertainty blocks (fail closed). A limit that is UNSET ALWAYS gives POLICY_UNSET:<name>: this module never invents the
 //  2-vs-3 trades, what counts as a win, the pending-order risk reservation or the manual-trade handling.
 //  BOUNDARIES (PROPOSALS for review, not client answers): open_positions < max_positions allows, == blocks; trades_today <
 //  max_trades_per_day allows, == blocks; existing_risk + plan risk_model <= combined_risk_cap allows (exactly at the cap is ALLOWED),
 //  tolerance only binary noise (TP_RISK_ULPS = 4 ulps of max(1, cap)). The combined-risk comparison is skipped when the plan is
-//  not OK (PLAN_NOT_OK already blocks). ALLOW is a PERMIT RESULT ONLY, never an executed order.
+//  not valid (a plan tag already blocks). ALLOW is a PERMIT RESULT ONLY, never an executed order.
+//  OVERFLOW-FREE COMPARISON (existing >= 0, risk > 0, cap >= 0, all finite; tol = TP_RISK_ULPS * DBL_EPSILON * max(1, cap)):
+//  remaining = cap - existing; if remaining >= 0: exceeded iff risk - remaining > tol; else over = -remaining and exceeded iff
+//  NOT (over <= tol && risk <= tol - over). The sum existing + risk and cap + tol are never formed, so nothing can overflow to
+//  infinity. A non-finite intermediate (not reachable by valid operands) counts as exceeded (COMBINED_RISK_EXCEEDED); no separate tag.
 //  REGISTRY: caller-owned string array (its size is the capacity) plus a count, in memory only. NOT atomic, NOT persistent, no broker
 //  or restart recovery. TP_Authorize records plan.signal_id ONLY on ALLOW (a BLOCK never consumes the id). At capacity a new id is
-//  BLOCKED with REGISTRY_FULL, never dropped silently; a count outside 0..capacity is REGISTRY_INVALID. A duplicate is checked
-//  before capacity.
+//  BLOCKED with REGISTRY_FULL (capacity 0 included, checked independently of the id), never dropped silently; a count outside
+//  0..capacity (capacity = ArraySize) is REGISTRY_INVALID. A duplicate is checked before capacity. TP_Authorize writes ONLY when the
+//  decision is ALLOW AND 0 <= count < capacity; a final defensive guard returns BLOCK REGISTRY_FULL without writing otherwise.
+//  Every refusal leaves the ids and the count unchanged.
 //
 // PART 3 PENDING CANCEL DECISION (TP_CancelDecision). Inputs: pending exists + its signal_id, position exists, and explicit external
 //  events as a bitmask: DIRECTION_CHANGE 1, OPPOSITE_SIGNAL 2, SESSION_END 4, NEWS_BLOCK 8, DAILY_LIMIT 16. Output: a cancel REQUEST
@@ -289,6 +301,25 @@ bool TP_BuildPlan(const string signal_id,const string setup_id,const int directi
 // --------------------------------------------------------------------------------------------- part 2: permit
 bool TP_CountOk(const long v) {return(v>=0);}
 bool TP_MoneyOk(const double v) {return(TG_Finite(v) && v>=0.0);}
+bool TP_PosFinite(const double v) {return(TG_Finite(v) && v>0.0);}
+
+// Plan numbers the permit relies on: all finite and > 0 (no formula is recomputed).
+bool TP_PlanValuesOk(const STpPlan &p)
+  {
+   return(TP_PosFinite(p.e_out) && TP_PosFinite(p.s_out) && TP_PosFinite(p.tp) && TP_PosFinite(p.level_2r) &&
+          TP_PosFinite(p.partial_price) && TP_PosFinite(p.r_geom) && TP_PosFinite(p.volume_out) && TP_PosFinite(p.risk_model));
+  }
+
+// Overflow-free test of existing + risk > cap + tolerance (existing >= 0, risk > 0, cap >= 0, all finite).
+bool TP_RiskExceeded(const double existing,const double risk,const double cap)
+  {
+   double tol=TP_RISK_ULPS*DBL_EPSILON*MathMax(1.0,cap);
+   double remaining=cap-existing;
+   if(!(TG_Finite(tol) && TG_Finite(remaining) && TG_Finite(risk))) return(true);
+   if(remaining>=0.0) return((risk-remaining)>tol);
+   double over=-remaining;
+   return(!(over<=tol && risk<=tol-over));
+  }
 
 void TP_AddReason(STpPermit &p,const string tag)
   {
@@ -314,8 +345,16 @@ bool TP_CheckPermit(const STpPlan &plan,const STpSnapshot &snap,const STpLimits 
    out.reason_count=0;
    out.registered=false;
    for(int i=0;i<TP_MAX_REASONS;i++) out.reasons[i]="";
-   bool plan_ok=(plan.status==TP_OK);
-   if(!plan_ok) TP_AddReason(out,"PLAN_NOT_OK");
+   bool plan_complete=(plan.status==TP_OK && plan.stage==TP_STAGE_COMPLETE);
+   bool ids_ok=(!TP_IsBlank(plan.signal_id) && !TP_IsBlank(plan.setup_id));
+   bool values_ok=TP_PlanValuesOk(plan);
+   bool plan_ok=(plan_complete && ids_ok && values_ok);
+   if(!plan_complete) TP_AddReason(out,"PLAN_NOT_OK");
+   else
+     {
+      if(!ids_ok) TP_AddReason(out,"PLAN_INVALID_ID");
+      if(!values_ok) TP_AddReason(out,"PLAN_INVALID_VALUES");
+     }
    // data
    if(snap.data_state==TP_DATA_READY)
      {
@@ -336,15 +375,13 @@ bool TP_CheckPermit(const STpPlan &plan,const STpSnapshot &snap,const STpLimits 
    else if(snap.spread_state!=TP_SPREAD_CLEAR) TP_AddReason(out,"INVALID_SNAPSHOT:spread_state");
    // registry
    int capacity=ArraySize(reg_ids);
-   if(reg_count<0 || reg_count>capacity) TP_AddReason(out,"REGISTRY_INVALID");
-   else if(!TP_IsBlank(plan.signal_id))
-     {
-      bool dup=false;
+   bool dup=false;
+   if(capacity>=0 && reg_count>=0 && reg_count<=capacity && !TP_IsBlank(plan.signal_id))
       for(int i=0;i<reg_count;i++)
          if(reg_ids[i]==plan.signal_id) {dup=true; break;}
-      if(dup) TP_AddReason(out,"DUPLICATE_SIGNAL");
-      else if(reg_count>=capacity) TP_AddReason(out,"REGISTRY_FULL");
-     }
+   if(capacity<0 || reg_count<0 || reg_count>capacity) TP_AddReason(out,"REGISTRY_INVALID");
+   else if(dup) TP_AddReason(out,"DUPLICATE_SIGNAL");
+   else if(reg_count>=capacity) TP_AddReason(out,"REGISTRY_FULL");
    // positions
    if(!lim.max_positions_set) TP_AddReason(out,"POLICY_UNSET:max_positions");
    else if(!TP_CountOk(lim.max_positions)) TP_AddReason(out,"INVALID_SNAPSHOT:max_positions");
@@ -359,7 +396,7 @@ bool TP_CheckPermit(const STpPlan &plan,const STpSnapshot &snap,const STpLimits 
    if(!lim.risk_cap_set) TP_AddReason(out,"POLICY_UNSET:combined_risk_cap");
    else if(!TP_MoneyOk(lim.risk_cap)) TP_AddReason(out,"INVALID_SNAPSHOT:combined_risk_cap");
    else if(!TP_MoneyOk(snap.existing_risk)) TP_AddReason(out,"INVALID_SNAPSHOT:existing_risk");
-   else if(plan_ok && snap.existing_risk+plan.risk_model>lim.risk_cap+TP_RISK_ULPS*DBL_EPSILON*MathMax(1.0,lim.risk_cap))
+   else if(plan_ok && TP_RiskExceeded(snap.existing_risk,plan.risk_model,lim.risk_cap))
       TP_AddReason(out,"COMBINED_RISK_EXCEEDED");
    if(out.reason_count>0)
      {
@@ -376,6 +413,16 @@ bool TP_Authorize(const STpPlan &plan,const STpSnapshot &snap,const STpLimits &l
   {
    if(!TP_CheckPermit(plan,snap,lim,reg_ids,reg_count,out))
       return(false);
+   int capacity=ArraySize(reg_ids);
+   if(reg_count<0 || reg_count>=capacity)     // defensive: never write out of range
+     {
+      out.allow=false;
+      out.registered=false;
+      out.reason_count=0;
+      TP_AddReason(out,"REGISTRY_FULL");
+      out.primary_reason="REGISTRY_FULL";
+      return(false);
+     }
    reg_ids[reg_count]=plan.signal_id;
    reg_count++;
    out.registered=true;

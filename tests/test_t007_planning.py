@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import t005_geometry_reference as g5  # noqa: E402
 import t006_sizing_reference as p6  # noqa: E402
 import t007_planning_reference as ref  # noqa: E402
-from t007_planning_fixtures import (CANCEL_CASES, PERMIT_CASES, PLAN_CASES, emit_mql)  # noqa: E402
+from t007_planning_fixtures import (CANCEL_CASES, PERMIT_CASES, PLAN_CASES, PLAN_FIELDS, emit_mql)  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 NAN, INF = float('nan'), float('inf')
@@ -50,8 +50,27 @@ def registry_of(m, c):
     r = m.Registry.new(c['capacity'])
     for i, rid in enumerate(c['reg']):
         r.ids[i] = rid
-    r.count = len(c['reg'])
+    r.count = len(c['reg']) if c['cnt'] is None else c['cnt']
     return r
+
+
+def bad_value(kind):
+    return {'NAN': NAN, 'INF': INF, 'NEG': -1.0, 'ZERO': 0.0, 'NEGINF': -INF}[kind]
+
+
+def apply_mod(m, plan, mod):
+    """The fixture plan modification (see tests/t007_planning_fixtures.py): a hand-built or damaged plan."""
+    if mod is None:
+        return plan
+    if isinstance(mod, tuple):
+        return dataclasses.replace(plan, **{mod[1]: bad_value(mod[2])})
+    if mod in ('ZERO_INPUT', 'ZERO_COMPLETE'):
+        return m.Plan(status='OK', stage='INPUT' if mod == 'ZERO_INPUT' else 'COMPLETE', reason='')
+    if mod.startswith('STAGE_'):
+        return dataclasses.replace(plan, stage=mod[6:])
+    ids = {'SIGNAL_BLANK': dict(signal_id='   '), 'SIGNAL_EMPTY': dict(signal_id=''),
+           'SETUP_EMPTY': dict(setup_id=''), 'SETUP_BLANK': dict(setup_id='\t ')}
+    return dataclasses.replace(plan, **ids[mod])
 
 
 def good_plan(m, sid='SIG-1'):
@@ -88,12 +107,26 @@ def behaviour_failures(m):
             bad.append(c['name'])
     for c in PERMIT_CASES:
         try:
-            p = call_plan(m, PLAN_BY_NAME[c['plan']])
-            r = m.check_permit(p, snap_of(m, c), limits_of(m, c), registry_of(m, c))
+            p = apply_mod(m, call_plan(m, PLAN_BY_NAME[c['plan']]), c['mod'])
+            before, after = registry_of(m, c), registry_of(m, c)
+            r = m.check_permit(p, snap_of(m, c), limits_of(m, c), after)
             exp = tuple(x for x in c['reasons'].split('|') if x)
             ok = (r.decision == c['dec'] and r.reasons == exp and r.primary_reason == (exp[0] if exp else ''))
+            ok = ok and (after.ids, after.count) == (before.ids, before.count)       # the pure check never writes
             if not ok:
                 bad.append(c['name'])
+            # authorize on a fresh copy: ALLOW appends exactly the signal id; every refusal leaves ids and count unchanged
+            reg = registry_of(m, c)
+            a = m.authorize(p, snap_of(m, c), limits_of(m, c), reg)
+            if c['dec'] == 'ALLOW':
+                n = before.count
+                ok = (a.decision == 'ALLOW' and a.registered and reg.count == n + 1 and reg.ids[n] == p.signal_id and
+                      reg.ids[:n] == before.ids[:n] and reg.ids[n + 1:] == before.ids[n + 1:])
+            else:
+                ok = (a.decision == 'BLOCK' and not a.registered and a.reasons == exp and
+                      (reg.ids, reg.count) == (before.ids, before.count))
+            if not ok:
+                bad.append(c['name'] + '#AUTHORIZE_REGISTRY')
         except Exception:
             bad.append(c['name'])
     for c in CANCEL_CASES:
@@ -148,6 +181,22 @@ def sequence_failures(m):
             bad.append('SEQ_REGISTRY_OVERFLOW_BLOCKS_NOT_DROPS')
     except Exception:
         bad.append('SEQ_REGISTRY_OVERFLOW_RAISED')
+    try:     # the final write guard works even when the permit (wrongly) says ALLOW: capacity 0, full, count out of range
+        glob = m.authorize.__globals__
+        saved = glob['check_permit']
+        glob['check_permit'] = lambda plan, sn, li, rg: m.Permit(decision='ALLOW', primary_reason='', reasons=())
+        try:
+            for ids, count in (([], 0), ([], 1), (['A'], 1), (['A', 'B'], 2), (['A', 'B'], 3), (['A'], -1)):
+                reg = m.Registry(ids=list(ids), count=count)
+                r = m.authorize(good_plan(m), snap, lim, reg)
+                if not (r.decision == 'BLOCK' and r.primary_reason == 'REGISTRY_FULL' and not r.registered and
+                        reg.ids == ids and reg.count == count):
+                    bad.append('SEQ_AUTHORIZE_FINAL_GUARD')
+                    break
+        finally:
+            glob['check_permit'] = saved
+    except Exception:
+        bad.append('SEQ_AUTHORIZE_FINAL_GUARD')
     try:
         reg = m.Registry.new(4)
         before = (list(reg.ids), reg.count)
@@ -277,7 +326,7 @@ class PermitTests(unittest.TestCase):
     def test_permit_rows_one_by_one(self):
         for c in PERMIT_CASES:
             with self.subTest(c['name']):
-                p = call_plan(ref, PLAN_BY_NAME[c['plan']])
+                p = apply_mod(ref, call_plan(ref, PLAN_BY_NAME[c['plan']]), c['mod'])
                 r = ref.check_permit(p, snap_of(ref, c), limits_of(ref, c), registry_of(ref, c))
                 exp = tuple(x for x in c['reasons'].split('|') if x)
                 self.assertEqual(r.decision, c['dec'])
@@ -287,7 +336,7 @@ class PermitTests(unittest.TestCase):
                 self.assertFalse(r.registered)
 
     def test_reason_order_is_fixed_and_documented(self):
-        order = ['PLAN_NOT_OK', 'DATA_NOT_READY', 'SESSION_CLOSED', 'NEWS_BLOCK', 'SPREAD_BLOCK', 'DUPLICATE_SIGNAL',
+        order = ['PLAN_NOT_OK', 'PLAN_INVALID_ID', 'PLAN_INVALID_VALUES', 'DATA_NOT_READY', 'SESSION_CLOSED', 'NEWS_BLOCK', 'SPREAD_BLOCK', 'DUPLICATE_SIGNAL',
                  'MAX_POSITIONS_REACHED', 'MAX_TRADES_REACHED', 'COMBINED_RISK_EXCEEDED']
         doc = ref.__doc__
         pos = [doc.index(t) for t in order]
@@ -359,6 +408,12 @@ class PermitTests(unittest.TestCase):
         reg = ref.Registry(ids=[], count=0)
         self.assertEqual(ref.authorize(plan, ref.Snapshot(), lim, reg).reasons, ('REGISTRY_FULL',))
         self.assertEqual((reg.ids, reg.count), ([], 0))
+        for ids, count, tag in (([], 1, 'REGISTRY_INVALID'), (['A'], 2, 'REGISTRY_INVALID'), (['A', 'B'], -1, 'REGISTRY_INVALID'),
+                                (['A', 'B'], 2, 'REGISTRY_FULL'), ([], 0, 'REGISTRY_FULL')):
+            reg = ref.Registry(ids=list(ids), count=count)
+            r = ref.authorize(plan, ref.Snapshot(), lim, reg)
+            self.assertEqual((r.decision, r.reasons, r.registered), ('BLOCK', (tag,), False), (ids, count))
+            self.assertEqual((reg.ids, reg.count), (ids, count))
 
     def test_registry_is_only_changed_by_an_allow_and_only_by_the_signal_id(self):
         plan = good_plan(ref)
@@ -380,6 +435,136 @@ class PermitTests(unittest.TestCase):
         self.assertEqual(r.decision, 'ALLOW')
         self.assertIn('NOT_AN_ORDER', r.label)
         self.assertFalse({f.name for f in dataclasses.fields(ref.Permit)} & {'ticket', 'order', 'volume', 'price'})
+
+
+class PlanValidationTests(unittest.TestCase):
+    LIM = ref.Limits(**FULL_LIMITS)
+
+    def test_zero_plan_with_empty_signal_id_never_allows_and_never_writes(self):
+        for stage in ('INPUT', 'COMPLETE'):
+            zero = ref.Plan(status='OK', stage=stage, reason='')
+            self.assertEqual(zero.signal_id, '')
+            r = ref.check_permit(zero, ref.Snapshot(), self.LIM, ref.Registry.new(2))
+            self.assertEqual(r.decision, 'BLOCK', stage)
+            reg0 = ref.Registry.new(0)
+            a = ref.authorize(zero, ref.Snapshot(), self.LIM, reg0)
+            self.assertEqual((a.decision, a.registered, reg0.ids, reg0.count), ('BLOCK', False, [], 0), stage)
+            reg2 = ref.Registry.new(2)
+            ref.authorize(zero, ref.Snapshot(), self.LIM, reg2)
+            self.assertEqual((reg2.ids, reg2.count), (['', ''], 0), stage)
+        self.assertEqual(ref.check_permit(ref.Plan(status='OK', stage='INPUT', reason=''), ref.Snapshot(), self.LIM,
+                                          ref.Registry.new(2)).reasons, ('PLAN_NOT_OK',))
+        self.assertEqual(ref.check_permit(ref.Plan(status='OK', stage='COMPLETE', reason=''), ref.Snapshot(), self.LIM,
+                                          ref.Registry.new(2)).reasons, ('PLAN_INVALID_ID', 'PLAN_INVALID_VALUES'))
+
+    def test_incomplete_plan_stage_blocks_even_with_status_ok(self):
+        for stage in ('INPUT', 'GEOMETRY', 'SIZING', 'BOGUS', None):
+            plan = dataclasses.replace(good_plan(ref), stage=stage)
+            r = ref.check_permit(plan, ref.Snapshot(), self.LIM, ref.Registry.new(2))
+            self.assertEqual((r.decision, r.reasons), ('BLOCK', ('PLAN_NOT_OK',)), stage)
+
+    def test_every_required_number_must_be_finite_and_positive_and_blank_ids_block(self):
+        base = good_plan(ref)
+        self.assertEqual(ref.check_permit(base, ref.Snapshot(), self.LIM, ref.Registry.new(2)).decision, 'ALLOW')
+        for f in PLAN_FIELDS:
+            for v in (NAN, INF, -INF, -1.0, 0.0, None, '1', True):
+                plan = dataclasses.replace(base, **{f: v})
+                r = ref.check_permit(plan, ref.Snapshot(), self.LIM, ref.Registry.new(2))
+                self.assertEqual((r.decision, r.reasons), ('BLOCK', ('PLAN_INVALID_VALUES',)), (f, v))
+        for f in ('signal_id', 'setup_id'):
+            for v in ('', ' ', '\t', None, 5):
+                plan = dataclasses.replace(base, **{f: v})
+                r = ref.check_permit(plan, ref.Snapshot(), self.LIM, ref.Registry.new(2))
+                self.assertEqual((r.decision, r.reasons), ('BLOCK', ('PLAN_INVALID_ID',)), (f, v))
+        both = dataclasses.replace(base, signal_id='', risk_model=NAN)
+        self.assertEqual(ref.check_permit(both, ref.Snapshot(), self.LIM, ref.Registry.new(2)).reasons,
+                         ('PLAN_INVALID_ID', 'PLAN_INVALID_VALUES'))
+        # direction / labels are not relied on by the permit
+        self.assertEqual(ref.check_permit(dataclasses.replace(base, direction=None), ref.Snapshot(), self.LIM,
+                                          ref.Registry.new(2)).decision, 'ALLOW')
+
+    def test_object_without_the_plan_fields_blocks(self):
+        half = types.SimpleNamespace(status='OK', stage='COMPLETE', signal_id='X', setup_id='Y')
+        r = ref.check_permit(half, ref.Snapshot(), self.LIM, ref.Registry.new(2))
+        self.assertEqual((r.decision, r.reasons), ('BLOCK', ('PLAN_INVALID_VALUES',)))
+        reg = ref.Registry.new(2)
+        ref.authorize(half, ref.Snapshot(), self.LIM, reg)
+        self.assertEqual((reg.ids, reg.count), (['', ''], 0))
+
+    def test_registry_capacity_guard_is_independent_of_the_id(self):
+        for plan in (good_plan(ref), ref.Plan(status='OK', stage='COMPLETE', reason=''), None):
+            for ids, count, tag in (([], 0, 'REGISTRY_FULL'), (['A'], 1, 'REGISTRY_FULL'), ([], 3, 'REGISTRY_INVALID'),
+                                    (['A'], -1, 'REGISTRY_INVALID')):
+                reg = ref.Registry(ids=list(ids), count=count)
+                r = ref.authorize(plan, ref.Snapshot(), self.LIM, reg)
+                self.assertEqual(r.decision, 'BLOCK')
+                self.assertIn(tag, r.reasons)
+                self.assertEqual((reg.ids, reg.count), (ids, count))
+
+    def test_final_write_guard_blocks_without_writing_even_if_the_permit_said_allow(self):
+        allow = ref.Permit(decision='ALLOW', primary_reason='', reasons=())
+        for ids, count in (([], 0), ([], 1), (['A'], 1), (['A', 'B'], 5), (['A'], -1)):
+            reg = ref.Registry(ids=list(ids), count=count)
+            with mock.patch.object(ref, 'check_permit', return_value=allow):
+                r = ref.authorize(good_plan(ref), ref.Snapshot(), self.LIM, reg)
+            self.assertEqual((r.decision, r.primary_reason, r.registered), ('BLOCK', 'REGISTRY_FULL', False))
+            self.assertEqual((reg.ids, reg.count), (ids, count))
+
+
+class OverflowTests(unittest.TestCase):
+    def real_plan(self, budget):
+        return ref.build_plan('SIG-O', 'SET-O', 'BUY', 2.0, 1.0, None, budget, budget, 1.0, 0, 1.0, 0, None, None, 1.0, 1.0, 1.0, 1.0)
+
+    def test_the_overflow_case_from_the_real_modules_blocks(self):
+        plan = self.real_plan(1e308)
+        self.assertEqual((plan.status, plan.stage, plan.e_out, plan.s_out, plan.tp, plan.volume_out, plan.risk_model),
+                         ('OK', 'COMPLETE', 2.0, 1.0, 4.0, 1.0, 1e308))
+        DBL_MAX = 1.7976931348623157e308
+        self.assertEqual(ref.DBL_MAX, DBL_MAX)
+        self.assertTrue(math.isinf(1e308 + 1e308))           # the naive sum would be inf, and inf > inf is False
+        reg = ref.Registry.new(2)
+        snap = ref.Snapshot(existing_risk=1e308)
+        r = ref.authorize(plan, snap, ref.Limits(3, 5, DBL_MAX), reg)
+        self.assertEqual((r.decision, r.reasons, r.registered), ('BLOCK', ('COMBINED_RISK_EXCEEDED',), False))
+        self.assertEqual((reg.ids, reg.count), (['', ''], 0))
+
+    def test_non_overflowing_mirror_and_large_exact_boundary(self):
+        DBL_MAX = 1.7976931348623157e308
+        big = self.real_plan(1e308)
+        for existing, dec in ((7e307, 'ALLOW'), (0.0, 'ALLOW'), (8e307, 'BLOCK'), (DBL_MAX, 'BLOCK')):
+            r = ref.check_permit(big, ref.Snapshot(existing_risk=existing), ref.Limits(3, 5, DBL_MAX), ref.Registry.new(2))
+            self.assertEqual(r.decision, dec, existing)
+        huge = self.real_plan(4e307)
+        self.assertEqual(huge.risk_model, 4e307)
+        lim = ref.Limits(3, 5, 8e307)
+        for existing, dec in ((4e307, 'ALLOW'), (4.1e307, 'BLOCK'), (3.9e307, 'ALLOW')):
+            r = ref.check_permit(huge, ref.Snapshot(existing_risk=existing), lim, ref.Registry.new(2))
+            self.assertEqual(r.decision, dec, existing)
+        r = ref.check_permit(huge, ref.Snapshot(existing_risk=5e307), ref.Limits(3, 5, 4e307), ref.Registry.new(2))
+        self.assertEqual((r.decision, r.reasons), ('BLOCK', ('COMBINED_RISK_EXCEEDED',)))
+
+    def test_helper_branches_existing_above_cap_tolerance_and_equivalence_with_exact_arithmetic(self):
+        from fractions import Fraction
+        ex = ref._risk_exceeded
+        # existing already above the cap by 1 ulp (16384 at 1e20): tolerance is 4 ulps = 88817.84
+        cap, existing = 1e20 - 16384.0, 1e20
+        self.assertFalse(ex(existing, 1231.25, cap))          # 16384 + 1231.25 <= 88817.84
+        self.assertTrue(ex(existing, 80000.0, cap))           # 16384 + 80000 > 88817.84
+        self.assertTrue(ex(existing, 1e300, cap))
+        self.assertTrue(ex(1e20 + 65536.0 * 2, 1.0, 1e20))    # 131072 > tolerance
+        # away from the boundary the result equals the exact (rational) comparison of the original definition
+        tol = lambda c: Fraction(ref.RISK_ULPS) * Fraction(ref.DBL_EPSILON) * max(Fraction(1), Fraction(c))
+        for existing in (0.0, 1.0, 1000.0, 3768.75, 3768.76, 4999.0, 5000.0, 6000.0, 1e12):
+            for risk in (0.01, 1231.25, 1998.8, 5000.0, 1e9):
+                for cap in (0.0, 1.0, 1231.25, 5000.0, 123456.78, 1e13):
+                    exact = Fraction(existing) + Fraction(risk) > Fraction(cap) + tol(cap)
+                    close = abs(Fraction(existing) + Fraction(risk) - Fraction(cap)) <= 4 * tol(cap)
+                    if not close:
+                        self.assertEqual(ex(existing, risk, cap), exact, (existing, risk, cap))
+        # non-finite intermediates are never reachable by valid operands, but would count as exceeded
+        self.assertTrue(ex(0.0, 1.0, float('nan')))
+        self.assertTrue(ex(float('nan'), 1.0, 5.0))
+        self.assertTrue(ex(0.0, float('inf'), 5.0))
 
 
 class CancelTests(unittest.TestCase):
@@ -470,17 +655,40 @@ MUTANTS = {
     'never registering': ("    registry.ids[registry.count] = plan.signal_id\n    registry.count += 1\n", "", 'SEQ_FIRST_AUTHORIZATION_REGISTERS'),
     'allow at max positions': ("snap.open_positions >= limits.max_positions", "snap.open_positions > limits.max_positions", 'POSITIONS_AT_MAX'),
     'allow at max trades': ("snap.trades_today >= limits.max_trades_per_day", "snap.trades_today > limits.max_trades_per_day", 'TRADES_AT_MAX'),
-    'block exactly at the risk cap': ("> cap + RISK_ULPS * DBL_EPSILON * max(1.0, cap)", ">= cap", 'RISK_EXACTLY_AT_CAP'),
-    'no binary noise tolerance': ("> cap + RISK_ULPS * DBL_EPSILON * max(1.0, cap)", "> cap", 'RISK_BINARY_NOISE_AT_CAP'),
+    'block exactly at the risk cap': ("        return (risk - remaining) > tol\n", "        return (risk - remaining) >= 0.0\n", 'RISK_EXACTLY_AT_CAP'),
+    'no binary noise tolerance': ("        return (risk - remaining) > tol\n", "        return (risk - remaining) > 0.0\n", 'RISK_BINARY_NOISE_AT_CAP'),
     'tolerance too wide (swallows a real excess)': ("RISK_ULPS * DBL_EPSILON * max(1.0, cap)", "0.1", 'RISK_BINARY_NOISE_REAL_EXCESS'),
-    'plan status ignored': ("plan_ok = getattr(plan, 'status', None) == OK", "plan_ok = True", 'PLAN_GEOMETRY_REFUSED'),
+    'naive sum reintroduced (overflows to inf)': ("_risk_exceeded(snap.existing_risk, plan.risk_model, cap):",
+                                                 "snap.existing_risk + plan.risk_model > cap + RISK_ULPS * DBL_EPSILON * max(1.0, cap):",
+                                                 'RISK_OVERFLOW_1E308'),
+    'naive sum reintroduced (existing at DBL_MAX)': ("_risk_exceeded(snap.existing_risk, plan.risk_model, cap):",
+                                                    "snap.existing_risk + plan.risk_model > cap + RISK_ULPS * DBL_EPSILON * max(1.0, cap):",
+                                                    'RISK_EXISTING_DBL_MAX_PLUS_BIG_PLAN'),
+    'existing above the cap branch dropped': ("    return not (over <= tol and risk <= tol - over)\n", "    return False\n", 'RISK_LARGE_EXISTING_ABOVE_CAP'),
+    'plan status ignored': ("    plan_complete = getattr(plan, 'status', None) == OK and getattr(plan, 'stage', None) == STAGE_COMPLETE\n",
+                            "    plan_complete = True\n", 'PLAN_GEOMETRY_REFUSED'),
+    'plan stage ignored': (" and getattr(plan, 'stage', None) == STAGE_COMPLETE\n", "\n", 'PLAN_STAGE_INPUT'),
+    'plan stage ignored (zero plan)': (" and getattr(plan, 'stage', None) == STAGE_COMPLETE\n", "\n", 'PLAN_ZERO_INPUT'),
+    'plan ids not validated': ("    ids_ok = not (_blank(getattr(plan, 'signal_id', None)) or _blank(getattr(plan, 'setup_id', None)))\n",
+                               "    ids_ok = True\n", 'PLAN_SIGNAL_BLANK'),
+    'plan values not validated (NaN risk_model)': ("    values_ok = all(_pos_finite(getattr(plan, f, None)) for f in PLAN_REQUIRED)\n",
+                                                   "    values_ok = True\n", 'PLAN_FIELD_RISK_MODEL_NAN'),
+    'plan values not validated (zero plan)': ("    values_ok = all(_pos_finite(getattr(plan, f, None)) for f in PLAN_REQUIRED)\n",
+                                              "    values_ok = True\n", 'PLAN_ZERO_COMPLETE'),
+    'positivity of plan values not required': ("math.isfinite(v) and v > 0", "math.isfinite(v)", 'PLAN_FIELD_VOLUME_OUT_ZERO'),
+    'registry capacity guard removed': ("    elif registry.count >= capacity:\n        reasons.append('REGISTRY_FULL')\n",
+                                        "    elif False:\n        pass\n", 'REGISTRY_CAPACITY_ZERO'),
+    'registry capacity guard depends on the id': ("    elif registry.count >= capacity:\n        reasons.append('REGISTRY_FULL')\n",
+                                                  "    elif not _blank(sid) and registry.count >= capacity:\n        reasons.append('REGISTRY_FULL')\n",
+                                                  'REGISTRY_FULL_WITH_BLANK_ID'),
+    'registry count above capacity not invalid': ("or registry.count > capacity:", ":", 'REGISTRY_COUNT_ABOVE_CAPACITY'),
+    'authorize final bounds guard removed': ("    if not _count_ok(registry.count) or registry.count >= len(registry.ids):",
+                                             "    if False:", 'SEQ_AUTHORIZE_FINAL_GUARD'),
     'unreliable data allowed': ("        if snap.data_reliable is not True:\n            reasons.append('DATA_UNRELIABLE')\n",
                                 "        pass\n", 'DATA_UNRELIABLE'),
     'unknown news allowed': ("    elif snap.news_state == NEWS_UNKNOWN:\n        reasons.append('NEWS_UNKNOWN')\n",
                              "    elif snap.news_state == NEWS_UNKNOWN:\n        pass\n", 'NEWS_UNKNOWN'),
-    'duplicate not detected': ("if sid in registry.ids[:registry.count]:", "if False:", 'REGISTRY_DUPLICATE'),
-    'registry overflow ignored': ("        elif registry.count >= capacity:\n            reasons.append('REGISTRY_FULL')\n",
-                                  "        elif False:\n            pass\n", 'REGISTRY_FULL_NEW_ID'),
+    'duplicate not detected': ("and sid in registry.ids[:registry.count]:", "and False:", 'REGISTRY_DUPLICATE'),
     'position alone gives a cancel request': ("    if not pending_exists:\n        return CancelDecision(status=NO_PENDING",
                                               "    if not (pending_exists or pos):\n        return CancelDecision(status=NO_PENDING", 'POSITION_ONLY_NO_REQUEST'),
     'positions_untouched can be False': ("positions_untouched: bool = True ", "positions_untouched: bool = False ", 'CAUSE_SESSION_END'),
