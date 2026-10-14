@@ -107,6 +107,8 @@ neg "status dropped from the MQL5 enum" parity $MOD "   TG_PENDING_TOO_CLOSE
 neg "target label changed in the MQL5 module" parity $MOD 'return("EQUAL_TO_2R");' 'return("EQUAL");' "EQUAL_TO_2R" $REF
 neg "tick/digits compatibility removed from MQL5" guards $MOD "MathAbs(q-qr)>TG_EPS_TICKS" "false" "guard missing in MQL5" $REF
 neg "positivity test removed from MQL5" guards $MOD "lvl_px<=0.0" "false" "guard missing in MQL5" $REF
+neg "canonical tick definition removed from MQL5" guards $MOD "double tick=qr/scale;" "double tick=tick_size;" "canonical tick definition missing" $REF
+neg "raw tick_size used after canonical tick (MQL5)" guards $MOD "TG_NearestTicks(e_raw,tick);" "TG_NearestTicks(e_raw,tick_size);" "raw tick_size used after the canonical tick" $REF
 neg "MQL5 MAX_TICKS differs from Python" guards $MOD "#define TG_MAX_TICKS 1e12" "#define TG_MAX_TICKS 1e13" "MAX_TICKS differs" $REF
 # syntax / format / ASCII controls use the shared checkers
 cp $MOD "$NEG/Unbalanced.mqh"; echo "void x(){" >> "$NEG/Unbalanced.mqh"

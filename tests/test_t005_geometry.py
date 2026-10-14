@@ -189,6 +189,7 @@ class ValidationTests(unittest.TestCase):
 class InvariantTests(unittest.TestCase):
     def check_ok(self, res, tick, digits):
         sign = 1 if res.direction == 'BUY' else -1
+        tick = math.floor(tick * 10.0 ** digits + 0.5) / 10.0 ** digits   # prices lie on the CANONICAL tick grid
         self.assertEqual(res.status, 'OK')
         # R and 2R come from exactly the reported prices
         self.assertAlmostEqual(abs(res.e_out - res.s_out), res.r_geom, places=9)
@@ -340,6 +341,7 @@ class RuleTests(unittest.TestCase):
 def mutant(c, kind):
     """Independent mini-implementations with ONE deliberate defect each; they must fail the hand table."""
     tick, digits, _point, _stops = c['sym']
+    tick = math.floor(tick * 10.0 ** digits + 0.5) / 10.0 ** digits      # canonical tick (independent copy of the rule)
     sign = 1 if c['d'] == 'BUY' else -1
     px = lambda n: round(n * tick, digits)
     nearest = g.nearest_ticks
@@ -413,8 +415,8 @@ class GuardMutationTests(unittest.TestCase):
         ('E_out/S_out positivity', [('if e_out <= 0 or s_out <= 0:', F)]),
         ('level/target/TP positivity', [('if level_2r <= 0:', F), ('if t_price <= 0:', F),
                                         ('if tp <= 0 or level_2r <= 0:', F)]),
-        ('range limit', [('abs(bid or 0.0), abs(ask or 0.0)) / tick_size > MAX_TICKS:',
-                          'abs(bid or 0.0), abs(ask or 0.0)) / tick_size > 1e300:')]),
+        ('range limit', [('abs(bid or 0.0), abs(ask or 0.0)) / tick > MAX_TICKS:',
+                          'abs(bid or 0.0), abs(ask or 0.0)) / tick > 1e300:')]),
         ('finite results', [('if not (math.isfinite(e_out) and math.isfinite(s_out)):', F),
                             ('if not (math.isfinite(r_geom) and math.isfinite(level_2r)):', F),
                             ('if not math.isfinite(t_price):', F), ('if not math.isfinite(tp):', F),
@@ -452,6 +454,92 @@ class GuardMutationTests(unittest.TestCase):
         self.assertIn('BUY_SL_ROUNDS_TO_ZERO', by['E_out/S_out positivity'])
         self.assertIn('BUY_RANGE_AT_LIMIT_PLUS', by['range limit'])
         self.assertIn('BUY_2R_OVERFLOW_TO_INF', by['finite results'])
+
+
+class CanonicalTickTests(unittest.TestCase):
+    """An accepted near-grid tick_size is replaced by k*10^-digits before any computation (no drift)."""
+    RAW = ('tick = qr / scale', 'tick = tick_size')      # mutation: use the raw tick_size in the conversions
+
+    @staticmethod
+    def consistent(res, digits):
+        """Recompute R and 2R from the REPORTED prices only and compare on the digits grid (exact)."""
+        sign = 1 if res.direction == 'BUY' else -1
+        return (round(abs(res.e_out - res.s_out), digits) == res.r_geom and
+                round(res.e_out + sign * 2 * res.r_geom, digits) == res.level_2r and
+                res.partial_price == res.level_2r)
+
+    def test_buy_case_from_review(self):
+        res = g.compute('BUY', 10000.0, 9999.99, 0.010000005, 2, 0.01, 0)
+        self.assertEqual(res.status, 'OK')
+        self.assertEqual((res.e_out, res.s_out, res.r_geom, res.level_2r), (10000.0, 9999.99, 0.01, 10000.02))
+        self.assertEqual((res.e_ticks, res.s_ticks, res.two_r_ticks), (1000000, 999999, 1000002))
+        self.assertTrue(self.consistent(res, 2))
+
+    def test_sell_mirror(self):
+        res = g.compute('SELL', 10000.0, 10000.01, 0.010000005, 2, 0.01, 0)
+        self.assertEqual(res.status, 'OK')
+        self.assertEqual((res.e_out, res.s_out, res.r_geom, res.level_2r), (10000.0, 10000.01, 0.01, 9999.98))
+        self.assertEqual((res.e_ticks, res.s_ticks, res.two_r_ticks), (1000000, 1000001, 999998))
+        self.assertTrue(self.consistent(res, 2))
+
+    def test_sweep_near_tolerance_ticks_and_large_prices(self):
+        rnd = random.Random(20261015)
+        base = [(0.01, 2), (0.05, 2), (0.25, 2), (0.1, 1), (0.5, 1), (1.0, 0), (1e-8, 8), (5e-8, 8), (0.001, 3)]
+        n = 0
+        for tick0, digits in base:
+            for f in (1 - 5e-7, 1 - 1e-7, 1.0, 1 + 1e-7, 1 + 5e-7, 1 + 9e-7):
+                tick = tick0 * f
+                scale = 10.0 ** digits
+                for price in (2000.0, 10000.0, 123456.78, 1e6):
+                    if price / tick0 > 5e11:
+                        continue
+                    for d in ('BUY', 'SELL'):
+                        for _ in range(60):
+                            k = round(price * scale)
+                            e = k / scale
+                            dist = rnd.randint(1, 4000)
+                            s = (k - dist if d == 'BUY' else k + dist) / scale
+                            t = None if rnd.random() < 0.4 else (k + (1 if d == 'BUY' else -1) * rnd.randint(1, 9000)) / scale
+                            res = g.compute(d, e, s, tick, digits, 0.01, 0, t)
+                            if res.status != 'OK':
+                                continue
+                            n += 1
+                            self.assertTrue(self.consistent(res, digits), (d, e, s, tick, digits, res))
+        self.assertGreater(n, 5000)
+
+    def test_reference_matches_integer_tick_value_exactly(self):
+        res = g.compute('BUY', 10000.0, 9999.99, 0.010000005, 2, 0.01, 0, 10000.05)
+        canon = 1 / 10.0 ** 2
+        for ticks, price in ((res.e_ticks, res.e_out), (res.s_ticks, res.s_out), (res.two_r_ticks, res.level_2r),
+                             (res.tp_ticks, res.tp)):
+            self.assertEqual(price, round(ticks * canon, 2))
+
+    def test_raw_tick_mutation_is_caught(self):
+        mut = load_mutated_reference(self.RAW)
+        buy = mut.compute('BUY', 10000.0, 9999.99, 0.010000005, 2, 0.01, 0)
+        sell = mut.compute('SELL', 10000.0, 10000.01, 0.010000005, 2, 0.01, 0)
+        self.assertNotEqual(buy.level_2r, 10000.02)                         # case (1) fails
+        self.assertNotEqual((sell.e_out, sell.s_out, sell.r_geom, sell.level_2r),   # case (2) fails (S_out drifts a tick)
+                            (10000.0, 10000.01, 0.01, 9999.98))
+        names = [c['name'] for c in CASES if c['name'].endswith(('DRIFT_001', 'DRIFT_005'))]
+        self.assertEqual(len(names), 3)
+        failing_table = [c['name'] for c in CASES if c['name'] in names and c['exp'] is not None and
+                         not same(numbers(mut.compute(c['d'], c['e'], c['s'], c['sym'][0], c['sym'][1], c['sym'][2],
+                                                      c['sym'][3], c['t'])), c['exp'])]
+        self.assertTrue(failing_table)
+        bad = 0                                                              # case (3): the sweep invariant fails
+        for tick in (0.01 * (1 + 1e-7), 0.01 * (1 + 5e-7)):
+            for d in ('BUY', 'SELL'):
+                for dist in range(1, 200):
+                    k = 1000000
+                    s = (k - dist if d == 'BUY' else k + dist) / 100.0
+                    r = mut.compute(d, 10000.0, s, tick, 2, 0.01, 0)
+                    if r.status == 'OK' and not self.consistent(r, 2):
+                        bad += 1
+        self.assertGreater(bad, 0)
+        self.assertEqual(sum(1 for d in ('BUY', 'SELL') for dist in range(1, 200) for tick in (0.01 * (1 + 5e-7),)
+                             if not self.consistent(g.compute(d, 10000.0, (1000000 - dist if d == 'BUY' else 1000000 + dist) / 100.0,
+                                                              tick, 2, 0.01, 0), 2)), 0)
 
 
 class SyncAndScopeTests(unittest.TestCase):

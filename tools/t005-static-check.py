@@ -154,6 +154,15 @@ def check_guards(files):
         if not re.search(pat, ref):
             print('%s: guard missing in Python: %s' % (files[1], pat))
             bad = 1
+    # canonical tick: defined as qr/scale in both languages, and the raw tick_size is never used after that line
+    for lang, text, pat in (('MQL5', mqh, r'double tick=qr/scale;'), ('Python', ref, r'^\s*tick = qr / scale\b')):
+        m = re.search(pat, text, re.M)
+        if not m:
+            print('canonical tick definition missing in %s: %s' % (lang, pat))
+            bad = 1
+        elif re.search(r'\btick_size\b', text[m.end():]):
+            print('raw tick_size used after the canonical tick in %s code' % lang)
+            bad = 1
     a = re.search(r'#define\s+TG_MAX_TICKS\s+(\S+)', mqh)
     b = re.search(r'^MAX_TICKS\s*=\s*(\S+)', ref, re.M)
     if not a or not b or float(a.group(1)) != float(b.group(1)):

@@ -22,6 +22,12 @@ VALIDATION (all failures are INVALID_INPUT; the reason starts with a fixed tag; 
   E_out/S_out finite [NUMERIC_OVERFLOW] and > 0 [NONPOSITIVE_PRICE] -> ZERO_RISK -> SL_WRONG_SIDE -> level_2R/R_geom
   finite and level_2R > 0 -> target price finite and > 0 -> TARGET_WRONG_SIDE -> TP/partial finite and > 0 ->
   BELOW_STOPS_LEVEL (distances must be finite) -> PENDING_TOO_CLOSE (gap must be finite).
+CANONICAL TICK: an accepted tick_size may deviate from k*10^-digits by up to 1e-6 tick. Right after the compatibility
+  check the working tick becomes the canonical value tick = k / 10^digits (k = floor(q+0.5)); this canonical tick is the ONLY
+  tick used for price->ticks, ticks->price, the MAX_TICKS range check, the stops-distance and pending-gap
+  computations. So every reported price is the digits-normalized value of an integer-tick price on the exact digits
+  grid and |E_out-S_out| == R_geom, level_2R == E_out +/- 2*R_geom hold exactly on that grid (no drift from a
+  slightly-off tick_size). The raw tick_size is not echoed by Result.
   On the new positivity/overflow failures NO geometry is reported: computed=False and every numeric/tick field is
   0 (only direction and the raw inputs are echoed). ZERO_RISK/SL_WRONG_SIDE keep E_out/S_out/E,S ticks (as before).
 Not enforced: the '50 stop distance' limit (unit unconfirmed), freeze level, spread limit, volume rules.
@@ -146,19 +152,20 @@ def compute(direction, e_raw, s_raw, tick_size, digits, point, stops_level, t_ra
     if not math.isfinite(q) or qr < 1 or abs(q - qr) > EPS_TICKS:
         return _fail(INVALID_INPUT, 'INCOMPATIBLE_TICK_DIGITS: tick_size %.10g is not an integer multiple of 10^-%d' %
                      (tick_size, digits), direction, e_raw, s_raw, t_raw)
+    tick = qr / scale     # CANONICAL tick (k * 10^-digits); the ONLY tick used from here on, tick_size is never used again
     if e_raw <= 0 or s_raw <= 0 or (t_raw is not None and t_raw <= 0) or (bid is not None and (bid <= 0 or ask <= 0)):
         return _fail(INVALID_INPUT, 'prices must be > 0', direction, e_raw, s_raw, t_raw)
     if bid is not None and bid > ask:
         return _fail(INVALID_INPUT, 'bid is above ask', direction, e_raw, s_raw, t_raw)
-    if max(abs(e_raw), abs(s_raw), abs(t_raw or 0.0), abs(bid or 0.0), abs(ask or 0.0)) / tick_size > MAX_TICKS:
-        return _fail(INVALID_INPUT, 'NUMERIC_OVERFLOW: price/tick_size is out of range (> 1e12 ticks)', direction,
+    if max(abs(e_raw), abs(s_raw), abs(t_raw or 0.0), abs(bid or 0.0), abs(ask or 0.0)) / tick > MAX_TICKS:
+        return _fail(INVALID_INPUT, 'NUMERIC_OVERFLOW: price/tick is out of range (> 1e12 ticks)', direction,
                      e_raw, s_raw, t_raw)
 
     sign = 1 if direction == BUY else -1
-    e_t = nearest_ticks(e_raw, tick_size)
-    s_t = nearest_ticks(s_raw, tick_size)
-    e_out = ticks_to_price(e_t, tick_size, digits)
-    s_out = ticks_to_price(s_t, tick_size, digits)
+    e_t = nearest_ticks(e_raw, tick)
+    s_t = nearest_ticks(s_raw, tick)
+    e_out = ticks_to_price(e_t, tick, digits)
+    s_out = ticks_to_price(s_t, tick, digits)
     if not (math.isfinite(e_out) and math.isfinite(s_out)):
         return _fail(INVALID_INPUT, 'NUMERIC_OVERFLOW: normalized E or S is not finite', direction, e_raw, s_raw, t_raw)
     if e_out <= 0 or s_out <= 0:
@@ -173,8 +180,8 @@ def compute(direction, e_raw, s_raw, tick_size, digits, point, stops_level, t_ra
 
     r_t = abs(e_t - s_t)
     two_r_t = e_t + sign * 2 * r_t
-    r_geom = ticks_to_price(r_t, tick_size, digits)
-    level_2r = ticks_to_price(two_r_t, tick_size, digits)
+    r_geom = ticks_to_price(r_t, tick, digits)
+    level_2r = ticks_to_price(two_r_t, tick, digits)
     if not (math.isfinite(r_geom) and math.isfinite(level_2r)):
         return _fail(INVALID_INPUT, 'NUMERIC_OVERFLOW: R_geom or level_2R is not finite', direction, e_raw, s_raw, t_raw)
     if level_2r <= 0:
@@ -188,8 +195,8 @@ def compute(direction, e_raw, s_raw, tick_size, digits, point, stops_level, t_ra
     case = TARGET_NONE
     tp_t = two_r_t
     if t_raw is not None:
-        tn = away_ticks(t_raw, tick_size, direction)
-        t_price = ticks_to_price(tn, tick_size, digits)
+        tn = away_ticks(t_raw, tick, direction)
+        t_price = ticks_to_price(tn, tick, digits)
         if not math.isfinite(t_price):
             return _fail(INVALID_INPUT, 'NUMERIC_OVERFLOW: normalized target is not finite', direction,
                          e_raw, s_raw, t_raw)
@@ -197,7 +204,7 @@ def compute(direction, e_raw, s_raw, tick_size, digits, point, stops_level, t_ra
             return _fail(INVALID_INPUT, 'NONPOSITIVE_PRICE: normalized target=%.10g is not > 0' % t_price,
                          direction, e_raw, s_raw, t_raw)
         if sign * (tn - e_t) <= 0:
-            tp_price = ticks_to_price(two_r_t, tick_size, digits)
+            tp_price = ticks_to_price(two_r_t, tick, digits)
             return _fail(TARGET_WRONG_SIDE, 'target is not beyond the entry in the trade direction', direction,
                          e_raw, s_raw, t_raw, t_ticks=tn, tp_ticks=two_r_t, tp=tp_price,
                          tp_equals_2r=True, **base)
@@ -207,7 +214,7 @@ def compute(direction, e_raw, s_raw, tick_size, digits, point, stops_level, t_ra
             case = TARGET_EQUAL
         else:
             case = TARGET_NEARER
-    tp = ticks_to_price(tp_t, tick_size, digits)
+    tp = ticks_to_price(tp_t, tick, digits)
     if not math.isfinite(tp):
         return _fail(INVALID_INPUT, 'NUMERIC_OVERFLOW: TP is not finite', direction, e_raw, s_raw, t_raw)
     if tp <= 0 or level_2r <= 0:     # partial_price == level_2r
@@ -215,8 +222,8 @@ def compute(direction, e_raw, s_raw, tick_size, digits, point, stops_level, t_ra
                      e_raw, s_raw, t_raw)
     base.update(t_ticks=tn, tp_ticks=tp_t, tp=tp, target_case=case, tp_equals_2r=(tp_t == two_r_t))
 
-    sl_points = r_t * tick_size / point
-    tp_points = abs(tp_t - e_t) * tick_size / point
+    sl_points = r_t * tick / point
+    tp_points = abs(tp_t - e_t) * tick / point
     if not (math.isfinite(sl_points) and math.isfinite(tp_points)):
         return _fail(INVALID_INPUT, 'NUMERIC_OVERFLOW: SL/TP distance in points is not finite', direction,
                      e_raw, s_raw, t_raw)

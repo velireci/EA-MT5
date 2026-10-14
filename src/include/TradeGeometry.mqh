@@ -33,6 +33,12 @@
 //  E_out/S_out finite [NUMERIC_OVERFLOW] and > 0 [NONPOSITIVE_PRICE] -> ZERO_RISK -> SL_WRONG_SIDE -> level_2R/R_geom
 //  finite and level_2R > 0 -> target price finite and > 0 -> TARGET_WRONG_SIDE -> TP/partial finite and > 0 ->
 //  BELOW_STOPS_LEVEL (distances must be finite) -> PENDING_TOO_CLOSE (gap must be finite).
+// CANONICAL TICK: an accepted tick_size may deviate from k*10^-digits by up to 1e-6 tick. Right after the compatibility
+//  check the working tick becomes the canonical value tick = k / 10^digits (k = floor(q+0.5)); this canonical tick is the ONLY
+//  tick used for price->ticks, ticks->price, the TG_MAX_TICKS range check, the stops-distance and pending-gap
+//  computations. So every reported price is the digits-normalized value of an integer-tick price on the exact digits
+//  grid and |E_out-S_out| == R_geom, level_2R == E_out +/- 2*R_geom hold exactly on that grid (no drift from a
+//  slightly-off tick_size). The raw tick_size is not echoed in STgResult.
 //  On the new positivity/overflow failures NO geometry is reported: computed=false and every numeric/tick field is
 //  0 (only direction and the raw inputs are echoed). ZERO_RISK/SL_WRONG_SIDE keep E_out/S_out/E,S ticks (as before).
 // NOT enforced (open): the "50 stop-distance" limit (unit unconfirmed), freeze level, spread limit, volume.
@@ -225,10 +231,12 @@ bool TG_Compute(const int direction,const double e_raw,const double s_raw,
       return(TG_Fail(out,TG_INVALID_INPUT,"digits must be 0..8"));
    if(stops_level<0)
       return(TG_Fail(out,TG_INVALID_INPUT,"stops_level must be >= 0"));
-   double q=tick_size*MathPow(10.0,digits);
+   double scale=MathPow(10.0,digits);
+   double q=tick_size*scale;
    double qr=(TG_Finite(q) ? MathFloor(q+0.5) : 0.0);
    if(!TG_Finite(q) || qr<1.0 || MathAbs(q-qr)>TG_EPS_TICKS)
       return(TG_Fail(out,TG_INVALID_INPUT,StringFormat("INCOMPATIBLE_TICK_DIGITS: tick_size %.10g is not an integer multiple of 10^-%d",tick_size,digits)));
+   double tick=qr/scale;   // CANONICAL tick (k * 10^-digits); the ONLY tick used from here on, tick_size is never used again
    if(e_raw<=0.0 || s_raw<=0.0 || (has_target && t_raw<=0.0) || (has_quote && (bid<=0.0 || ask<=0.0)))
       return(TG_Fail(out,TG_INVALID_INPUT,"prices must be > 0"));
    if(has_quote && bid>ask)
@@ -236,14 +244,14 @@ bool TG_Compute(const int direction,const double e_raw,const double s_raw,
    double big=MathMax(MathAbs(e_raw),MathAbs(s_raw));
    if(has_target) big=MathMax(big,MathAbs(t_raw));
    if(has_quote) big=MathMax(big,MathMax(MathAbs(bid),MathAbs(ask)));
-   if(big/tick_size>TG_MAX_TICKS)
-      return(TG_Fail(out,TG_INVALID_INPUT,"NUMERIC_OVERFLOW: price/tick_size is out of range (> 1e12 ticks)"));
+   if(big/tick>TG_MAX_TICKS)
+      return(TG_Fail(out,TG_INVALID_INPUT,"NUMERIC_OVERFLOW: price/tick is out of range (> 1e12 ticks)"));
 
    int sign=(direction==TG_BUY ? 1 : -1);
-   long e_t=TG_NearestTicks(e_raw,tick_size);
-   long s_t=TG_NearestTicks(s_raw,tick_size);
-   double e_px=TG_TicksToPrice(e_t,tick_size,digits);
-   double s_px=TG_TicksToPrice(s_t,tick_size,digits);
+   long e_t=TG_NearestTicks(e_raw,tick);
+   long s_t=TG_NearestTicks(s_raw,tick);
+   double e_px=TG_TicksToPrice(e_t,tick,digits);
+   double s_px=TG_TicksToPrice(s_t,tick,digits);
    if(!TG_Finite(e_px) || !TG_Finite(s_px))
       return(TG_Fail(out,TG_INVALID_INPUT,"NUMERIC_OVERFLOW: normalized E or S is not finite"));
    if(e_px<=0.0 || s_px<=0.0)
@@ -259,8 +267,8 @@ bool TG_Compute(const int direction,const double e_raw,const double s_raw,
 
    long r_t=(e_t>s_t ? e_t-s_t : s_t-e_t);
    long two_r_t=e_t+sign*2*r_t;
-   double r_px=TG_TicksToPrice(r_t,tick_size,digits);
-   double lvl_px=TG_TicksToPrice(two_r_t,tick_size,digits);
+   double r_px=TG_TicksToPrice(r_t,tick,digits);
+   double lvl_px=TG_TicksToPrice(two_r_t,tick,digits);
    if(!TG_Finite(r_px) || !TG_Finite(lvl_px))
      {
       TG_Reset(out,direction,e_raw,s_raw,has_target,t_raw);
@@ -282,8 +290,8 @@ bool TG_Compute(const int direction,const double e_raw,const double s_raw,
    long tp_t=two_r_t;
    if(has_target)
      {
-      long tn=TG_AwayTicks(t_raw,tick_size,direction);
-      double t_px=TG_TicksToPrice(tn,tick_size,digits);
+      long tn=TG_AwayTicks(t_raw,tick,direction);
+      double t_px=TG_TicksToPrice(tn,tick,digits);
       if(!TG_Finite(t_px) || t_px<=0.0)
         {
          TG_Reset(out,direction,e_raw,s_raw,has_target,t_raw);
@@ -306,7 +314,7 @@ bool TG_Compute(const int direction,const double e_raw,const double s_raw,
       else
          out.target_case=(tn==two_r_t ? TG_TARGET_EQUAL : TG_TARGET_NEARER);
      }
-   double tp_px=TG_TicksToPrice(tp_t,tick_size,digits);
+   double tp_px=TG_TicksToPrice(tp_t,tick,digits);
    if(!TG_Finite(tp_px) || tp_px<=0.0 || out.level_2r<=0.0)
      {
       TG_Reset(out,direction,e_raw,s_raw,has_target,t_raw);
@@ -317,9 +325,9 @@ bool TG_Compute(const int direction,const double e_raw,const double s_raw,
    out.tp=tp_px;
    out.tp_equals_2r=(tp_t==two_r_t);
 
-   double sl_points=(double)r_t*tick_size/point;
+   double sl_points=(double)r_t*tick/point;
    long tp_dist=(tp_t>e_t ? tp_t-e_t : e_t-tp_t);
-   double tp_points=(double)tp_dist*tick_size/point;
+   double tp_points=(double)tp_dist*tick/point;
    if(!TG_Finite(sl_points) || !TG_Finite(tp_points))
      {
       TG_Reset(out,direction,e_raw,s_raw,has_target,t_raw);

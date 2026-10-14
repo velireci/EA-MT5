@@ -111,6 +111,15 @@ case('SELL_2R_JUST_POSITIVE', SELL, 100.00, 149.99, None, S01, 'OK', (100.00, 14
 case('BUY_HUGE_TINY_TICK', BUY, 1e300, 1e299, None, S01, I, why=OV)
 case('BUY_RANGE_AT_LIMIT_PLUS', BUY, 1.0e10 + 1.0, 1.0e10, None, S01, I, why=OV)               # 1e12 + 100 ticks
 case('BUY_2R_OVERFLOW_TO_INF', BUY, 1.5e308, 1.0e308, None, (1e308, 0, 1.0, 0), I, why=OV)     # E_out = 2e308 = inf
+# --- canonical tick: a tick within 1e-6 tick of k*10^-digits is accepted but computed as k*10^-digits ---------
+# BUY E 10000 S 9999.99 tick 0.010000005 -> canonical 0.01: ticks 1000000 / 999999, R 1 tick = 0.01, 2R = 1000002 ticks = 10000.02
+# (the raw tick would drift to 10000.03). SELL mirror: S 10000.01, 2R = 999998 ticks = 9999.98.
+# tick 0.050000005 -> canonical 0.05: BUY E 10000 S 9999.90 = 200000 / 199998 ticks, R 0.10, 2R = 10000.20.
+SDRIFT01 = (0.010000005, 2, 0.01, 0)
+SDRIFT05 = (0.050000005, 2, 0.01, 0)
+case('BUY_TICK_DRIFT_001', BUY, 10000.00, 9999.99, None, SDRIFT01, 'OK', (10000.00, 9999.99, 0.01, 10000.02, 10000.02, N, True))
+case('SELL_TICK_DRIFT_001', SELL, 10000.00, 10000.01, None, SDRIFT01, 'OK', (10000.00, 10000.01, 0.01, 9999.98, 9999.98, N, True))
+case('BUY_TICK_DRIFT_005', BUY, 10000.00, 9999.90, None, SDRIFT05, 'OK', (10000.00, 9999.90, 0.10, 10000.20, 10000.20, N, True))
 
 SIGN = {BUY: 1, SELL: -1, HOLD: 0}
 
