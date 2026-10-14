@@ -164,6 +164,25 @@ class Properties(unittest.TestCase):
         self.assertEqual(a.on_quote(st, **dict(base, position_id=8)).event, 'OK')
         self.assertEqual(st.position_id, 8)
 
+    def test_unknown_report_kind_changes_nothing_in_every_state(self):
+        import copy
+        for sv in range(5):
+            st = a.State()
+            if sv >= 1:
+                a.on_quote(st, 7, a.BUY, 2000.0, 2000.0, 2000.3, 0.1, 0.1, 0.01, 0.01, 100.0)
+            if sv == 2:
+                a.on_report(st, 'X2R80-7', a.FULL, 0.08, 0.01)
+            if sv == 3:
+                a.on_report(st, 'X2R80-7', a.TIMEOUT, 0.0, 0.01)
+            if sv == 4:
+                a.on_report(st, 'X2R80-8', a.FULL, 0.08, 0.01)
+            self.assertEqual(st.status, (a.IDLE, a.REQUEST_PENDING, a.DONE, a.NEEDS_RECONCILIATION, a.BLOCKED)[sv])
+            before = copy.deepcopy(st)
+            for kind in (9, -1):
+                res = a.on_report(st, 'X2R80-7', kind, 0.08, 0.01)
+                self.assertEqual(res.event, 'INVALID_INPUT')
+                self.assertEqual(st, before)
+
     def test_state_is_only_what_the_caller_passes(self):
         st1, st2 = a.State(), a.State()
         a.on_quote(st1, 7, a.BUY, 2000.0, 2000.0, 2000.3, 0.1, 0.1, 0.01, 0.01, 100.0)

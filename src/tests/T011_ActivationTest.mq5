@@ -75,6 +75,13 @@ void RunRows(void)
         }
      }
   }
+bool SameState(const SEaState &a,const SEaState &b)
+  {
+   return(a.status==b.status && a.bound==b.bound && a.position_id==b.position_id && a.direction==b.direction && a.level==b.level &&
+          a.volume_initial==b.volume_initial && a.volume_step==b.volume_step && a.request_id==b.request_id && a.request_steps==b.request_steps &&
+          a.close_volume==b.close_volume && a.initial_steps==b.initial_steps && a.executed_steps==b.executed_steps &&
+          a.confirmations==b.confirmations && a.duplicates_ignored==b.duplicates_ignored && a.reason==b.reason);
+  }
 void TestInvalid(void)
   {
    double nan=MathSqrt(-1.0);
@@ -135,8 +142,27 @@ void TestInvalid(void)
       EA_OnReport(st,"X2R80-7",EA_REP_FULL,0.04,0.001,r);
       Check(r.event==EA_EV_BLOCKED && st.status==EA_ST_BLOCKED && st.confirmations==0 && StringFind(r.reason,"STEP_CHANGED")==0,"0.04 lot on a 0.001 grid never confirms the request");
      }
-   EA_OnReport(st,"X2R80-7",(ENUM_EA_REPORT)9,0.08,0.01,r);
-   Check(r.event==EA_EV_INVALID_INPUT && st.status==EA_ST_IDLE,"unknown report kind is invalid and changes nothing");
+   // an unknown report kind is refused BEFORE any state change: compare the whole state before and after, in every state
+   for(int sv=0;sv<5;sv++)
+     {
+      EA_StateInit(st);
+      if(sv>=1)
+         EA_OnQuote(st,7,1,2000.0,2000.0,2000.3,0.1,0.1,0.01,0.01,100.0,r);                 // REQUEST_PENDING
+      if(sv==2)
+         EA_OnReport(st,"X2R80-7",EA_REP_FULL,0.08,0.01,r);                                 // DONE
+      if(sv==3)
+         EA_OnReport(st,"X2R80-7",EA_REP_TIMEOUT,0.0,0.01,r);                               // NEEDS_RECONCILIATION
+      if(sv==4)
+         EA_OnReport(st,"X2R80-8",EA_REP_FULL,0.08,0.01,r);                                 // BLOCKED
+      ENUM_EA_STATE expected=(sv==0 ? EA_ST_IDLE : (sv==1 ? EA_ST_REQUEST_PENDING : (sv==2 ? EA_ST_DONE : (sv==3 ? EA_ST_NEEDS_RECONCILIATION : EA_ST_BLOCKED))));
+      Check(st.status==expected,"setup reached the state "+EA_StateName(expected));
+      SEaState before=st;
+      EA_OnReport(st,"X2R80-7",(ENUM_EA_REPORT)9,0.08,0.01,r);
+      Check(r.event==EA_EV_INVALID_INPUT && r.action==EA_ACT_NONE,"unknown report kind is INVALID_INPUT in state "+EA_StateName(expected));
+      Check(SameState(before,st),"unknown report kind changes nothing in state "+EA_StateName(expected));
+      EA_OnReport(st,"X2R80-7",(ENUM_EA_REPORT)(-1),0.08,0.01,r);
+      Check(r.event==EA_EV_INVALID_INPUT && SameState(before,st),"negative report kind changes nothing in state "+EA_StateName(expected));
+     }
   }
 void OnStart()
   {
