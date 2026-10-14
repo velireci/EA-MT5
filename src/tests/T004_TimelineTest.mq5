@@ -88,5 +88,14 @@ void OnStart()
    Update(u[0],START+900);Update(u[1],START);
    Run(b,9,u,2,START+8100,s,f,e,info);
    Check(info.status=="INVALID_UPDATES" && ArraySize(e)==0,"invalid context chronology yields no partial observations");
+   Update(u[0],START);
+   Run(b,9,u,1,START+8100,s,f,e,info);
+   bool built=true;datetime cut=START+8100;
+   M4ResetReplay(s,f,e,info,built,cut);
+   Check(!built && cut==0 && M4TimelineNeedsBuild(true,built,START+8100,cut,false,false),
+         "chart reinitialisation resets successful cache and forces historical rebuild");
+   Check(s.phase=="WAIT_CONTEXT" && info.bos_price==0 && info.processed==0 && info.status=="RESET",
+         "chart reset cannot mix old BOS with empty context");
+   Check(ArraySize(f)==0 && ArraySize(e)==0,"chart reset removes previous replay facts and FVGs");
    PrintFormat("T004 TIMELINE TEST finished: %d passed, %d failed",g_pass,g_fail);
   }

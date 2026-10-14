@@ -23,6 +23,17 @@ bool M4TimelineNeedsBuild(const bool historical,const bool built,const datetime 
    return(!built || cut!=previous || (!historical && (h4_changed || m15_changed)));
   }
 
+// MT5 may preserve globals on a chart-period reinitialisation. Reset the result
+// AND its successful-copy cache together; otherwise historical mode can skip Build.
+void M4ResetReplay(SM4State &state,SM4Candidate &f[],SM4Event &events[],SM4TimelineInfo &info,
+                    bool &built,datetime &cut)
+  {
+   M4Init(state,f,events);
+   ZeroMemory(info);
+   info.status="RESET";info.selection.status="DISABLED";
+   built=false;cut=0;
+  }
+
 void M4ReplayTimeline(const MqlRates &bars[],const int n,const SM4ContextUpdate &updates[],const int nu,
                        const datetime replay_from,const datetime asof,const bool selector,const int policy,
                        const int left,const int right,const int lookback,

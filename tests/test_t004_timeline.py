@@ -1,11 +1,18 @@
 import unittest
 from dataclasses import replace
 from t004_reference import Context,A_AT_OR_AFTER_BREAK
-from t004_timeline_reference import Snapshot,replay_timeline,needs_build
+from t004_timeline_reference import Snapshot,replay_timeline,needs_build,ReplayCache,reset_replay
 from test_t004 import START,context
 from test_t004_selector import fixture
 
 class TimelineTests(unittest.TestCase):
+    def test_chart_reinitialization_cannot_keep_old_success_cache(self):
+        t=self.replay(fixture(),[Snapshot(START,context(direction=1))])
+        cache=ReplayCache(True,START+8100)
+        reset_replay(t,cache)
+        self.assertTrue(needs_build(True,cache.built,START+8100,cache.cut))
+        self.assertEqual((t.observer.phase,t.bos_price,t.processed,t.status),('WAIT_CONTEXT',0,0,'RESET'))
+        self.assertEqual((t.observer.events,t.observer.candidates),([],[]))
     def test_live_h4_change_rebuilds_even_at_same_m15_cut(self):
         self.assertTrue(needs_build(False,True,START,START,True,False))
         self.assertFalse(needs_build(False,True,START,START,False,False))

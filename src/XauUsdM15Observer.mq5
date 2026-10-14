@@ -1,6 +1,6 @@
 // Read-only T004 prototype. Closed-bar REPLAY facts, NOT trading signals.
 #property strict
-#property version "1.00"
+#property version "1.01"
 #include "include/TimeframeWatcher.mqh"
 #include "include/H4M15Bridge.mqh"
 #include "include/M15Timeline.mqh"
@@ -44,9 +44,9 @@ string Stamp(const datetime t) {return(t>0 ? TimeToString(t,TIME_DATE|TIME_MINUT
 void Clear(const string reason)
   {
    if(g_problem!=reason) Print("T004 CLEARED: ",reason,". REPLAY only, no NEW events or orders.");
-   g_problem=reason;g_built=false;g_cut=0;
-   M4Init(g_state,g_fvgs,g_events);
-   g_info.status=reason;g_info.processed=0;g_info.bos_price=0;
+   g_problem=reason;
+   M4ResetReplay(g_state,g_fvgs,g_events,g_info,g_built,g_cut);
+   g_info.status=reason;
    g_current.status="DISABLED";M4NoLevel(g_current.level);
    g_h4_status="-";g_t2="UNKNOWN";g_h4_bias="UNKNOWN";
    ObjectsDeleteAll(0,PREFIX);
@@ -229,6 +229,13 @@ void Poll()
 
 int OnInit()
   {
+   // On a timeframe change MT5 can retain globals from the preceding instance.
+   M4ResetReplay(g_state,g_fvgs,g_events,g_info,g_built,g_cut);
+   g_problem="initialising";g_h4_status="-";g_t2="UNKNOWN";g_h4_bias="UNKNOWN";
+   g_replay_start=0;g_h4_depth=0;g_duration=0;
+   ZeroMemory(g_current);g_current.status="DISABLED";
+   ArrayResize(g_mbars,0);ArrayResize(g_hbars,0);ArrayResize(g_updates,0);
+   ObjectsDeleteAll(0,PREFIX);
    if(InpAsOfTime<0 || InpH4LookbackBars<50 || InpH4LookbackBars>1000 ||
       InpH4RebuildBars<3*InpH4LookbackBars || InpH4RebuildBars>5000 ||
       InpH4LeftBars<1 || InpH4LeftBars>10 || InpH4RightBars<1 || InpH4RightBars>10 ||
@@ -240,13 +247,12 @@ int OnInit()
    H3ParamsDefault(g_params);g_params.rebuild=InpH4RebuildBars;g_params.lookback=InpH4LookbackBars;
    g_params.left=InpH4LeftBars;g_params.right=InpH4RightBars;
    g_h4.Configure(_Symbol,PERIOD_H4,3);g_m15.Configure(_Symbol,PERIOD_M15,3);
-   M4Init(g_state,g_fvgs,g_events);
    Print("T004 read-only observer. Three explicit proposal opt-ins, no order functions. All events are REPLAY, never NEW.");
    Print("T004 currently connects T003 RECONFIRMED contexts only; ordinary H4 touch integration remains unfinished.");
    if(!EventSetTimer(InpPollSeconds)) return(INIT_FAILED);
    Poll();return(INIT_SUCCEEDED);
   }
-void OnDeinit(const int reason) {EventKillTimer();ObjectsDeleteAll(0,PREFIX);ChartRedraw();Print("T004 observer stopped. No orders were sent, changed or closed.");}
+void OnDeinit(const int reason) {EventKillTimer();ObjectsDeleteAll(0,PREFIX);ChartRedraw();PrintFormat("T004 observer stopped (reason %d). No orders were sent, changed or closed.",reason);}
 void OnTimer() {Poll();}
 void OnChartEvent(const int id,const long &lparam,const double &dparam,const string &sparam)
   {if(id==CHARTEVENT_CHART_CHANGE) Draw();}

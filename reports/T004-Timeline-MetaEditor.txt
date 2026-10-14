@@ -40,4 +40,4 @@ C:\Users\HP\Documents\Codex\2026-10-05\ko\work\t004-m15\src\include\M15SwingProp
  : information: generating code 95%
  : information: generating code 100%
  : information: code generated
-Result: 0 errors, 0 warnings, 2475 ms elapsed, cpu='X64 Regular'
+Result: 0 errors, 0 warnings, 1844 ms elapsed, cpu='X64 Regular'

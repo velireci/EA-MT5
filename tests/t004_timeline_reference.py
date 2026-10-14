@@ -16,6 +16,16 @@ class Timeline:
     processed: int=0
     bos_price: float=0.0
 
+@dataclass
+class ReplayCache:
+    built: bool=False
+    cut: int=0
+
+def reset_replay(timeline,cache):
+    timeline.observer=Observer()
+    timeline.status='RESET';timeline.processed=0;timeline.bos_price=0
+    cache.built=False;cache.cut=0
+
 def needs_build(historical,built,cut,previous,h4_changed=False,m15_changed=False):
     return not built or cut!=previous or (not historical and (h4_changed or m15_changed))
 

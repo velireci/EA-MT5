@@ -12,6 +12,7 @@ Updated: 2026-10-14 (Europe/Tirane). Snapshot, not a transcript.
 - Current round: Codex Python 66/0; MetaEditor T004_TimelineTest and XauUsdM15Observer each 0 errors / 0 warnings. Read-only review found a missing current-level drawing; fixed and re-reviewed with no outstanding concrete findings.
 - Next action: owner runs TimelineTest in MT5, then attaches XauUsdM15Observer on a new XAUUSD M15 chart for historical 2026.10.06 00:00, explicitly opting into all three proposals. EA runtime/chart/loading/recovery and replay cost are UNVERIFIED.
 - All EA events are REPLAY facts, never NEW or entry permission. Historical mode is static after successful copy; live replays on boundaries/recovery. Q04 remains open; a fractal candidate is not client approval. See docs/T004-m15.md for settings and limits.
+- Owner TimelineTest-cfa5f00: 19/0. Historical EA observed RETURN_OBSERVED, H4 BEAR/RECONFIRMED/CONVERGED, BOS4152, 69 facts/8 FVGs, 3531ms. Switching H4->M15 exposed an actual restart-cache defect (empty context with stale BOS). EA v1.01 fixes full OnInit/cache reset; Python67/0, re-reviewed. Updated TimelineTest and actual chart-switch retest pending. No strategy change.
 - Claude must switch to this branch only after handoff; do not continue writing T004 on the T003 branch.
 
 ## Verified T003 baseline: 6676a01
