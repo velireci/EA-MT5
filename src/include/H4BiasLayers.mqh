@@ -42,6 +42,8 @@
 
 #include "H4Bias.mqh"
 
+#define H3L_LABEL_MAX_CHARS 60   // longest text of one panel row (one OBJ_LABEL); see H3LPanelCols
+
 //--- result of the disagreement scan (derived from the replay by ABSOLUTE bar times; no future information)
 struct SH3LRun
   {
@@ -418,10 +420,12 @@ int H3LWrap(const string text, const int maxchars, string &out[])
   {
    ArrayResize(out, 0);
    int mc = (maxchars < 8 ? 8 : maxchars);
+   if(mc > H3L_LABEL_MAX_CHARS)
+      mc = H3L_LABEL_MAX_CHARS;
    string rest = text;
    bool first = true;
    int n = 0;
-   for(int guard = 0; guard < 80; guard++)
+   for(int guard = 0; guard < 4096; guard++)
      {
       int avail = (first ? mc : mc - 2);
       if(StringLen(rest) <= avail)
@@ -448,7 +452,7 @@ int H3LWrap(const string text, const int maxchars, string &out[])
       first = false;
      }
    ArrayResize(out, n + 1);
-   out[n] = "  " + rest;
+   out[n] = "  " + StringSubstr(rest, 0, mc - 2);          // unreachable for any text below 4096 rows; never longer than a row
    return(n + 1);
   }
 
@@ -462,7 +466,9 @@ int H3LPanelRows(const int height_px, const int line_h, const int pad, const int
   }
 
 //--- characters per row: share_pct percent of the chart width, never more than the width left after the margins,
-//--- between 20 and 140 (a font is never shrunk to fit: lines are wrapped here and dropped by H3LPanelBudget)
+//--- between 20 and H3L_LABEL_MAX_CHARS (a font is never shrunk to fit: lines are wrapped here and dropped by H3LPanelBudget).
+//--- H3L_LABEL_MAX_CHARS: one panel row is one OBJ_LABEL text; rows of 63 characters were observed cut at exactly 63 (owner photo,
+//--- title and bias line), so no row is ever longer than 60. The 63-character label limit itself is NOT confirmed from the documentation.
 int H3LPanelCols(const int width_px, const double char_w, const int pad, const int margin, const int share_pct)
   {
    if(char_w <= 0.0)
@@ -472,8 +478,8 @@ int H3LPanelCols(const int width_px, const double char_w, const int pad, const i
    int c = (by_share < by_room ? by_share : by_room);
    if(c < 20)
       c = 20;
-   if(c > 140)
-      c = 140;
+   if(c > H3L_LABEL_MAX_CHARS)
+      c = H3L_LABEL_MAX_CHARS;
    return(c);
   }
 
