@@ -187,7 +187,7 @@ check_unmodified() {
 # The T003-owned files are legitimately edited in the working tree before they are committed
 # (the T003 code files, the visual EA and its tools, the replay tools, the T003 task/report/doc, the hand-updated STATE). Every OTHER tracked file
 # must be identical to HEAD; the base-commit comparison below covers all code paths of T001/T002.
-T003_OWNED='^(src/include/H4Bias\.mqh|src/tests/T003_LogicTest\.mq5|tests/t003_reference_test\.py|tests/t003_replay_csv\.py|tests/t003_explore_synthetic\.py|tools/t003-static-checks\.sh|tools/t003-xlate-check\.sh|tools/t003_xlate/[A-Za-z0-9_.]+|tools/t003-visual-static-checks\.sh|tools/t003-visual-check\.py|src/XauUsdH4Bias\.mq5|src/include/H4BiasDrawer\.mqh|src/include/H4BiasLayers\.mqh|src/tests/T003_LayersTest\.mq5|docs/T003-visual-ea\.md|tasks/T003-h4-bias-change\.md|reports/T003-verification\.md|docs/STATE\.md)$'
+T003_OWNED='^(src/include/H4Bias\.mqh|src/tests/T003_LogicTest\.mq5|tests/t003_reference_test\.py|tests/t003_replay_csv\.py|tests/t003_explore_synthetic\.py|tools/t003-static-checks\.sh|tools/t003-xlate-check\.sh|tools/t003_xlate/[A-Za-z0-9_.]+|tools/t003-visual-static-checks\.sh|tools/t003-visual-check\.py|src/XauUsdH4Bias\.mq5|src/include/H4BiasDrawer\.mqh|src/include/H4BiasLayers\.mqh|src/tests/T003_LayersTest\.mq5|docs/T003-visual-ea\.md|tasks/T003-h4-bias-change\.md|reports/T003-verification\.md|docs/STATE\.md|reports/t003-liq-prototype/[A-Za-z0-9_.]+)$'
 EXISTING=$(git ls-files | grep -vE "$T003_OWNED")
 tracked_new=0
 if check_unmodified . $EXISTING; then
@@ -258,15 +258,67 @@ structure_ok() {
   return 0
 }
 out=$(structure_ok $HDR) && echo "  PASS: revision 10 structure present: no freeze/thaw, ratchet (ii)-(iv) in H3AcceptCandidate, H3DeriveStep runs in every phase, observation events in every phase, snapshot used only by the diagnostic SNAPSHOT_CROSSED (empty signature), RECONF_LOST keeps the setup, flip ends it (INVALIDATED_BY_FLIP), new setup REPLACES the old, no SUPERSEDED/M15_OUTCOME, no expiry" || { echo "$out"; echo "  FAIL: revision 10 structure pattern"; FAIL=1; }
-# Integration round (visual EA): the T003 LOGIC must stay byte-identical to the prototype commit 2837527 while the
-# visual files (XauUsdH4Bias.mq5, H4BiasDrawer.mqh, the new H4BiasLayers.mqh) are legitimately changed.
+echo "=== CHECK 12c: revision 14 internal-liquidity layer pattern (PROPOSAL / PROTOTYPE; static reading, not a test) ==="
+# the per-level layer: strict crossing, historical consumption from the first usable bar, scope bounded by the CURRENT level's pivot,
+# observation only (never writes the bias / level), raised only for a bar that is not structural, the LI key element is the set
+liq_ok() {
+  local f="$1" b
+  strip_comments "$f" | grep -qE 'has_li\b|SH3Cand +[a-z, ]*lint|, *lint\)' && { echo "    the single-candidate interior output (has_li / lint) is still present"; return 1; }
+  b=$(fn_body "$f" 'int H3LiqFirstCross(')
+  [ -n "$b" ] || { echo "    H3LiqFirstCross body not found"; return 1; }
+  echo "$b" | grep -qE 'H3AdverseExt\(bars\[j\], s\) - sw\[i\]\.price\) > 0\)' || { echo "    H3LiqFirstCross: the crossing test is not the STRICT 'adverse extreme beyond the swing > 0'"; return 1; }
+  echo "$b" | grep -qE '>= *0\)' && { echo "    H3LiqFirstCross: a non-strict comparison (a touch would consume)"; return 1; }
+  echo "$b" | grep -q 'lc.scanned\[i\] + 1' || { echo "    H3LiqFirstCross does not continue from the first unscanned bar"; return 1; }
+  b=$(fn_body "$f" 'void H3LiqCacheInit(')
+  [ -n "$b" ] || { echo "    H3LiqCacheInit body not found"; return 1; }
+  echo "$b" | grep -q 'lc.scanned\[i\] = sw\[i\].index + right;' || { echo "    the first usable bar of a swing is not pivot + right + 1"; return 1; }
+  b=$(fn_body "$f" 'int H3LiqScope(')
+  [ -n "$b" ] || { echo "    H3LiqScope body not found"; return 1; }
+  echo "$b" | grep -q 'sw\[i\].pivot_time <= st.lv_pivot' || { echo "    H3LiqScope: the scope is not bounded by the pivot of the CURRENT protecting level"; return 1; }
+  echo "$b" | grep -q 's \* (sw\[i\].price - st.lv_price) < 0' || { echo "    H3LiqScope: the price must be strictly inside the protecting level"; return 1; }
+  echo "$b" | grep -q 'H3LiqFirstCross(' || { echo "    H3LiqScope does not apply the consumption history"; return 1; }
+  b=$(fn_body "$f" 'void H3LiqInternalEvents(')
+  [ -n "$b" ] || { echo "    H3LiqInternalEvents body not found"; return 1; }
+  echo "$b" | grep -q 'H3KnownCount(sw, ns, p.right, t - 1)' || { echo "    H3LiqInternalEvents: the scope of bar t must use the swings confirmed by the close of t-1"; return 1; }
+  echo "$b" | grep -q 'H3LiqScope(bars, sw, nk, st, s, t - 1, lc, scope)' || { echo "    H3LiqInternalEvents: consumption must be judged up to t-1 (bar t is the crossing candidate)"; return 1; }
+  echo "$b" | grep -qE 'if\(ph == H3_PH_ACTIVE \|\| ph == H3_PH_SWEEP_WAIT\)' || { echo "    H3LiqInternalEvents: a setup is created only from ACTIVE or SWEEP_WAIT"; return 1; }
+  echo "$b" | grep -qE 'bars\[t\]\.close - sw\[i\]\.price\) > 0' || { echo "    H3LiqInternalEvents: a break needs a close STRICTLY beyond the level"; return 1; }
+  echo "$b" | grep -qE 'st\.(dir|has_level|lv_[a-z]+|bias_start|origin) *=[^=]' && { echo "    H3LiqInternalEvents writes the bias or the protecting level (the layer is observation only)"; return 1; }
+  echo "$b" | grep -qE 'H3DoFlip\(|H3StartHold\(' && { echo "    H3LiqInternalEvents flips or starts a structural setup"; return 1; }
+  b=$(fn_body "$f" 'bool H3BiasStep(')
+  echo "$b" | grep -q 'H3LiqInternalEvents(' || { echo "    H3BiasStep does not raise the internal events"; return 1; }
+  [ "$(echo "$b" | grep -n 'H3LiqInternalEvents(' | head -1 | cut -d: -f1)" -gt "$(echo "$b" | grep -n 'H3StartHold(' | head -1 | cut -d: -f1)" ] || { echo "    the internal events are raised before the structural wick/flip handling (the structural priority is lost)"; return 1; }
+  b=$(fn_body "$f" 'string H3StructKey(')
+  echo "$b" | grep -q 'st.li_key' || { echo "    the structure key does not carry the set of unconsumed internal levels (li_key)"; return 1; }
+  b=$(fn_body "$f" 'void H3LiqUpdate(')
+  [ -n "$b" ] || { echo "    H3LiqUpdate body not found"; return 1; }
+  echo "$b" | grep -q 'H3KnownCount(sw, ns, p.right, t)' || { echo "    H3LiqUpdate: the next-bar set uses the swings confirmed by the close of t"; return 1; }
+  return 0
+}
+out=$(liq_ok $HDR) && echo "  PASS: revision 14 layer present: strict crossing, historical consumption from pivot+right+1, scope bounded by the CURRENT level's pivot and price, setups only from ACTIVE/SWEEP_WAIT, observation only, after the structural handling, LI key = li_key" || { echo "$out"; echo "  FAIL: revision 14 layer pattern"; FAIL=1; }
+neg_liq() { # neg_liq LABEL SED_EXPR SUBSTRING : the layer checker must detect each of its own patterns being broken
+  local label="$1" expr="$2" sub="$3" o
+  sed "$expr" "$NEG/h.mqh" > "$NEG/lq.mqh"
+  if cmp -s "$NEG/lq.mqh" "$NEG/h.mqh"; then echo "  FAIL 13s ($label): the mutation did not change the header (vacuous)"; FAIL=1; return; fi
+  o=$(liq_ok "$NEG/lq.mqh") && { echo "  FAIL 13s ($label): NOT detected"; FAIL=1; return; }
+  echo "$o" | grep -qF -- "$sub" && echo "  PASS 13s ($label): detected (intended reason: $sub)" || { echo "  FAIL 13s ($label): other reason: $o"; FAIL=1; }
+}
+LIQNEG=1
+
+# Revision 14 (internal liquidity layer, PROPOSAL / PROTOTYPE): the T003 LOGIC files (H4Bias.mqh, the Python model, T003_LogicTest.mq5)
+# are CHANGED on purpose in this round, so they are no longer compared with the prototype 2837527. What must stay identical: the T002
+# structure header reused by the logic, and (CHECK 12) every T001/T002 file. The revision 14 change is guarded by CHECK 15 (pattern),
+# CHECK 10/11 (transcripts, Python model) and the transliteration run.
 LOGIC_BASE=2837527
-logic_identical() { git diff --quiet "$LOGIC_BASE" -- src/include/H4Bias.mqh tests/t003_reference_test.py src/tests/T003_LogicTest.mq5 src/include/H4Structure.mqh 2>/dev/null; }
-if git cat-file -e "$LOGIC_BASE^{commit}" 2>/dev/null; then
-  logic_identical && echo "  PASS: src/include/H4Bias.mqh, tests/t003_reference_test.py, src/tests/T003_LogicTest.mq5 (generated block included) and src/include/H4Structure.mqh are byte-identical to $LOGIC_BASE (the visual integration did not touch the logic)" || { echo "  FAIL: a logic file differs from $LOGIC_BASE"; FAIL=1; }
-else
-  echo "  INFO: base $LOGIC_BASE not available here; the parent must verify that the logic files are unchanged"
-fi
+NEW_BASE=d7a201f
+for b0 in $LOGIC_BASE $NEW_BASE; do
+  if git cat-file -e "$b0^{commit}" 2>/dev/null; then
+    git diff --quiet "$b0" -- src/include/H4Structure.mqh tests/t002_reference_test.py 2>/dev/null && echo "  PASS: src/include/H4Structure.mqh and tests/t002_reference_test.py are byte-identical to $b0 (the T002 structure code is reused unchanged)" || { echo "  FAIL: H4Structure.mqh / t002_reference_test.py differ from $b0"; FAIL=1; }
+  else
+    echo "  INFO: base $b0 not available here; the parent must verify that the T002 structure files are unchanged"
+  fi
+done
+echo "  INFO: src/include/H4Bias.mqh, tests/t003_reference_test.py and src/tests/T003_LogicTest.mq5 are the revision 14 logic (changed on purpose; no longer compared with $LOGIC_BASE)"
 
 echo "=== CHECK 14: diagnostics, candle export text and the TrackChanges decision are read-only / behaviour neutral (static reading) ==="
 # (a) H3Diagnose takes the evaluation as const and never calls the evaluation itself
@@ -297,6 +349,7 @@ out=$(key_ok $HDR) && echo "  PASS: the state key, state text, events text and e
 removed_ok() { # kept only as the checker used by the negative control 14d: the diagnostics helpers must not change the replay
   local f="$1"
   fn_body "$f" 'void H3ProcessBar(' | grep -q 'H3DeriveStep(' || { echo "    H3ProcessBar does not run the derive step (changed or removed line)"; return 1; }
+  fn_body "$f" 'void H3ProcessBar(' | grep -q 'H3LiqUpdate(' || { echo "    H3ProcessBar does not run the internal-liquidity update (revision 14)"; return 1; }
   return 0
 }
 out=$(removed_ok $HDR) && echo "  PASS: H3ProcessBar still runs bias, FVG and derive steps in the documented order (the revision-7 'only grew' rule was replaced, see the comment)" || { echo "$out"; echo "  FAIL process order"; FAIL=1; }
@@ -338,7 +391,8 @@ neg14 "14a H3Diagnose calls H3Evaluate" '   H3Replay(winA, ev.r_eff, p, repA, tr
 neg14 "14b H3Diagnose takes a non-const evaluation" 'const SH3Params &p, const SH3Eval &ev, SH3Diag &d)' 'const SH3Params &p, SH3Eval &ev, SH3Diag &d)' diag_ro_ok 'const SH3Eval &ev'
 neg14 "14c a diagnostic counter inside the structure key" '   return("BIAS=" + H3DirName(st.dir) + ";LV=" + lv' '   string nolv_dummy = ""; return("BIAS=" + H3DirName(st.dir) + ";LV=" + lv' key_ok 'uses a diagnostic counter'
 neg14 "14d the derive step removed from the bar order" '   H3DeriveStep(t, bars, sw, ns, p, fv, nf, st, tracks, nt, events, ne);
-  }' '  }' removed_ok 'derive step'
+   H3LiqUpdate(' '   H3LiqUpdate(' removed_ok 'derive step'
+neg14 "14g the internal-liquidity update removed from the bar order" '   H3LiqUpdate(t, bars, sw, ns, p, st, lc);' '   ' removed_ok 'internal-liquidity update'
 neg14 "14e a widened report condition" '   if(consume_status == H3_C_OK)
       return(H3_TC_REPORT);' '   if(consume_status == H3_C_OK || consume_status == H3_C_GAP)
       return(H3_TC_REPORT);' tc_ok 'not guarded'
@@ -389,9 +443,9 @@ cmp -s "$NEG/crlf.n" "$NEG/emit.txt" && echo "  PASS 13g: CRLF copy of the block
 cp "$NEG/h.mqh" "$NEG/h2.mqh"; printf 'int g_cache = 0;\nstring g_last;\n' >> "$NEG/h2.mqh"
 out=$(glob_vars "$NEG/h2.mqh"); echo "$out" | grep -q 'g_cache' && echo "$out" | grep -q 'g_last' && echo "  PASS 13h: injected global variables detected (reason: global state)" || { echo "  FAIL 13h: global variables not detected: $out"; FAIL=1; }
 # 13i: a window index in an identity builder must be detected, for the intended reason
-sed 's/string H3InteriorId(const string kind, const datetime t_int, const datetime t_ext)/string H3InteriorId(const string kind, const datetime t_int, const datetime t_ext, const int idx)/' "$NEG/h.mqh" > "$NEG/i1.mqh"
+sed 's/string H3InteriorId(const string kind, const datetime t_int)/string H3InteriorId(const string kind, const datetime t_int, const int idx)/' "$NEG/h.mqh" > "$NEG/i1.mqh"
 o=$(check_ids "$NEG/i1.mqh"); r=$?; { [ $r -ne 0 ] && echo "$o" | grep -q 'window index parameter' && ! echo "$o" | grep -q 'function body not found'; } && echo "  PASS 13i: window index in an ID builder signature detected (intended reason)" || { echo "  FAIL 13i: index parameter not detected, or other reason: $o"; FAIL=1; }
-sed 's/   return(kind + H4TimeStamp(t_int) + "_" + H4TimeStamp(t_ext));/   return(kind + H4TimeStamp(t_int) + "_" + IntegerToString(sw[0].index));/' "$NEG/h.mqh" > "$NEG/i2.mqh"
+sed 's/   return(kind + H4TimeStamp(t_int));/   return(kind + H4TimeStamp(t_int) + "_" + IntegerToString(sw[0].index));/' "$NEG/h.mqh" > "$NEG/i2.mqh"
 o=$(check_ids "$NEG/i2.mqh"); r=$?; { [ $r -ne 0 ] && echo "$o" | grep -q 'window index or array subscript inside' && ! echo "$o" | grep -q 'function body not found'; } && echo "  PASS 13i: window index / array subscript in an ID builder body detected (intended reason)" || { echo "  FAIL 13i: index in body not detected, or other reason: $o"; FAIL=1; }
 sed 's/   return(H3EventName(type) + "@" + H4TimeStamp(bar_time) + "#" + ref);/   return(H3EventName(type) + "@" + IntegerToString(type) + "#" + ref);/' "$NEG/h.mqh" > "$NEG/i3.mqh"
 o=$(check_ids "$NEG/i3.mqh"); r=$?; { [ $r -ne 0 ] && echo "$o" | grep -q 'does not build from H4TimeStamp' && ! echo "$o" | grep -q 'function body not found'; } && echo "  PASS 13i: an event ID not built from the absolute bar time detected (intended reason)" || { echo "  FAIL 13i: event id without time stamp not detected, or other reason: $o"; FAIL=1; }
@@ -445,10 +499,19 @@ neg_struct "the derive step reads frozen" 's/   if(st.dir == H3_NONE)\r\?$/   if
 neg_struct "ratchet (iii) removed" 's/ \&\& s \* lvl.price < s \* st.lv_price//' 'ratchet (iii) missing'
 neg_struct "ratchet (ii) removed" 's/lvl.ext_time > st.lv_ext \&\& //' 'ratchet (ii) missing'
 neg_struct "RECONF_LOST ends the setup" 's/            st.rec_from     = 0;\r\?$/            st.rec_from     = 0; H3ClearSetup(st, tracks, nt);/' 'ends or clears the setup'
-neg_struct "a SUPERSEDED reason appears" 's/"REPLACED", new_id2/"SUPERSEDED_BY_STRUCTURE", new_id2/' 'SUPERSEDED_BY_STRUCTURE'
+neg_struct "a SUPERSEDED reason appears" 's/H3SetupEnded(st, open_t, "REPLACED", new_id, events, ne);/H3SetupEnded(st, open_t, "SUPERSEDED_BY_STRUCTURE", new_id, events, ne);/' 'SUPERSEDED_BY_STRUCTURE'
 neg_struct "an expiry appears" 's/   if(st.dir == H3_NONE)\r\?$/   int max_age = 100; if(st.dir == H3_NONE)/' 'expiry'
 neg_struct "the snapshot becomes an invalidation" 's/      if(ph != H3_PH_ACTIVE \&\& st.snap_id != "" \&\& s \* (bars\[t\].close - st.snap_price) > 0)/      if(ph != H3_PH_ACTIVE \&\& st.snap_id != "" \&\& s * (bars[t].close - st.snap_price) > 0 \&\& s * (bars[t].low - st.snap_price) > 0)/' 'snapshot price is read outside'
 neg_struct "observation events limited to ACTIVE/SWEEP_WAIT again" 's/   \/\/--- observation events: the structure runs in EVERY phase (a setup does not freeze it)/   if(ph != H3_PH_ACTIVE \&\& ph != H3_PH_SWEEP_WAIT) return(false);/' 'returns early outside ACTIVE/SWEEP_WAIT'
+neg_liq "a touch consumes (>= 0 in the first-crossing scan)" 's/H3AdverseExt(bars\[j\], s) - sw\[i\].price) > 0)/H3AdverseExt(bars[j], s) - sw[i].price) >= 0)/' 'STRICT'
+neg_liq "the scope is not bounded by the level pivot" 's/sw\[i\].pivot_time <= st.lv_pivot/false/' 'bounded by the pivot'
+neg_liq "a swing at the level price is inside" 's/s \* (sw\[i\].price - st.lv_price) < 0/s * (sw[i].price - st.lv_price) <= 0/' 'strictly inside'
+neg_liq "consumption ignored in the scope" 's/      if(H3LiqFirstCross(bars, sw, i, upto, lc) >= 0)/      if(false)/' 'consumption history'
+neg_liq "the first usable bar is skipped" 's/lc.scanned\[i\] = sw\[i\].index + right;/lc.scanned[i] = sw[i].index + right + 2;/' 'first usable bar'
+neg_liq "a sweep setup from any phase" 's/   if(ph == H3_PH_ACTIVE || ph == H3_PH_SWEEP_WAIT)           \/\/ never from HOLD/   if(true)           \/\/ never from HOLD/' 'only from ACTIVE or SWEEP_WAIT'
+neg_liq "the layer writes the bias" 's/      st.setup_type   = "SWEEP";/      st.setup_type   = "SWEEP"; st.dir = -st.dir;/' 'observation only'
+neg_liq "the LI key element removed" 's/   string li = (st.li_key == "" ? "-" : st.li_key);/   string li = "-";/' 'li_key'
+neg_liq "the consumption is judged up to t instead of t-1" 's/H3LiqScope(bars, sw, nk, st, s, t - 1, lc, scope)/H3LiqScope(bars, sw, nk, st, s, t, lc, scope)/' 'up to t-1'
 # the visual EA identity check must detect a change (temporary repository)
 mkdir "$NEG/vrepo" && git -C "$NEG/vrepo" init -q && mkdir -p "$NEG/vrepo/src/include" && echo a > "$NEG/vrepo/src/XauUsdH4Bias.mq5" && echo b > "$NEG/vrepo/src/include/H4BiasDrawer.mqh" && git -C "$NEG/vrepo" add -A && git -C "$NEG/vrepo" -c user.email=x@x -c user.name=x commit -q -m base
 vb=$(git -C "$NEG/vrepo" rev-parse HEAD)
@@ -460,7 +523,7 @@ mutate_py() { # mutate_py SED_EXPR EXPECTED_FAILED_LABEL_REGEX LABEL
   mkdir -p "$NEG/pm" && cp tests/t002_reference_test.py tests/t003_replay_csv.py "$NEG/pm/" && sed "$1" $PYT > "$NEG/pm/t003_reference_test.py"
   if cmp -s "$NEG/pm/t003_reference_test.py" $PYT; then echo "  FAIL 13t ($3): the mutation did not change the model (vacuous)"; FAIL=1; return; fi
   ( cd "$NEG/pm" && python3 t003_reference_test.py > out.txt 2>&1 ); local rcx=$?
-  if [ $rcx -ne 0 ] && grep -qE "(^  FAIL |FAILED: ).*$2" "$NEG/pm/out.txt"; then echo "  PASS 13t: $3 -> the Python run fails (intended check: $2)"; else echo "  FAIL 13t ($3): not detected for the intended reason (rc=$rcx)"; FAIL=1; fi
+  if [ $rcx -ne 0 ] && grep -qE "(^  FAIL |FAILED: ).*($2)" "$NEG/pm/out.txt"; then echo "  PASS 13t: $3 -> the Python run fails (intended check: $2)"; else echo "  FAIL 13t ($3): not detected for the intended reason (rc=$rcx)"; FAIL=1; fi
 }
 mutate_py2() { # mutate_py2 OLD NEW EXPECTED_FAILED_LABEL_REGEX LABEL : exact text replacement in the model, the Python run must fail
   mkdir -p "$NEG/pm" && cp tests/t002_reference_test.py tests/t003_replay_csv.py "$NEG/pm/"
@@ -474,7 +537,7 @@ open(dst, 'w', encoding='ascii').write(t.replace(old, new, 1))
 PYEOF2
   if [ $? -ne 0 ]; then echo "  FAIL 13t ($4): the mutation target text is absent (vacuous)"; FAIL=1; return; fi
   ( cd "$NEG/pm" && python3 t003_reference_test.py > out.txt 2>&1 ); local rcy=$?
-  if [ $rcy -ne 0 ] && grep -qE "(^  FAIL |FAILED: ).*$3" "$NEG/pm/out.txt"; then echo "  PASS 13t: $4 -> the Python run fails (intended check: $3)"; else echo "  FAIL 13t ($4): not detected for the intended reason (rc=$rcy)"; FAIL=1; fi
+  if [ $rcy -ne 0 ] && grep -qE "(^  FAIL |FAILED: ).*($3)" "$NEG/pm/out.txt"; then echo "  PASS 13t: $4 -> the Python run fails (intended check: $3)"; else echo "  FAIL 13t ($4): not detected for the intended reason (rc=$rcy)"; FAIL=1; fi
 }
 mutate_py2 "        if not (lvl.ext_time > st.lv_ext and s * lvl.price < s * st.lv_price):" "        if False:" 'R2|R13|R14' 'the ratchet is removed (a wick top can raise the level)'
 mutate_py2 "                st.phase = to
@@ -495,7 +558,34 @@ mutate_py2 "    if setup_a != setup_b:
 mutate_py2 "        tx(st.src_time), tx(st.wait_start)," "        tx(st.src_time), '0'," 'wait_start' 'wait_start removed from the compared key'
 mutate_py2 "        out.append('%s[%s-%s]@%s:%s' % (tr.id, pf(tr.lower), pf(tr.upper), tx(tr.conf)," "        out.append('%s[%s-%s]@%s:%s' % (tr.id, '0', '0', tx(tr.conf)," 'FVG bound' 'FVG bounds removed from the compared key'
 mutate_py2 "        ('%s@%s/%d' % (st.ex_id, pf(st.ex_price), 1 if st.ex_consumed else 0)) if st.has_ext else '-'," "        ('%s@%s/%d' % (st.ex_id, pf(st.ex_price), 0)) if st.has_ext else '-'," 'R21' 'the consumed flag of the continuation candidate removed from the key'
-mutate_py2 "        ('%s@%s/%d' % (st.li_id, pf(st.li_price), 1 if st.li_consumed else 0)) if st.has_lint else '-'," "        ('%s@%s/%d' % (st.li_id, pf(st.li_price), 0)) if st.has_lint else '-'," 'R21' 'the consumed flag of the interior candidate removed from the key'
+mutate_py2 "        st.li_key if st.li_key else '-'," "        '-'," 'R21|29m|29r' 'the LI element (set of unconsumed in-scope internal levels) removed from the structure key'
+mutate_py2 "            if s * (adverse_ext(bars[j], s) - x.price) > 0:
+                first = j" "            if s * (adverse_ext(bars[j], s) - x.price) >= 0:
+                first = j" '29d|29m|29e' 'revision 14: a TOUCH (==) counts as a consumption'
+mutate_py2 "        if s * (adverse_ext(bar, s) - x.price) > 0:          # strictly beyond; a touch (==) is NOT a crossing" "        if s * (adverse_ext(bar, s) - x.price) >= 0:          # strictly beyond; a touch (==) is NOT a crossing" '29d|29e|29m' 'revision 14: a TOUCH (==) is raised as a crossing'
+mutate_py2 "            if s * (bar.close - x.price) > 0:
+                broke.append(x)" "            if s * (bar.close - x.price) >= 0:
+                broke.append(x)" '29c2' 'revision 14: a close EQUAL to the level is a break'
+mutate_py2 "        if liq_first_cross(st, bars, p, sw, i, upto) >= 0:
+            continue" "        if False:
+            continue" '29m|29a|29f|29i' 'revision 14: consumption ignored (a crossed level stays in the set)'
+# NOTE: removing the pivot bound of the scope is an EQUIVALENT mutant (a swing high before the protecting level's pivot and below it is
+# always crossed by the level's own bar, hence consumed); the bound is kept as the written rule and as a cost bound, and only the
+# pattern check (CHECK 12c) guards its presence. The revival mutation below is the behavioural control of the consumption history.
+mutate_py2 "        if liq_first_cross(st, bars, p, sw, i, upto) >= 0:
+            continue" "        fc_ = liq_first_cross(st, bars, p, sw, i, upto)
+        if fc_ >= 0 and bars[fc_].time + p.period > st.lv_known:
+            continue" '29i|29j' 'revision 14: only crossings after the CURRENT level became known consume (a change of the level or a flip REVIVES a consumed level)'
+mutate_py2 "    scanned, first = st.liq_cache.get(i, (x.index + p.right, -1))" "    scanned, first = st.liq_cache.get(i, (x.index + p.right + 2, -1))" '29k|29m|29i' 'revision 14: the first usable bar is skipped (consumption starts too late)'
+mutate_py2 "    for x in broke:
+        lid = interior_id(kind, x.pivot_time)" "    for x in []:
+        lid = interior_id(kind, x.pivot_time)" 'INTERNAL_BREAK|29c' 'revision 14: the INTERNAL_BREAK events of a bar are not raised'
+mutate_py2 "            events.append(wick_event(open_t, st, restart))
+            return False" "            events.append(wick_event(open_t, st, restart))
+            liq_internal_events(t, bars, sw, fv, p, st, tracks, events, open_t, close_t, d, s, ph)
+            return False" '29f' 'revision 14: the structural priority is lost (a wick bar raises INTERNAL_* too)'
+mutate_py2 "    if ph == 'ACTIVE' or ph == 'SWEEP_WAIT':                   # never from HOLD / RECONFIRMED (11.5 open point)" "    if True:                   # never from HOLD / RECONFIRMED (11.5 open point)" '29g|29h' 'revision 14: a sweep seen in HOLD / RECONFIRMED replaces the setup'
+mutate_py2 "    top = swept[-1]                                            # ONE setup per bar, from the most adverse level" "    top = swept[0]                                            # ONE setup per bar, from the most adverse level" '29b|29a' 'revision 14: the setup is taken from the nearest swept level instead of the most adverse'
 mutate_py2 "    setup_ended(st, open_t, END_REPLACED, events, new_id)
     st.phase = 'HOLD'" "    st.phase = 'HOLD'" 'REPLACED|R16|second wick' 'a new wick no longer ends the previous setup'
 mutate_py2 "    if old_setup != '':

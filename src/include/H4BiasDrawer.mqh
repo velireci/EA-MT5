@@ -648,7 +648,8 @@ public:
                            H3VTime(st.snap_known), (same ? " = current level" : "")));
          v.snap_drawn = true;
         }
-      //--- interior swing candidate (technical proposal P14); the time is part of its ID
+      //--- the most adverse unconsumed INTERNAL liquidity level (revision 14 PROPOSAL, per-level layer; li_id = kind + pivot
+      //--- time, li_n = size of the set in the state key LI). The other levels of the set are not drawn (a possible later step).
       if(st.dir != H3_NONE && st.has_lint)
         {
          datetime ti = H3VStampToTime(StringSubstr(st.li_id, 2, 12));
@@ -656,13 +657,13 @@ public:
            {
             Segment(m_prefix + "lint_" + H3LShort(st.li_id), ti, st.li_price, x_end, st.li_price, m_clr_dim, 1, STYLE_DOT);
             Note(m_prefix + "lint_lbl_" + H3LShort(st.li_id), x_end, st.li_price,
-                 StringFormat("interior %s%s", DoubleToString(st.li_price, _Digits), (st.li_consumed ? " used" : "")),
+                 StringFormat("int.liq %s (%d)", DoubleToString(st.li_price, _Digits), st.li_n),
                  m_clr_dim, ANCHOR_RIGHT_UPPER, m_font - 1,
-                 StringFormat("interior candidate (P14 proposal, not the historical liquidity layer) %s%s",
-                              DoubleToString(st.li_price, _Digits), (st.li_consumed ? " CONSUMED" : "")));
+                 StringFormat("most adverse unconsumed INTERNAL liquidity level (revision 14 proposal, per-level layer; %d level(s) in the set, only this one is drawn; not the historical liquidity layer) %s",
+                              st.li_n, DoubleToString(st.li_price, _Digits)));
            }
          else
-            v.missing += (v.missing != "" ? "; " : "") + "interior level time not parsable from " + st.li_id;
+            v.missing += (v.missing != "" ? "; " : "") + "internal liquidity level time not parsable from " + st.li_id;
         }
 
       //--- 2. the wick and the internal sweep, with all their timestamps

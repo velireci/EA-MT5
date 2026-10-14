@@ -1032,8 +1032,8 @@ void RenderPanel(void)
       g_panel.Line("selected from: " + g_view.pivots_text, clrSilver, 4);
      }
    if(st.dir != H3_NONE && st.has_lint)
-      g_panel.Line(StringFormat("interior candidate (P14 proposal; not the historical liquidity layer): %s %s%s", st.li_id,
-                                DoubleToString(st.li_price, dg), (st.li_consumed ? " CONSUMED" : "")), clrViolet, 4);
+      g_panel.Line(StringFormat("internal liquidity (revision 14 proposal; per-level, not the historical liquidity layer): %d unconsumed level(s), most adverse %s %s",
+                                st.li_n, st.li_id, DoubleToString(st.li_price, dg)), clrViolet, 4);
 
    //--- the SETUP, separate from the structure (read-only SH3SetupCtx)
    g_panel.Line("--- SETUP (PROPOSAL / PROTOTYPE; separate from the structure; the snapshot is a reference only) ---", clrGold, 3);

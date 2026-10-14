@@ -1,11 +1,19 @@
 """ISOLATED PROTOTYPE (scratchpad, not product): internal-liquidity per-level selection, patched into a COPY of
-tests/t003_reference_test.py. The product file is never modified."""
+the model as it was BEFORE revision 14 (baseline_t003_reference_d7a201f.py = tests/t003_reference_test.py at
+commit d7a201f, the single-candidate selector). Revision 14 put this rule into tests/t003_reference_test.py itself,
+so the prototype can no longer patch that file; the frozen baseline keeps the prototype and the comparison with the
+old behaviour reproducible. The frozen baseline is also registered unpatched as sys.modules['t003_baseline'].
+Nothing here is imported by the product."""
 import sys, types
 import os
 HERE=os.path.dirname(os.path.abspath(__file__))
 TESTS=os.path.normpath(os.path.join(HERE,'..','..','tests'))
-SRC=os.path.join(TESTS,'t003_reference_test.py')
+SRC=os.path.join(HERE,'baseline_t003_reference_d7a201f.py')
 text=open(SRC,encoding='utf-8').read()
+sys.path.insert(0, TESTS)   # the baseline imports t002_reference_test from tests/
+base=types.ModuleType('t003_baseline'); base.__file__=os.path.join(TESTS,'t003_baseline_virtual.py'); base.__name__='t003_baseline'
+sys.modules['t003_baseline']=base
+exec(compile(text,'t003_baseline','exec'),base.__dict__)
 
 # (a) replace the single-candidate interior block of bias_step
 a=text.index("    if st.has_level and st.has_lint and (not st.li_consumed):")

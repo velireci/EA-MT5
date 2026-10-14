@@ -1,8 +1,8 @@
 import sys,time,collections
 import os; HERE=os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0,HERE); sys.path.insert(0,os.path.join(HERE,'..','..','tests'))
 import proto_liq
-import t003_replay_csv as r, t003_reference_test as cur
-prt=sys.modules['t003_proto']
+import t003_replay_csv as r
+prt=sys.modules['t003_proto']; cur=sys.modules['t003_baseline']   # cur = the model BEFORE revision 14 (frozen baseline)
 F=sys.argv[1]
 hdr,bars,_=r.read_csv(F)
 p0=r.params_from_header(hdr,{})

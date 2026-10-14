@@ -33,6 +33,21 @@ echo "=== negative control: ratchet condition (iii) removed in the transliterate
 build_run mut; rcm=$?
 [ $rcm -eq 1 ] && echo "NEG PASS: the mutated logic fails the transliterated test script (exit $rcm = test failures, not a build error)" || { echo "NEG FAIL: mutation not detected or the build failed (exit $rcm)"; exit 6; }
 
+# revision 14 negative controls (PROPOSAL / PROTOTYPE internal-liquidity layer): each mutation of the transliterated layer must make
+# the same test script FAIL (exit 1 = test failures, not a build error)
+neg_liq_run() { # neg_liq_run LABEL SED_EXPR
+  python3 $X/mql2cpp.py src/include/H4Bias.mqh "$D/H4Bias.hpp" || exit 1
+  cp "$D/H4Bias.hpp" "$D/H4Bias.fresh"
+  sed -i "$2" "$D/H4Bias.hpp"
+  cmp -s "$D/H4Bias.hpp" "$D/H4Bias.fresh" && { echo "NEG LIQ $1: the mutation did not change the header (vacuous)"; exit 5; }
+  build_run mutl; local rcl2=$?
+  [ $rcl2 -eq 1 ] && echo "NEG PASS (revision 14) $1 (exit $rcl2 = test failures, not a build error)" || { echo "NEG FAIL (revision 14) $1: not detected or the build failed (exit $rcl2)"; exit 6; }
+}
+neg_liq_run "a touch (==) consumes a level" 's/H3AdverseExt(bars\[j\], s) - sw\[i\].price) > 0)/H3AdverseExt(bars[j], s) - sw[i].price) >= 0)/'
+neg_liq_run "only crossings after the current level became known consume (a consumed level is revived by a level change)" 's/if(H3LiqFirstCross(bars, sw, i, upto, lc) >= 0)/if(H3LiqFirstCross(bars, sw, i, upto, lc) >= 0 \&\& bars[H3LiqFirstCross(bars, sw, i, upto, lc)].time + 14400 > st.lv_known)/'
+neg_liq_run "consumption is ignored (a crossed level stays in the set)" 's/if(H3LiqFirstCross(bars, sw, i, upto, lc) >= 0)/if(false)/'
+neg_liq_run "the first usable bar is skipped" 's/lc.scanned\[i\] = sw\[i\].index + right;/lc.scanned[i] = sw[i].index + right + 2;/'
+
 # ---- the pure helpers of the visual layers (model/helper check; NOT MetaEditor, NOT MT5)
 # The ratchet mutation above was applied to $D/H4Bias.hpp: translate the UNMUTATED header again, otherwise the layers test
 # would run against the mutated logic (found in round 4: the earlier layers run used the mutated header).

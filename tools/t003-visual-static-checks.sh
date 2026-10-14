@@ -157,25 +157,28 @@ echo "  INFO: untracked files: $(git ls-files --others --exclude-standard | tr '
 echo "=== V8: diagnostics, candle export and TrackChanges (source reading) ==="
 out=$($CHK diag $VIS) && echo "  PASS export off by default and gated by InpExportCandles; file access only inside ExportCandles (closed-bar set g_bars, no series/tick/quote read, full path reported); called once from EvaluateAndDraw; diagnostics only for an unreliable evaluation and read-only; TrackChanges reports only under H3_TC_REPORT" || { echo "$out"; echo "  FAIL diagnostics / export / TrackChanges pattern"; FAIL=1; }
 
-echo "=== V9: the T003 logic, T002 and T001 files are byte-identical to the prototype 2837527 (the integration did not touch them) ==="
-LB=2837527
+echo "=== V9: T002 and T001 files and the structure header are byte-identical to d7a201f (parent of the revision 14 round); the logic files are the revision 14 logic ==="
+# Until revision 13 this check compared the T003 logic with the prototype 2837527. Revision 14 (per-level internal liquidity,
+# PROPOSAL / PROTOTYPE) changes H4Bias.mqh, the Python model and T003_LogicTest.mq5 ON PURPOSE; the visual files only change text/labels.
+# The generated case-data block is now compared with the --emit-mql output of the revision 14 model.
+LB=d7a201f
 if git cat-file -e "$LB^{commit}" 2>/dev/null; then
-  for f in src/include/H4Bias.mqh tests/t003_reference_test.py src/tests/T003_LogicTest.mq5 src/include/H4Structure.mqh src/XauUsdH4Map.mq5 src/include/H4MapDrawer.mqh src/XauUsdFoundation.mq5 src/include/StatusPanel.mqh src/include/SymbolSnapshot.mqh src/include/TimeframeWatcher.mqh tests/t002_reference_test.py tools/t001-static-checks.sh tools/t002-static-checks.sh tools/t001-check-balance.py tools/t001-check-format-strings.py; do
+  for f in src/include/H4Structure.mqh src/XauUsdH4Map.mq5 src/include/H4MapDrawer.mqh src/XauUsdFoundation.mq5 src/include/StatusPanel.mqh src/include/SymbolSnapshot.mqh src/include/TimeframeWatcher.mqh tests/t002_reference_test.py tools/t001-static-checks.sh tools/t002-static-checks.sh tools/t001-check-balance.py tools/t001-check-format-strings.py; do
     git diff --quiet "$LB" -- "$f" 2>/dev/null && echo "  PASS $f identical to $LB" || { echo "  FAIL $f differs from $LB"; FAIL=1; }
   done
-  blk() { sed -n '/BEGIN GENERATED CASE DATA/,/END GENERATED CASE DATA/p'; }
-  git show "$LB:src/tests/T003_LogicTest.mq5" | blk > "$NEG/blk_base.txt"; blk < src/tests/T003_LogicTest.mq5 > "$NEG/blk_now.txt"
-  if [ -s "$NEG/blk_base.txt" ] && cmp -s "$NEG/blk_base.txt" "$NEG/blk_now.txt"; then
-    echo "  PASS the generated case-data block of T003_LogicTest.mq5 is identical to $LB ($(wc -l < "$NEG/blk_now.txt") lines)"
-  else
-    echo "  FAIL the generated case-data block differs from $LB or is empty"; FAIL=1
-  fi
-  # negative control: the block comparison must detect a change inside the block (and must not be vacuous)
-  sed 's/^\(.*BEGIN GENERATED CASE DATA.*\)$/\1\n\/\/ tampered/' src/tests/T003_LogicTest.mq5 | blk > "$NEG/blk_mut.txt"
-  cmp -s "$NEG/blk_base.txt" "$NEG/blk_mut.txt" && { echo "  FAIL N60 a change inside the generated block was NOT detected"; FAIL=1; } || echo "  PASS N60 a change inside the generated block is detected"
 else
   echo "  INFO: base commit $LB not available here; the parent must verify that these files are unchanged"
 fi
+blk() { sed -n '/BEGIN GENERATED CASE DATA/,/END GENERATED CASE DATA/p' | tr -d '\r'; }
+python3 tests/t003_reference_test.py --emit-mql 2>/dev/null | tr -d '\r' > "$NEG/blk_base.txt"; blk < src/tests/T003_LogicTest.mq5 > "$NEG/blk_now.txt"
+if [ -s "$NEG/blk_base.txt" ] && cmp -s "$NEG/blk_base.txt" "$NEG/blk_now.txt"; then
+  echo "  PASS the generated case-data block of T003_LogicTest.mq5 equals the --emit-mql output of the model ($(wc -l < "$NEG/blk_now.txt") lines)"
+else
+  echo "  FAIL the generated case-data block differs from the --emit-mql output of the model or is empty"; FAIL=1
+fi
+# negative control: the block comparison must detect a change inside the block (and must not be vacuous)
+sed 's/^\(.*BEGIN GENERATED CASE DATA.*\)$/\1\n\/\/ tampered/' src/tests/T003_LogicTest.mq5 | blk > "$NEG/blk_mut.txt"
+cmp -s "$NEG/blk_base.txt" "$NEG/blk_mut.txt" && { echo "  FAIL N60 a change inside the generated block was NOT detected"; FAIL=1; } || echo "  PASS N60 a change inside the generated block is detected"
 
 echo "=== V10: no FROZEN / thaw text; MODEL DISAGREEMENT definition, text and once-per-change log ==="
 out=$($CHK nofrozen $VIS) && echo "  PASS no FROZEN / frozen / thaw text in the EA, the drawer or the layers (comments included)" || { echo "$out"; echo "  FAIL obsolete FROZEN text"; FAIL=1; }
@@ -203,22 +206,18 @@ for tn in TestBaseline TestPanelBudget TestLabelSlot TestExportKey TestSince; do
   grep -q "^void $tn(void)" $LTEST && grep -q "^   $tn();" $LTEST && echo "  PASS $LTEST defines and runs $tn" || { echo "  FAIL $LTEST lacks $tn"; FAIL=1; }
 done
 
-echo "=== V14: the T003 logic, the structure header and T001/T002 files are byte-identical to e2c1fa6 (this round did not touch them) ==="
-E2=e2c1fa6
-if git cat-file -e "$E2^{commit}" 2>/dev/null; then
-  for f in src/include/H4Bias.mqh src/include/H4Structure.mqh tests/t003_reference_test.py tools/t003-static-checks.sh src/XauUsdH4Map.mq5 src/include/H4MapDrawer.mqh src/XauUsdFoundation.mq5 src/include/StatusPanel.mqh src/include/SymbolSnapshot.mqh src/include/TimeframeWatcher.mqh tests/t002_reference_test.py tools/t001-static-checks.sh tools/t002-static-checks.sh tools/t001-check-balance.py tools/t001-check-format-strings.py; do
-    git diff --quiet "$E2" -- "$f" 2>/dev/null && echo "  PASS $f identical to $E2" || { echo "  FAIL $f differs from $E2"; FAIL=1; }
-  done
-  git show "$E2:src/tests/T003_LogicTest.mq5" | sed -n '/BEGIN GENERATED CASE DATA/,/END GENERATED CASE DATA/p' > "$NEG/blk_e2.txt"
-  if [ -s "$NEG/blk_e2.txt" ] && cmp -s "$NEG/blk_e2.txt" "$NEG/blk_now.txt"; then
-    echo "  PASS the generated case-data block of T003_LogicTest.mq5 is identical to $E2 ($(wc -l < "$NEG/blk_e2.txt") lines)"
-  else
-    echo "  FAIL the generated case-data block differs from $E2 or is empty"; FAIL=1
-  fi
-  git diff --quiet "$E2" -- src/tests/T003_LogicTest.mq5 && echo "  PASS the whole T003_LogicTest.mq5 is identical to $E2" || { echo "  FAIL T003_LogicTest.mq5 differs from $E2"; FAIL=1; }
+echo "=== V14: the revision 14 logic replaced the single-candidate selector; the visual files compile against the same state fields ==="
+# (this check compared the logic with e2c1fa6 in round 4; the logic is now changed on purpose, see tasks/T003-h4-bias-change.md section 16)
+if grep -qE 'has_li\b|SH3Cand +[a-z, ]*lint|, *lint\)' src/include/H4Bias.mqh; then
+  echo "  FAIL src/include/H4Bias.mqh still has the single-candidate interior output (has_li / lint)"; FAIL=1
 else
-  echo "  INFO: commit $E2 not available here; the parent must verify that these files are unchanged"
+  echo "  PASS src/include/H4Bias.mqh has no single-candidate interior output (H3DeriveLevel returns the level and the extreme only)"
 fi
+for fld in has_lint li_id li_price li_consumed li_key li_n; do
+  grep -qE "^   (bool|string|double|int) +$fld;" src/include/H4Bias.mqh && echo "  PASS SH3State keeps/has the field $fld (used by the EA / drawer)" || { echo "  FAIL SH3State lacks the field $fld"; FAIL=1; }
+done
+grep -q 'st.li_n' $DRW && grep -q 'st.li_n' $EA && echo "  PASS the drawer and the EA panel show the size of the set (li_n)" || { echo "  FAIL the drawer / the EA do not use li_n"; FAIL=1; }
+grep -q 'StringSubstr(st.li_id, 2, 12)' $DRW && echo "  PASS the drawer still parses the pivot time at li_id[2..14), which the revision 14 id (kind + 12-digit time) keeps" || { echo "  FAIL the drawer parse of li_id changed"; FAIL=1; }
 
 echo "=== V7: negative controls (every checker must detect its problem, for the intended reason) ==="
 # trading API

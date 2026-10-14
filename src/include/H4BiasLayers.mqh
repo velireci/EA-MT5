@@ -396,7 +396,7 @@ string H3LReasonHelp(const string reason)
   {
    string s = "";
    if(StringFind(reason, "AB_STRUCTURE_DIFF") >= 0)
-      s += "AB_STRUCTURE_DIFF = replays A and B differ in the STRUCTURE (bias, level, extreme, interior). ";
+      s += "AB_STRUCTURE_DIFF = replays A and B differ in the STRUCTURE (bias, level, extreme, unconsumed internal levels). ";
    if(StringFind(reason, "AB_SETUP_DIFF") >= 0)
       s += "AB_SETUP_DIFF = they differ in the SETUP (wick/sweep record, FVG tracks). ";
    if(StringFind(reason, "AB_EVENT_DIFF") >= 0)

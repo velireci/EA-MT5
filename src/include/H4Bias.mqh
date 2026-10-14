@@ -20,6 +20,20 @@
 //| modifies or closes an order. The entries-block flags are only    |
 //| REPORTED (the sweep-wait one is a technical proposal, F8).       |
 //|                                                                  |
+//| REVISION 14 (PROPOSAL / PROTOTYPE, awaiting the client; task     |
+//| section 15): the single-candidate interior selector is replaced  |
+//| by a PER-LEVEL internal-liquidity layer. Scope = confirmed swings |
+//| of the side opposite to the bias, pivot later than the CURRENT    |
+//| protecting level's pivot, price strictly inside it. Consumption   |
+//| is HISTORICAL (a bar strictly beyond the swing from its first     |
+//| usable bar on, whatever the scope was; a touch is not a crossing).|
+//| Every crossed level keeps its own result (INTERNAL_BREAK /        |
+//| INTERNAL_SWEEP); ONE sweep setup per bar from the most adverse    |
+//| swept level, only from ACTIVE / SWEEP_WAIT. The LI element of the |
+//| structure key is the sorted set of unconsumed in-scope levels.    |
+//| Observation layer only: it never decides FLIP and never moves    |
+//| the protecting level. Not a client rule.                         |
+//|                                                                  |
 //| Builds on H4Structure.mqh (T002), which is reused unchanged:     |
 //| swings, FVGs, direction.                                         |
 //|                                                                  |
@@ -193,7 +207,9 @@ struct SH3State
    bool              has_lint;
    string            li_id;
    double            li_price;
-   bool              li_consumed;
+   bool              li_consumed;  // revision 14: always false (a consumed level leaves the set)
+   string            li_key;       // revision 14: sorted ids of the unconsumed in-scope internal levels for the NEXT bar ("-" = none); the LI key element
+   int               li_n;         // size of that set
    bool              has_wick;
    datetime          wk_src;
    datetime          wk_known;
@@ -211,6 +227,15 @@ struct SH3State
    datetime          snap_known;
    string            pre;
    string            t2dir;
+  };
+
+//--- revision 14: per-replay cache of the internal-liquidity consumption, indexed like sw[]: scanned[i] = last bar
+//--- already scanned for swing i, first[i] = first bar whose adverse extreme is strictly beyond it (-1 none yet).
+//--- It belongs to ONE replay (H3Replay allocates and resets it); nothing survives between replays.
+struct SH3LiqCache
+  {
+   int               scanned[];
+   int               first[];
   };
 
 //--- READ-ONLY context of the live setup for the NEXT module (revision 10, correction 5; PROPOSAL / PROTOTYPE).
@@ -440,9 +465,10 @@ string H3ExtId(const string kind, const datetime t_ext, const datetime t_prev)
    return(kind + H4TimeStamp(t_ext) + "_" + H4TimeStamp(t_prev));
   }
 
-string H3InteriorId(const string kind, const datetime t_int, const datetime t_ext)
+//--- revision 14: the id of an internal-liquidity level is the kind ("IH" bear / "IL" bull) and the absolute pivot time
+string H3InteriorId(const string kind, const datetime t_int)
   {
-   return(kind + H4TimeStamp(t_int) + "_" + H4TimeStamp(t_ext));
+   return(kind + H4TimeStamp(t_int));
   }
 
 string H3EventId(const int type, const datetime bar_time, const string ref)
@@ -483,6 +509,8 @@ void H3StateInit(SH3State &st)
    st.li_id        = "";
    st.li_price     = 0.0;
    st.li_consumed  = false;
+   st.li_key       = "-";
+   st.li_n         = 0;
    st.has_wick     = false;
    st.wk_src       = 0;
    st.wk_known     = 0;
@@ -528,6 +556,8 @@ void H3StateCopy(const SH3State &src, SH3State &dst)
    dst.li_id        = src.li_id;
    dst.li_price     = src.li_price;
    dst.li_consumed  = src.li_consumed;
+   dst.li_key       = src.li_key;
+   dst.li_n         = src.li_n;
    dst.has_wick     = src.has_wick;
    dst.wk_src       = src.wk_src;
    dst.wk_known     = src.wk_known;
@@ -608,17 +638,16 @@ int H3KnownCount(const SH4Swing &sw[], const int ns, const int right, const int 
 //| level: most adverse swing strictly between the previous extreme  |
 //|        and the latest higher high / lower low (ties: earliest,   |
 //|        AMBIGUITY 11). ext: that latest higher high / lower low.  |
-//| lint: most adverse swing after the pivot of ext (interior).      |
+//| Revision 14: the former `lint` output (single interior          |
+//| candidate) is REMOVED; see the internal-liquidity layer (H3Liq*).|
 //+------------------------------------------------------------------+
 void H3DeriveLevel(const SH4Swing &sw[], const int nk, const int d,
-                   bool &has_lvl, SH3Cand &lvl, bool &has_ex, SH3Cand &ex, bool &has_li, SH3Cand &li)
+                   bool &has_lvl, SH3Cand &lvl, bool &has_ex, SH3Cand &ex)
   {
    has_lvl = false;
    has_ex  = false;
-   has_li  = false;
    H3CandInit(lvl);
    H3CandInit(ex);
-   H3CandInit(li);
    bool ext_hi = (d > 0);
    int exts[];
    int oths[];
@@ -684,26 +713,6 @@ void H3DeriveLevel(const SH4Swing &sw[], const int nk, const int d,
    lvl.prev_time  = sw[pe].pivot_time;
    lvl.known      = (sw[best].confirm_time > sw[e].confirm_time ? sw[best].confirm_time : sw[e].confirm_time);
    lvl.idx        = sw[best].index;
-   int bi = -1;
-   for(int r = 0; r < no; r++)
-     {
-      int s2 = oths[r];
-      if(sw[s2].pivot_time > sw[e].pivot_time)
-        {
-         if(bi < 0 || d * sw[s2].price < d * sw[bi].price)
-            bi = s2;
-        }
-     }
-   if(bi >= 0)
-     {
-      has_li        = true;
-      li.id         = H3InteriorId((d > 0 ? "IL" : "IH"), sw[bi].pivot_time, sw[e].pivot_time);
-      li.price      = sw[bi].price;
-      li.pivot_time = sw[bi].pivot_time;
-      li.ext_time   = sw[e].pivot_time;
-      li.known      = sw[bi].confirm_time;
-      li.idx        = sw[bi].index;
-     }
   }
 
 //+------------------------------------------------------------------+
@@ -808,9 +817,7 @@ string H3StructKey(const SH3State &st)
    string ex = "-";
    if(st.has_ext)
       ex = st.ex_id + "@" + H3Pf(st.ex_price) + "/" + (st.ex_consumed ? "1" : "0");
-   string li = "-";
-   if(st.has_lint)
-      li = st.li_id + "@" + H3Pf(st.li_price) + "/" + (st.li_consumed ? "1" : "0");
+   string li = (st.li_key == "" ? "-" : st.li_key);   // revision 14: the set of unconsumed in-scope internal levels
    string bs = "-";
    if(st.dir != H3_NONE && !st.has_level)
       bs = H3Tx(st.bias_start);
@@ -1122,9 +1129,9 @@ void H3NoneStep(const int t, const MqlRates &bars[], const SH4Swing &sw[], const
      {
       int ctx = (ci == 0 ? H3_BEAR : H3_BULL);
       int s = -ctx;
-      bool has_l, has_e, has_i;
-      SH3Cand lvl, ex, lint;
-      H3DeriveLevel(sw, nkb, ctx, has_l, lvl, has_e, ex, has_i, lint);
+      bool has_l, has_e;
+      SH3Cand lvl, ex;
+      H3DeriveLevel(sw, nkb, ctx, has_l, lvl, has_e, ex);
       if(has_l)
         {
          if(!H3CloseBeyondAny(bars, lvl.idx + 1, t - 1, lvl.price, s))
@@ -1182,9 +1189,9 @@ void H3NoneStep(const int t, const MqlRates &bars[], const SH4Swing &sw[], const
    if(nup == 0 && ndn == 0 && (t2n == "BEARISH" || t2n == "BULLISH"))
      {
       int d = (t2n == "BULLISH" ? H3_BULL : H3_BEAR);
-      bool has_l2, has_e2, has_i2;
-      SH3Cand lvl2, ex2, lint2;
-      H3DeriveLevel(sw, nki, d, has_l2, lvl2, has_e2, ex2, has_i2, lint2);
+      bool has_l2, has_e2;
+      SH3Cand lvl2, ex2;
+      H3DeriveLevel(sw, nki, d, has_l2, lvl2, has_e2, ex2);
       //--- AMBIGUITY 10: "defined" = not body-broken by a bar up to t-1 (P2 wording);
       //--- bar t closing beyond its own seed level is handled by the retroactive scan.
       if(has_l2 && !H3CloseBeyondAny(bars, lvl2.idx + 1, t - 1, lvl2.price, -d))
@@ -1390,11 +1397,246 @@ void H3AddWickEvent(const datetime open_t, const SH3State &st, const bool restar
               "WICK@" + H4TimeStamp(open_t) + "#" + st.lv_id + "#" + H4TimeStamp(st.wk_src));
   }
 
+//+------------------------------------------------------------------+
+//| INTERNAL LIQUIDITY, revision 14 (PROPOSAL / PROTOTYPE, awaiting   |
+//| the client; tasks/T003-h4-bias-change.md section 15). Observation |
+//| layer: never decides FLIP, never moves the protecting level.      |
+//| Scope of a bar (bear shown, bull is the mirror): confirmed swing  |
+//| highs (confirmed by the close of the previous bar), pivot LATER   |
+//| than the pivot of the CURRENT protecting level, price strictly    |
+//| inside (below) it. Consumption is HISTORICAL: any closed bar from |
+//| the first usable bar (pivot + right + 1) up to the previous bar   |
+//| with its adverse extreme STRICTLY beyond the swing consumes it,   |
+//| whatever the scope was; a touch (==) is not a crossing.           |
+//| Cost: each (swing, bar) pair is scanned at most once per replay   |
+//| (SH3LiqCache); the scope loop walks back from the newest confirmed |
+//| swing and stops at the pivot of the protecting level.             |
+//+------------------------------------------------------------------+
+void H3LiqCacheInit(SH3LiqCache &lc, const SH4Swing &sw[], const int ns, const int right)
+  {
+   ArrayResize(lc.scanned, ns);
+   ArrayResize(lc.first, ns);
+   for(int i = 0; i < ns; i++)
+     {
+      lc.scanned[i] = sw[i].index + right;
+      lc.first[i]   = -1;
+     }
+  }
+
+//--- index of the first bar j (sw[i].index + right + 1 <= j <= upto) whose adverse extreme is STRICTLY beyond
+//--- swing i; -1 when there is none up to `upto`
+int H3LiqFirstCross(const MqlRates &bars[], const SH4Swing &sw[], const int i, const int upto, SH3LiqCache &lc)
+  {
+   int s = (sw[i].is_high ? 1 : -1);
+   if(lc.first[i] < 0 && lc.scanned[i] < upto)
+     {
+      int found = -1;
+      for(int j = lc.scanned[i] + 1; j <= upto; j++)
+        {
+         if(s * (H3AdverseExt(bars[j], s) - sw[i].price) > 0)
+           {
+            found = j;
+            break;
+           }
+        }
+      lc.first[i]   = found;
+      lc.scanned[i] = (found >= 0 ? found : upto);
+     }
+   if(lc.first[i] >= 0 && lc.first[i] <= upto)
+      return(lc.first[i]);
+   return(-1);
+  }
+
+//--- the swing indexes (chronological, in idx[0..n-1]) of the UNCONSUMED in-scope levels among the first nk (confirmed)
+//--- swings; consumption is judged up to bar `upto`. s = adverse sign (+1 bear: swing highs).
+int H3LiqScope(const MqlRates &bars[], const SH4Swing &sw[], const int nk, const SH3State &st, const int s,
+               const int upto, SH3LiqCache &lc, int &idx[])
+  {
+   ArrayResize(idx, 0);
+   int n = 0;
+   if(!st.has_level)
+      return(0);
+   for(int i = nk - 1; i >= 0; i--)
+     {
+      if(sw[i].pivot_time <= st.lv_pivot)
+         break;                      // swings are chronological: nothing older can be later than the level
+      if(sw[i].is_high != (s > 0) || !(s * (sw[i].price - st.lv_price) < 0))
+         continue;
+      if(H3LiqFirstCross(bars, sw, i, upto, lc) >= 0)
+         continue;
+      ArrayResize(idx, n + 1, 16);
+      idx[n] = i;
+      n++;
+     }
+   //--- the walk was newest first: reverse to chronological order
+   int lo = 0;
+   int hi = n - 1;
+   while(lo < hi)
+     {
+      int tmp = idx[lo];
+      idx[lo] = idx[hi];
+      idx[hi] = tmp;
+      lo++;
+      hi--;
+     }
+   return(n);
+  }
+
+//--- the most adverse level of a non-empty list of swing indexes (ties: the LATEST pivot, as the sweep order)
+int H3LiqTop(const SH4Swing &sw[], const int &idx[], const int n, const int s)
+  {
+   int best = idx[0];
+   for(int k = 1; k < n; k++)
+     {
+      int i = idx[k];
+      double a = s * sw[i].price;
+      double b = s * sw[best].price;
+      if(a > b || (a == b && sw[i].pivot_time >= sw[best].pivot_time))
+         best = i;
+     }
+   return(best);
+  }
+
+//--- INTERNAL_BREAK / INTERNAL_SWEEP of bar t, per level. Called only when the bar is NOT structural (no flip, no
+//--- wick). Breaks first (by pivot time), then sweeps (most adverse LAST). ONE setup per bar, from the most adverse
+//--- swept level, only from ACTIVE or SWEEP_WAIT (HOLD / RECONFIRMED keep their setup: the events carry setup=0).
+//--- DETAIL of INTERNAL_SWEEP: "dir;lint;sweep;restart;setup;top" (a superset of revision 13: restart= is kept and is 1
+//--- only on the event that restarted a SWEEP_WAIT; setup=1 on the event that created the setup; top=1 on the most
+//--- adverse level swept in the bar). The comparison signature is the event id (type, bar, level id) only.
+void H3LiqInternalEvents(const int t, const MqlRates &bars[], const SH4Swing &sw[], const int ns, const SH3Params &p,
+                         const SH4Fvg &fv[], const int nf, SH3State &st, SH3Track &tracks[], int &nt,
+                         SH3Event &events[], int &ne, SH3LiqCache &lc)
+  {
+   datetime open_t  = bars[t].time;
+   datetime close_t = open_t + p.period;
+   int d  = st.dir;
+   int s  = -d;
+   int ph = st.phase;
+   int nk = H3KnownCount(sw, ns, p.right, t - 1);
+   int scope[];
+   int nsc = H3LiqScope(bars, sw, nk, st, s, t - 1, lc, scope);
+   int broke[];
+   int swept[];
+   int nb = 0;
+   int nw = 0;
+   ArrayResize(broke, 0);
+   ArrayResize(swept, 0);
+   for(int k = 0; k < nsc; k++)
+     {
+      int i = scope[k];
+      if(s * (H3AdverseExt(bars[t], s) - sw[i].price) > 0)      // strictly beyond; a touch (==) is NOT a crossing
+        {
+         if(s * (bars[t].close - sw[i].price) > 0)
+           {
+            ArrayResize(broke, nb + 1, 8);                      // body beyond this level (scope is chronological already)
+            broke[nb] = i;
+            nb++;
+           }
+         else
+           {
+            ArrayResize(swept, nw + 1, 8);                      // wick beyond, close not beyond
+            swept[nw] = i;
+            nw++;
+           }
+        }
+     }
+   string kind = (s > 0 ? "IH" : "IL");
+   for(int k = 0; k < nb; k++)
+     {
+      string lid = H3InteriorId(kind, sw[broke[k]].pivot_time);
+      H3AddEvent(events, ne, H3_EV_INT_BREAK, open_t, lid, "dir=" + H3DirName(d) + ";lint=" + lid);
+     }
+   if(nw == 0)
+      return;
+   //--- sweeps ordered by (adverse price, pivot time) ascending: the most adverse is LAST (insertion sort, tiny n)
+   for(int a = 1; a < nw; a++)
+     {
+      int key = swept[a];
+      int b = a - 1;
+      while(b >= 0 && (s * sw[swept[b]].price > s * sw[key].price ||
+                       (s * sw[swept[b]].price == s * sw[key].price && sw[swept[b]].pivot_time > sw[key].pivot_time)))
+        {
+         swept[b + 1] = swept[b];
+         b--;
+        }
+      swept[b + 1] = key;
+     }
+   int top = swept[nw - 1];
+   int made = 0;
+   int restart = 0;
+   if(ph == H3_PH_ACTIVE || ph == H3_PH_SWEEP_WAIT)           // never from HOLD / RECONFIRMED (11.5 open point)
+     {
+      made = 1;
+      restart = (ph == H3_PH_SWEEP_WAIT ? 1 : 0);
+      string new_id = "SWEEP@" + H4TimeStamp(open_t) + "#" + st.lv_id;
+      H3SetupEnded(st, open_t, "REPLACED", new_id, events, ne);
+      st.phase        = H3_PH_SWEEP_WAIT;
+      st.setup_id     = new_id;
+      st.setup_type   = "SWEEP";
+      st.snap_id      = st.lv_id;
+      st.snap_price   = st.lv_price;
+      st.snap_known   = st.lv_known;
+      st.has_wick     = false;
+      st.wk_retro     = false;
+      st.sweep_time   = open_t;
+      st.src_time     = open_t;
+      st.wait_start   = close_t;
+      st.rec_id       = "";
+      st.rec_from     = 0;
+      st.recon_reason = H3_RR_NONE;
+      H3BuildTracks(st, tracks, nt, fv, nf, bars, t, d == H3_BULL);
+     }
+   for(int k = 0; k < nw; k++)
+     {
+      int i = swept[k];
+      bool is_top = (i == top);
+      string lid = H3InteriorId(kind, sw[i].pivot_time);
+      H3AddEvent(events, ne, H3_EV_INT_SWEEP, open_t, lid,
+                 "dir=" + H3DirName(d) + ";lint=" + lid + ";sweep=" + H4TimeStamp(open_t) +
+                 ";restart=" + ((is_top && restart == 1) ? "1" : "0") +
+                 ";setup=" + ((is_top && made == 1) ? "1" : "0") + ";top=" + (is_top ? "1" : "0"));
+     }
+  }
+
+//--- end of bar t: the unconsumed in-scope set for the NEXT bar (swings confirmed by the close of t, scope of the
+//--- protecting level as it stands after the derive step). Sets li_key / li_n and the DISPLAY candidate
+//--- (has_lint / li_id / li_price = the most adverse level of the set; li_consumed is always false).
+void H3LiqUpdate(const int t, const MqlRates &bars[], const SH4Swing &sw[], const int ns, const SH3Params &p,
+                 SH3State &st, SH3LiqCache &lc)
+  {
+   st.li_key      = "-";
+   st.li_n        = 0;
+   st.has_lint    = false;
+   st.li_id       = "";
+   st.li_price    = 0.0;
+   st.li_consumed = false;
+   if(st.dir == H3_NONE || !st.has_level)
+      return;
+   int s = -st.dir;
+   int nk = H3KnownCount(sw, ns, p.right, t);
+   int idx[];
+   int n = H3LiqScope(bars, sw, nk, st, s, t, lc, idx);
+   if(n == 0)
+      return;
+   string kind = (s > 0 ? "IH" : "IL");
+   //--- the ids are fixed-width stamps, so the chronological order of idx[] IS the sorted text order (no string sort needed)
+   string key = "";
+   for(int k = 0; k < n; k++)
+      key += (k > 0 ? "," : "") + H3InteriorId(kind, sw[idx[k]].pivot_time);
+   st.li_key = key;
+   st.li_n   = n;
+   int top = H3LiqTop(sw, idx, n, s);
+   st.has_lint = true;
+   st.li_id    = H3InteriorId(kind, sw[top].pivot_time);
+   st.li_price = sw[top].price;
+  }
+
 //--- step (2) of the order inside one bar. Returns true when the bias flipped.
 //--- PROPOSAL / PROTOTYPE (revision 10, awaiting the client): the CURRENT protecting level decides, in
 //--- every phase; the snapshot is a reference only (SNAPSHOT_CROSSED is a diagnostic).
-bool H3BiasStep(const int t, const MqlRates &bars[], const SH3Params &p, const SH4Fvg &fv[], const int nf,
-                SH3State &st, SH3Track &tracks[], int &nt, SH3Event &events[], int &ne)
+bool H3BiasStep(const int t, const MqlRates &bars[], const SH4Swing &sw[], const int ns, const SH3Params &p,
+                const SH4Fvg &fv[], const int nf, SH3State &st, SH3Track &tracks[], int &nt,
+                SH3Event &events[], int &ne, SH3LiqCache &lc)
   {
    datetime open_t  = bars[t].time;
    datetime close_t = open_t + p.period;
@@ -1431,41 +1673,8 @@ bool H3BiasStep(const int t, const MqlRates &bars[], const SH3Params &p, const S
       H3AddEvent(events, ne, H3_EV_CONTINUATION, open_t, st.ex_id,
                  "dir=" + H3DirName(d) + ";ext=" + st.ex_id);
      }
-   if(st.has_level && st.has_lint && !st.li_consumed)
-     {
-      if(s * (bars[t].close - st.li_price) > 0)
-        {
-         st.li_consumed = true;
-         H3AddEvent(events, ne, H3_EV_INT_BREAK, open_t, st.li_id,
-                    "dir=" + H3DirName(d) + ";lint=" + st.li_id);
-        }
-      else
-         if(s * (H3AdverseExt(bars[t], s) - st.li_price) > 0 && (ph == H3_PH_ACTIVE || ph == H3_PH_SWEEP_WAIT))
-           {
-            //--- a new INTERNAL_SWEEP setup is created only from ACTIVE or SWEEP_WAIT (11.5 open point)
-            bool restart2 = (ph == H3_PH_SWEEP_WAIT);
-            string new_id2 = "SWEEP@" + H4TimeStamp(open_t) + "#" + st.lv_id;
-            H3SetupEnded(st, open_t, "REPLACED", new_id2, events, ne);
-            st.phase        = H3_PH_SWEEP_WAIT;
-            st.setup_id     = new_id2;
-            st.setup_type   = "SWEEP";
-            st.snap_id      = st.lv_id;
-            st.snap_price   = st.lv_price;
-            st.snap_known   = st.lv_known;
-            st.has_wick     = false;
-            st.wk_retro     = false;
-            st.sweep_time   = open_t;
-            st.src_time     = open_t;
-            st.wait_start   = close_t;
-            st.rec_id       = "";
-            st.rec_from     = 0;
-            st.recon_reason = H3_RR_NONE;
-            H3BuildTracks(st, tracks, nt, fv, nf, bars, t, d == H3_BULL);
-            H3AddEvent(events, ne, H3_EV_INT_SWEEP, open_t, st.li_id,
-                       "dir=" + H3DirName(d) + ";lint=" + st.li_id + ";sweep=" + H4TimeStamp(open_t) +
-                       ";restart=" + (restart2 ? "1" : "0"));
-           }
-     }
+   if(st.has_level)
+      H3LiqInternalEvents(t, bars, sw, ns, p, fv, nf, st, tracks, nt, events, ne, lc);
    return(false);
   }
 
@@ -1625,9 +1834,9 @@ void H3DeriveStep(const int t, const MqlRates &bars[], const SH4Swing &sw[], con
    int d = st.dir;
    int s = -d;
    int nki = H3KnownCount(sw, ns, p.right, t);
-   bool has_l, has_e, has_i;
-   SH3Cand lvl, ex, lint;
-   H3DeriveLevel(sw, nki, d, has_l, lvl, has_e, ex, has_i, lint);
+   bool has_l, has_e;
+   SH3Cand lvl, ex;
+   H3DeriveLevel(sw, nki, d, has_l, lvl, has_e, ex);
    //--- latest HH/LL (continuation)
    if(!has_e)
       st.has_ext = false;
@@ -1672,34 +1881,24 @@ void H3DeriveStep(const int t, const MqlRates &bars[], const SH4Swing &sw[], con
            }
         }
      }
-   //--- interior liquidity (needs the protecting level and lies strictly inside the range: between the
-   //--- latest extreme and the protecting level)
-   if(!has_i || !st.has_level || !(s * lint.price < s * st.lv_price))
-      st.has_lint = false;
-   else
-     {
-      st.has_lint     = true;
-      st.li_id        = lint.id;
-      st.li_price     = lint.price;
-      st.li_consumed  = H3CloseBeyondAny(bars, lint.idx + 1, t, lint.price, s);
-     }
   }
 
 void H3ProcessBar(const int t, const MqlRates &bars[], const SH4Swing &sw[], const int ns, const SH4Fvg &fv[],
                   const int nf, const SH3Params &p, SH3State &st, SH3Track &tracks[], int &nt,
-                  SH3Event &events[], int &ne)
+                  SH3Event &events[], int &ne, SH3LiqCache &lc)
   {
    if(st.dir == H3_NONE)
       H3NoneStep(t, bars, sw, ns, p, st, events, ne);
    else
      {
-      bool flipped = H3BiasStep(t, bars, p, fv, nf, st, tracks, nt, events, ne);
+      bool flipped = H3BiasStep(t, bars, sw, ns, p, fv, nf, st, tracks, nt, events, ne, lc);
       if(!flipped)
         {
          H3FvgStep(t, bars, fv, nf, p, st, tracks, nt, events, ne);
         }
      }
    H3DeriveStep(t, bars, sw, ns, p, fv, nf, st, tracks, nt, events, ne);
+   H3LiqUpdate(t, bars, sw, ns, p, st, lc);       // revision 14: the unconsumed in-scope internal levels for the next bar
   }
 
 //--- FVGs of the bias type older than the wick: reporting only (not part of the key)
@@ -1832,12 +2031,14 @@ void H3Replay(const MqlRates &bars[], const int n, const SH3Params &p, SH3Rep &r
    int nf = H4FindFvgs(bars, n, p.period, fv);
    if(want_keys)
       ArrayResize(keys, n);
+   SH3LiqCache lc;                      // revision 14: per-replay consumption cache (nothing survives the replay)
+   H3LiqCacheInit(lc, sw, ns, p.right);
    for(int t = 0; t < n; t++)
      {
       if(t == n - 1)
          rep.key_before_last = H3StateKey(rep.st, tracks, rep.nt);
       int ne0 = rep.ne;
-      H3ProcessBar(t, bars, sw, ns, fv, nf, p, rep.st, tracks, rep.nt, events, rep.ne);
+      H3ProcessBar(t, bars, sw, ns, fv, nf, p, rep.st, tracks, rep.nt, events, rep.ne, lc);
       if(want_keys)
          keys[t] = H3StateKey(rep.st, tracks, rep.nt);
       H3DiagTrackBar(rep, events, ne0, bars[t].time);
@@ -2306,7 +2507,7 @@ string H3FieldMeaning(const string label)
    if(label == "EX")
       return("pending latest HH/LL candidate id@price/consumed");
    if(label == "LI")
-      return("pending interior candidate id@price/consumed");
+      return("sorted set of the unconsumed in-scope internal liquidity levels usable at the next bar (ids; revision 14)");
    if(label == "BS")
       return("bias_start (only while the bias has no level)");
    if(label == "SU")
@@ -2373,9 +2574,9 @@ string H3WhyNoLevel(const MqlRates &bars[], const int n, const SH3Params &p, con
    int amb = 0;
    int ns = H4FindSwings(bars, n, p.left, p.right, p.period, sw, amb);
    int nk = H3KnownCount(sw, ns, p.right, n - 1);
-   bool has_l, has_e, has_i;
-   SH3Cand lvl, ex, lint;
-   H3DeriveLevel(sw, nk, d, has_l, lvl, has_e, ex, has_i, lint);
+   bool has_l, has_e;
+   SH3Cand lvl, ex;
+   H3DeriveLevel(sw, nk, d, has_l, lvl, has_e, ex);
    if(!has_l)
      {
       if(!has_e)

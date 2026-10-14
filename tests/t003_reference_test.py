@@ -123,8 +123,11 @@ def ext_id(kind, t_ext, t_prev):
     return '%s%s_%s' % (kind, ts(t_ext), ts(t_prev))
 
 
-def interior_id(kind, t_int, t_ext):
-    return '%s%s_%s' % (kind, ts(t_int), ts(t_ext))
+def interior_id(kind, t_int):
+    """revision 14 (PROPOSAL / PROTOTYPE): the id of an internal-liquidity level is the kind ('IH' bear /
+    'IL' bull) and the absolute pivot time of the swing. The pivot is the identity of the level; the
+    protecting level it is judged against is NOT part of the id (that changes with the ratchet)."""
+    return '%s%s' % (kind, ts(t_int))
 
 
 def event_id(etype, bar_time, ref):
@@ -157,11 +160,12 @@ def derive_level(sw, nk, d):
     """P2 / P14 candidates from the first nk swings, context direction d.
     d=+1 bullish context: extremes are highs, level is a low.
     d=-1 bearish context: extremes are lows, level is a high.
-    Returns (level, ext, lint); each Cand or None.
+    Returns (level, ext); each Cand or None.
     level: most adverse swing strictly between the previous extreme and the
            latest higher-high (bull) / lower-low (bear); ties -> earliest.
     ext:   the latest higher-high (bull) / lower-low (bear).
-    lint:  most adverse swing after the pivot of ext (interior liquidity)."""
+    Revision 14: the former third result (`lint`, the single interior candidate anchored to the latest
+    extreme) is REMOVED; the internal liquidity is the per-level layer below (liq_*)."""
     ext_hi = (d > 0)
     exts = []
     oths = []
@@ -176,7 +180,7 @@ def derive_level(sw, nk, d):
             k = j
             break
     if k < 0:
-        return None, None, None
+        return None, None
     e = exts[k]
     pe = exts[k - 1]
     ex = Cand()
@@ -192,7 +196,6 @@ def derive_level(sw, nk, d):
             if best is None or d * s.price < d * best.price:
                 best = s
     lvl = None
-    lint = None
     if best is not None:
         lvl = Cand()
         lvl.id = level_id('SL' if d > 0 else 'SH', best.pivot_time, e.pivot_time, pe.pivot_time)
@@ -202,20 +205,7 @@ def derive_level(sw, nk, d):
         lvl.prev_time = pe.pivot_time
         lvl.known = max(best.confirm_time, e.confirm_time)
         lvl.idx = best.index
-        bi = None
-        for s in oths:
-            if s.pivot_time > e.pivot_time:
-                if bi is None or d * s.price < d * bi.price:
-                    bi = s
-        if bi is not None:
-            lint = Cand()
-            lint.id = interior_id('IL' if d > 0 else 'IH', bi.pivot_time, e.pivot_time)
-            lint.price = bi.price
-            lint.pivot_time = bi.pivot_time
-            lint.ext_time = e.pivot_time
-            lint.known = bi.confirm_time
-            lint.idx = bi.index
-    return lvl, ex, lint
+    return lvl, ex
 
 
 def adverse_ext(bar, s):
@@ -279,10 +269,18 @@ class St(object):
         self.ex_id = ''
         self.ex_price = 0.0
         self.ex_consumed = False
+        # revision 14 (PROPOSAL / PROTOTYPE): the internal liquidity is a SET of levels. li_key is the sorted
+        # set of unconsumed in-scope levels usable at the next bar (the LI element of the structure key);
+        # li_n its size; has_lint / li_id / li_price are only the DISPLAY candidate (the most adverse level
+        # of the set; li_consumed is always False: a consumed level leaves the set). liq_cache is a per-replay
+        # cache (swing index -> (last scanned bar, first crossing bar)); it never survives a replay.
         self.has_lint = False
         self.li_id = ''
         self.li_price = 0.0
         self.li_consumed = False
+        self.li_key = '-'
+        self.li_n = 0
+        self.liq_cache = {}
         self.has_wick = False
         self.wk_src = 0
         self.wk_known = 0
@@ -342,13 +340,13 @@ def tracks_key_text(tracks):
 def struct_key(st):
     """STRUCTURE key (revision 10, PROPOSAL / PROTOTYPE, awaiting the client). What the market
     structure will do next: bias, protecting level (id carries the pivot/ext/prev times, price, known
-    time), the pending candidates with their consumed flags, bias_start ONLY while the bias has no
+    time), the pending extreme with its consumed flag, the SET of unconsumed in-scope internal levels (LI, revision 14), bias_start ONLY while the bias has no
     protecting level (it matters only for the first level, 11.8). Origin NAME is provenance."""
     return 'BIAS=%s;LV=%s;EX=%s;LI=%s;BS=%s' % (
         dir_name(st.dir),
         ('%s@%s/%s' % (st.lv_id, pf(st.lv_price), tx(st.lv_known))) if st.has_level else '-',
         ('%s@%s/%d' % (st.ex_id, pf(st.ex_price), 1 if st.ex_consumed else 0)) if st.has_ext else '-',
-        ('%s@%s/%d' % (st.li_id, pf(st.li_price), 1 if st.li_consumed else 0)) if st.has_lint else '-',
+        st.li_key if st.li_key else '-',
         tx(st.bias_start) if (st.dir != 0 and not st.has_level) else '-')
 
 
@@ -481,7 +479,7 @@ def none_step(t, bars, sw, p, st, events):
     nki = known_count(sw, p.right, t)
     hit = {1: [], -1: []}       # direction of the break -> triggering candidates
     for ctx in (BEAR, BULL):
-        lvl, ex, lint = derive_level(sw, nkb, ctx)
+        lvl, ex = derive_level(sw, nkb, ctx)
         s = -ctx
         if lvl is not None:
             if not close_beyond_any(bars, lvl.idx + 1, t - 1, lvl.price, s):
@@ -503,7 +501,7 @@ def none_step(t, bars, sw, p, st, events):
     t2n = t2_dir_name(sw, nki)
     if len(up) == 0 and len(dn) == 0 and (t2n == 'BEARISH' or t2n == 'BULLISH'):
         d = BULL if t2n == 'BULLISH' else BEAR
-        lvl, ex, lint = derive_level(sw, nki, d)
+        lvl, ex = derive_level(sw, nki, d)
         # AMBIGUITY 10: "defined" = not body-broken by a bar up to t-1 (P2 wording);
         # bar t closing beyond its own seed level is handled by the retroactive scan.
         if lvl is not None and not close_beyond_any(bars, lvl.idx + 1, t - 1, lvl.price, -d):
@@ -653,6 +651,143 @@ def wick_event(open_t, st, restart):
                  'WICK@%s#%s#%s' % (ts(open_t), st.lv_id, ts(st.wk_src)))
 
 
+# ------------------------------------------------ internal liquidity (revision 14) ----
+# PROPOSAL / PROTOTYPE, awaiting the client (tasks/T003-h4-bias-change.md section 15, revision 14). Observation
+# layer only: it never decides FLIP, never moves the protecting level, never touches P2 / the ratchet.
+# Scope of the bar t (bear shown; bull is the mirror): confirmed swing highs (confirmed by the close of
+# bar t-1, i.e. confirm_time <= open of t), pivot LATER than the pivot of the CURRENT protecting level,
+# price strictly BELOW it. Consumption is HISTORICAL: a swing is consumed when any closed bar from its
+# first usable bar (index pivot + right + 1) up to the previous bar has its adverse extreme STRICTLY beyond
+# it, whatever the scope was at that time (a change of the protecting level never revives it). A touch (==)
+# is neither a crossing nor a consumption.
+def liq_first_cross(st, bars, p, sw, i, upto):
+    """index of the first bar j (sw[i].index + right + 1 <= j <= upto) whose adverse extreme is STRICTLY
+    beyond sw[i]; -1 when there is none up to `upto`. Cached per replay in st.liq_cache (each bar is
+    scanned at most once per swing)."""
+    x = sw[i]
+    s = 1 if x.is_high else -1
+    scanned, first = st.liq_cache.get(i, (x.index + p.right, -1))
+    if first < 0 and scanned < upto:
+        for j in range(scanned + 1, upto + 1):
+            if s * (adverse_ext(bars[j], s) - x.price) > 0:
+                first = j
+                break
+        scanned = first if first >= 0 else upto
+        st.liq_cache[i] = (scanned, first)
+    if first >= 0 and first <= upto:
+        return first
+    return -1
+
+
+def liq_scope(st, sw, nk, s, bars, p, upto):
+    """swing indexes (chronological) of the UNCONSUMED in-scope levels among the first nk (confirmed)
+    swings; consumption is judged up to bar `upto`"""
+    out = []
+    if not st.has_level:
+        return out
+    for i in range(nk - 1, -1, -1):
+        x = sw[i]
+        if x.pivot_time <= st.lv_pivot:
+            break                      # swings are chronological: nothing older can be later than the level
+        if x.is_high != (s > 0) or not (s * (x.price - st.lv_price) < 0):
+            continue
+        if liq_first_cross(st, bars, p, sw, i, upto) >= 0:
+            continue
+        out.append(i)
+    out.reverse()
+    return out
+
+
+def liq_top(sw, idx, s):
+    """the most adverse level of a non-empty list of swing indexes (ties: the LATEST pivot, as the sweep order)"""
+    best = idx[0]
+    for i in idx[1:]:
+        if (s * sw[i].price, sw[i].pivot_time) >= (s * sw[best].price, sw[best].pivot_time):
+            best = i
+    return best
+
+
+def liq_internal_events(t, bars, sw, fv, p, st, tracks, events, open_t, close_t, d, s, ph):
+    """INTERNAL_BREAK / INTERNAL_SWEEP of bar t, per level. Called only when the bar is NOT structural."""
+    bar = bars[t]
+    nk = known_count(sw, p.right, t - 1)
+    broke = []
+    swept = []
+    for i in liq_scope(st, sw, nk, s, bars, p, t - 1):
+        x = sw[i]
+        if s * (adverse_ext(bar, s) - x.price) > 0:          # strictly beyond; a touch (==) is NOT a crossing
+            if s * (bar.close - x.price) > 0:
+                broke.append(x)                                # body beyond this level
+            else:
+                swept.append(x)                                # wick beyond, close not beyond
+    broke.sort(key=lambda x: x.pivot_time)
+    swept.sort(key=lambda x: (s * x.price, x.pivot_time))      # most adverse LAST
+    kind = 'IH' if s > 0 else 'IL'
+    for x in broke:
+        lid = interior_id(kind, x.pivot_time)
+        events.append(Event(EV_INT_BREAK, open_t, lid, 'dir=%s;lint=%s' % (dir_name(d), lid)))
+    if not swept:
+        return
+    top = swept[-1]                                            # ONE setup per bar, from the most adverse level
+    made = 0
+    restart = 0
+    if ph == 'ACTIVE' or ph == 'SWEEP_WAIT':                   # never from HOLD / RECONFIRMED (11.5 open point)
+        made = 1
+        restart = 1 if ph == 'SWEEP_WAIT' else 0
+        new_id = 'SWEEP@%s#%s' % (ts(open_t), st.lv_id)
+        setup_ended(st, open_t, END_REPLACED, events, new_id)
+        st.phase = 'SWEEP_WAIT'
+        st.setup_id = new_id
+        st.setup_type = 'SWEEP'
+        st.snap_id = st.lv_id
+        st.snap_price = st.lv_price
+        st.snap_known = st.lv_known
+        st.has_wick = False
+        st.wk_retro = False
+        st.sweep_time = open_t
+        st.src_time = open_t
+        st.wait_start = close_t
+        st.rec_id = ''
+        st.rec_from = 0
+        st.recon_reason = ''
+        build_tracks(st, tracks, fv, bars, t, d == BULL)
+    for x in swept:
+        lid = interior_id(kind, x.pivot_time)
+        is_top = x is top
+        # DETAIL FORMAT (superset of revision 13): the old fields first and unchanged (restart= is 1 only on the
+        # event that restarted a SWEEP_WAIT), then setup= (1: this event created the setup) and top= (1: most
+        # adverse level swept in this bar). The comparison signature is the event id (type, bar, level id).
+        events.append(Event(EV_INT_SWEEP, open_t, lid,
+                            'dir=%s;lint=%s;sweep=%s;restart=%d;setup=%d;top=%d' % (
+                                dir_name(d), lid, ts(open_t), restart if is_top else 0,
+                                made if is_top else 0, 1 if is_top else 0)))
+
+
+def liq_update(t, bars, sw, p, st):
+    """end of bar t: the unconsumed in-scope set for the NEXT bar (swings confirmed by the close of t, scope of
+    the protecting level as it stands after the derive step). Sets li_key / li_n and the display candidate."""
+    st.li_key = '-'
+    st.li_n = 0
+    st.has_lint = False
+    st.li_id = ''
+    st.li_price = 0.0
+    st.li_consumed = False
+    if st.dir == 0 or not st.has_level:
+        return
+    s = -st.dir
+    nk = known_count(sw, p.right, t)
+    idx = liq_scope(st, sw, nk, s, bars, p, t)
+    if not idx:
+        return
+    kind = 'IH' if s > 0 else 'IL'
+    st.li_key = ','.join(interior_id(kind, sw[i].pivot_time) for i in idx)   # chronological = sorted (fixed-width stamps)
+    st.li_n = len(idx)
+    top = liq_top(sw, idx, s)
+    st.has_lint = True
+    st.li_id = interior_id(kind, sw[top].pivot_time)
+    st.li_price = sw[top].price
+
+
 def bias_step(t, bars, sw, fv, p, st, tracks, events):
     """step (2) of the order inside one bar. Returns True when the bias flipped.
     PROPOSAL / PROTOTYPE (revision 10, awaiting the client): the CURRENT protecting level decides, in
@@ -683,34 +818,8 @@ def bias_step(t, bars, sw, fv, p, st, tracks, events):
         st.ex_consumed = True
         events.append(Event(EV_CONTINUATION, open_t, st.ex_id,
                             'dir=%s;ext=%s' % (dir_name(d), st.ex_id)))
-    if st.has_level and st.has_lint and (not st.li_consumed):
-        if s * (bar.close - st.li_price) > 0:
-            st.li_consumed = True
-            events.append(Event(EV_INT_BREAK, open_t, st.li_id,
-                                'dir=%s;lint=%s' % (dir_name(d), st.li_id)))
-        elif s * (adverse_ext(bar, s) - st.li_price) > 0 and (ph == 'ACTIVE' or ph == 'SWEEP_WAIT'):
-            # a new INTERNAL_SWEEP setup is created only from ACTIVE or SWEEP_WAIT (11.5 open point)
-            restart = (ph == 'SWEEP_WAIT')
-            new_id = 'SWEEP@%s#%s' % (ts(open_t), st.lv_id)
-            setup_ended(st, open_t, END_REPLACED, events, new_id)
-            st.phase = 'SWEEP_WAIT'
-            st.setup_id = new_id
-            st.setup_type = 'SWEEP'
-            st.snap_id = st.lv_id
-            st.snap_price = st.lv_price
-            st.snap_known = st.lv_known
-            st.has_wick = False
-            st.wk_retro = False
-            st.sweep_time = open_t
-            st.src_time = open_t
-            st.wait_start = close_t
-            st.rec_id = ''
-            st.rec_from = 0
-            st.recon_reason = ''
-            build_tracks(st, tracks, fv, bars, t, d == BULL)
-            events.append(Event(EV_INT_SWEEP, open_t, st.li_id,
-                                'dir=%s;lint=%s;sweep=%s;restart=%d' % (
-                                    dir_name(d), st.li_id, ts(open_t), 1 if restart else 0)))
+    if st.has_level:
+        liq_internal_events(t, bars, sw, fv, p, st, tracks, events, open_t, close_t, d, s, ph)
     return False
 
 
@@ -834,7 +943,7 @@ def derive_step(t, bars, sw, fv, p, st, tracks, events):
     d = st.dir
     s = -d
     nki = known_count(sw, p.right, t)
-    lvl, ex, lint = derive_level(sw, nki, d)
+    lvl, ex = derive_level(sw, nki, d)
     # latest HH/LL (continuation)
     if ex is None:
         st.has_ext = False
@@ -870,17 +979,7 @@ def derive_step(t, bars, sw, fv, p, st, tracks, events):
         elif not p.ratchet:
             # R0 control only: plain re-derivation drops the level when the candidate is crossed
             st.has_level = False
-            st.has_lint = False
             return
-    # interior liquidity (needs the protecting level and lies strictly inside the range: between the latest
-    # extreme and the protecting level; an interior candidate at or beyond the level is meaningless)
-    if lint is None or not st.has_level or not (s * lint.price < s * st.lv_price):
-        st.has_lint = False
-    else:
-        st.has_lint = True
-        st.li_id = lint.id
-        st.li_price = lint.price
-        st.li_consumed = close_beyond_any(bars, lint.idx + 1, t, lint.price, s)
 
 
 def process_bar(t, bars, sw, fv, p, st, tracks, events):
@@ -891,6 +990,15 @@ def process_bar(t, bars, sw, fv, p, st, tracks, events):
         if not flipped:
             fvg_step(t, bars, fv, p, st, tracks, events)
     derive_step(t, bars, sw, fv, p, st, tracks, events)
+    liq_update(t, bars, sw, p, st)
+
+
+def dval(detail, key):
+    """value of `key` in a 'k1=v1;k2=v2' event detail ('' when absent); the key must start the text or follow ';'"""
+    for part in detail.split(';'):
+        if part.startswith(key + '='):
+            return part[len(key) + 1:]
+    return ''
 
 
 def pre_wick_ids(st, fv, n):
@@ -1332,7 +1440,7 @@ def consume_new(ev, cursor, period):
 STATE_FIELDS = ('BIAS', 'LV', 'EX', 'LI', 'BS', 'SU', 'PH', 'SRC', 'WAIT', 'REC', 'RSN', 'EL')
 STRUCT_FIELD_COUNT = 5            # BIAS LV EX LI BS = the STRUCTURE key; the rest is the SETUP key
 FIELD_MEANING = {'BIAS': 'dir', 'LV': 'protecting level id@price/known (id carries the pivot/ext/prev times)',
-                 'EX': 'pending latest HH/LL candidate id@price/consumed', 'LI': 'pending interior candidate id@price/consumed',
+                 'EX': 'pending latest HH/LL candidate id@price/consumed', 'LI': 'sorted set of the unconsumed in-scope internal liquidity levels usable at the next bar (ids; revision 14)',
                  'BS': 'bias_start (only while the bias has no level)', 'SU': 'setup_id', 'PH': 'phase',
                  'SRC': 'wick / sweep source time', 'WAIT': 'wait_start', 'REC': 'recorded FVG',
                  'RSN': 'reconfirm reason', 'EL': 'live eligible FVG tracks with bounds and confirm time'}
@@ -1397,7 +1505,7 @@ def why_no_level(bars, n, p, d):
     candidate P2 would give, and the first bar that already closed beyond it"""
     sw, _ = t2.find_swings(bars, n, p.left, p.right, p.period)
     nk = known_count(sw, p.right, n - 1)
-    lvl, ex, lint = derive_level(sw, nk, d)
+    lvl, ex = derive_level(sw, nk, d)
     if lvl is None:
         if ex is None:
             return 'NO_CANDIDATE: no latest %s in the swings known at the last bar' % ('HH' if d > 0 else 'LL')
@@ -2278,6 +2386,114 @@ def sc_r22():
     return s.bars()
 
 
+# ---- revision 14 scenarios (SYNTHETIC, generic units; PROPOSAL / PROTOTYPE, awaiting the client): per-level
+# internal liquidity. Each kind returns the SELL bars; the BUY case is the mirror image.
+LIQ_KINDS = ('multi_break_sweep', 'multi_two_sweeps', 'multi_two_breaks', 'touch_inner', 'touch_level', 'beyond_level',
+             'flip_level', 'hold_sweep', 'recon_sweep', 'ratchet', 'first_usable', 'flip_scope', 'regression', 'close_equal')
+
+
+def liq_demo(rows):
+    """protecting high 105; two unconsumed internal highs below it: 100 (EARLIER pivot) and 90 (later pivot), both
+    after the lower low 55. `rows` are the (high, low, close) rows that follow."""
+    s = bear_leg().to(100).to(88).to(60).to(95).to(70).to(85).to(72)
+    s.pts([71, 70])
+    for r in rows:
+        s.bar(*r)
+    return s
+
+
+def liq_ratchet_prefix():
+    """level 117 (S), lower low 73; high A = 105 (pivot idx 29); a valley whose two EQUAL lows make no swing low;
+    internal high h2 = 103 (idx 36); a sweep bar (high 104 < A, close 98 < h2) that is itself the swing high 104
+    (idx 39); two lower bars confirm it (idx 41)."""
+    s = bear_leg().to(100)
+    for r in [(101, 91, 96), (97, 87, 91), (93, 82, 87), (92, 82, 86), (96, 85, 94), (100, 89, 98), (103, 92, 99),
+              (99, 90, 94), (95, 88, 91)]:
+        s.bar(*r)
+    s.bar(104, 90, 98)
+    s.pts([92, 88])
+    return s
+
+
+def sc_liq(kind):
+    if kind == 'multi_break_sweep':
+        # close breaks the LOWER (later) level 90, the wick sweeps the HIGHER (earlier) level 100
+        s = liq_demo([(103, 88, 95)])
+    elif kind == 'multi_two_sweeps':
+        s = liq_demo([(103, 88, 85)])        # both levels swept (close below both)
+    elif kind == 'multi_two_breaks':
+        s = liq_demo([(103, 88, 102)])       # close above both levels, below the protecting level
+    elif kind == 'close_equal':
+        s = liq_demo([(103, 88, 90)])        # close EQUAL to the level 90: not a close beyond it, so a sweep (not a break) of it
+    elif kind == 'touch_inner':
+        s = liq_demo([(100, 88, 95), (100.5, 88, 96)])      # high == 100 is a touch; 100.5 crosses
+    elif kind == 'touch_level':
+        s = liq_demo([(105, 88, 95)])        # high == protecting level 105: a touch, not a structural wick
+    elif kind == 'beyond_level':
+        s = liq_demo([(106, 88, 95), (101, 86, 90)])        # structural wick; the next bar re-crosses 100 silently
+    elif kind == 'flip_level':
+        s = liq_demo([(107, 88, 106)])       # close beyond the protecting level: FLIP
+    elif kind == 'hold_sweep':
+        s = liq_demo([(106, 88, 95)])
+        set_c(s, 92)
+        s.pts([88, 84, 80, 76, 80, 84, 88, 84, 80, 76])      # internal swing high 93 (idx 75)
+        s.bar(97, 80, 90)                                      # sweeps 93 while HOLD
+        s.pts([86, 82, 80])
+        return s.bars()
+    elif kind == 'recon_sweep':
+        s = liq_demo([(106, 88, 95)])
+        for r in [(90, 78, 80), (86, 70, 74), (87, 72, 80), (80, 66, 70), (78, 65, 68), (84, 70, 80), (80, 68, 72),
+                  (78, 66, 70), (88, 70, 78), (76, 64, 68), (74, 62, 66)]:
+            s.bar(*r)                                          # wick -> FVG [86, 88] -> touch -> RECONFIRMED -> sweep of 84
+        return s.bars()
+    elif kind == 'ratchet':
+        s = liq_ratchet_prefix()
+        set_c(s, 88)
+        s.to(60).to(70)                                        # lower low 55: the level moves 117 -> 105
+        s.bar(103.5, 88, 95)                                   # re-crosses the consumed h2 only
+        s.bar(104.5, 88, 96)                                   # crosses 104 (and the consumed h2)
+        s.pts([80, 79])
+        return s.bars()
+    elif kind == 'first_usable':
+        s = liq_ratchet_prefix()
+        s.bar(104.5, 88, 96)                                   # idx 42 = pivot 39 + 3: the first usable bar of the 104 high
+        s.pts([84, 80, 76])
+        return s.bars()
+    elif kind == 'flip_scope':
+        s = bear_leg().to(100)
+        for r in [(101, 91, 96), (97, 86, 91), (93, 80, 85), (96, 84, 92), (98, 88, 95), (99, 86, 92), (99, 85, 90),
+                  (98, 82, 88), (96, 84, 91), (97, 86, 93)]:
+            s.bar(*r)                                          # bull level candidate 80 (idx 32), swing low X = 82 (idx 37)
+        s.bar(121, 95, 119)                                    # idx 40: close above the protecting high 117: FLIP to BULL
+        s.bar(120, 96, 105)                                    # 41
+        s.bar(112, 81, 90)                                     # 42 crosses X = 82 while the new bias has NO level
+        for r in [(100, 84, 92), (102, 86, 95), (104, 88, 98), (103, 80.5, 90), (105, 86, 96), (106, 88, 98), (108, 90, 100)]:
+            s.bar(*r)                                          # 46 crosses 81 (the low of bar 42) and X again
+        return s.bars()
+    elif kind == 'regression':
+        # mirror of the 25.09 12:00 case in generic units. Bearish structure; the protecting high is A = 105 once the
+        # lower low 55 is confirmed; the internal high h = 103 has its pivot BEFORE that lower low and AFTER A, and the
+        # single-candidate selector (anchored after the latest lower low) could not see it. A candle wicks above h and
+        # closes below it, A untouched: INTERNAL_SWEEP -> SWEEP_WAIT, no FLIP. A bearish FVG with candle A at the
+        # sweep bar, touched -> RECONFIRMED(INTERNAL); its FVG lost -> RECONF_LOST; a second FVG touched -> RECONFIRMED.
+        s = bear_leg().to(100)
+        for r in [(101, 91, 96), (97, 87, 91), (93, 82, 87), (92, 82, 86), (96, 85, 94), (100, 89, 98), (103, 92, 99),
+                  (99, 90, 94), (95, 88, 91)]:
+            s.bar(*r)
+        set_c(s, 91)
+        s.to(60)
+        s.to(94)                                               # the climb to the sweep makes no swing high
+        s.bar(104, 88, 95)                                     # the sweep bar (candle A of the first FVG)
+        for r in [(96, 78, 82), (86, 70, 74), (87, 72, 80), (80, 66, 70), (78, 65, 68), (92, 80, 90), (89, 76, 84),
+                  (80, 62, 64), (70, 58, 60), (73, 62, 66), (68, 56, 58)]:
+            s.bar(*r)
+        return s.bars()
+    else:
+        raise ValueError(kind)
+    s.pts([80, 79, 78])
+    return s.bars()
+
+
 def sc_quiet_tail(n):
     """a wick above the level (HOLD) followed by n quiet bars that never reach the level again"""
     s = bear_leg().to(108)
@@ -2511,6 +2727,10 @@ def build_cases():
         add('r10_' + k, sc_r10(k))
         add('m_r10_' + k, mirror(sc_r10(k)))
     add('r6_quiet_150', sc_quiet_tail(150))
+    # revision 14 (PROPOSAL / PROTOTYPE, awaiting the client): per-level internal liquidity
+    for k in LIQ_KINDS:
+        add('l14_' + k, sc_liq(k))
+        add('m_l14_' + k, mirror(sc_liq(k)))
     # P11 / evaluate cases (lookback 20)
     b = sc16_converged_break()
     add('p16a_converged_break', b, 'E', rebuild=len(b))
@@ -2805,18 +3025,21 @@ def test_07_level_selection():
             t = T0 + (i * 6) * PERIOD
             out.append(t2.Swing('S%s%s' % (ts(t), 'H' if hi else 'L'), hi, i * 6, t, t + 3 * PERIOD, price))
         return out
-    lv, ex, li = derive_level(sw([(False, 95), (True, 117), (False, 73)]), 3, BEAR)
-    check(lv is not None and lv.price == 117 and li is None, 'unit: L0, S, L1 (lower) -> level S')
-    lv, ex, li = derive_level(sw([(False, 95), (True, 117), (False, 95)]), 3, BEAR)
+    lv, ex = derive_level(sw([(False, 95), (True, 117), (False, 73)]), 3, BEAR)
+    check(lv is not None and lv.price == 117, 'unit: L0, S, L1 (lower) -> level S')
+    lv, ex = derive_level(sw([(False, 95), (True, 117), (False, 95)]), 3, BEAR)
     check(lv is None, 'unit: an equal low is not a lower low (strict) -> undefined')
-    lv, ex, li = derive_level(sw([(False, 95), (True, 117), (True, 117), (False, 73)]), 4, BEAR)
+    lv, ex = derive_level(sw([(False, 95), (True, 117), (True, 117), (False, 73)]), 4, BEAR)
     check(lv is not None and lv.pivot_time == T0 + 6 * PERIOD, 'unit: equal highs -> the earliest one is the level (AMBIGUITY 11)')
-    lv, ex, li = derive_level(sw([(False, 95), (True, 117), (False, 73), (True, 100), (False, 80)]), 5, BEAR)
-    check(lv is not None and lv.price == 117 and li is not None and li.price == 100,
-          'unit: latest LL stays L1; the corrective high is the interior level, not the level')
-    lv, ex, li = derive_level(sw([(False, 95), (True, 117)]), 2, BEAR)
+    lv, ex = derive_level(sw([(False, 95), (True, 117), (False, 73), (True, 100), (False, 80)]), 5, BEAR)
+    # revision 14: derive_level no longer returns an 'interior candidate' (the single-candidate selector was
+    # replaced by the per-level layer, tests 29a-29k); the part of this check that stays valid is that the
+    # corrective high 100 after the LL does not change the level.
+    check(lv is not None and lv.price == 117 and ex is not None and ex.price == 73,
+          'unit: latest LL stays L1; the corrective high 100 after it does not change the level (it is internal liquidity, tests 29)')
+    lv, ex = derive_level(sw([(False, 95), (True, 117)]), 2, BEAR)
     check(lv is None and ex is None, 'unit: a single low -> no lower low -> no level and no LL candidate')
-    lv, ex, li = derive_level(sw([(True, 100), (False, 80), (True, 110)]), 3, BULL)
+    lv, ex = derive_level(sw([(True, 100), (False, 80), (True, 110)]), 3, BULL)
     check(lv is not None and lv.price == 80, 'unit: bullish mirror (HH, lowest low between)')
 
 
@@ -3301,8 +3524,11 @@ def test_19_internal_liquidity():
               '%s: a body close beyond an interior level is only an INTERNAL_BREAK observation' % tag)
         r = rep_of(pref + 's_restart')
         sws = events_of(r, EV_INT_SWEEP)
-        check(len(sws) == 2 and sws[1].detail.endswith('restart=1') and r.state.sweep_time == sws[1].bar_time,
-              '%s: a further internal sweep restarts the wait from the latest sweep' % tag)
+        # revision 14: the detail is a SUPERSET (restart= kept, setup= and top= added), so the field is read by name
+        check(len(sws) == 2 and dval(sws[1].detail, 'restart') == '1' and dval(sws[1].detail, 'setup') == '1'
+              and dval(sws[1].detail, 'top') == '1' and dval(sws[0].detail, 'restart') == '0'
+              and r.state.sweep_time == sws[1].bar_time,
+              '%s: a further internal sweep restarts the wait from the latest sweep (restart=1, setup=1, top=1)' % tag)
         r = rep_of(pref + 's_wait_wick')
         # revision 10: the structural wick replaces the sweep setup (SETUP_ENDED REPLACED before the WICK)
         check(types_of(r) == [EV_SEED, EV_INT_SWEEP, EV_SETUP_ENDED, EV_WICK] and r.state.phase == 'HOLD' and r.state.sweep_time == 0
@@ -3342,7 +3568,7 @@ def lv_id_of_key(key):
 def derive_id_at(c, upto, d):
     """id of the protecting level a derivation from the closed prefix bars[0..upto] would give"""
     sw, _ = t2.find_swings(c.bars, c.n_use, 2, 2, PERIOD)
-    lvl, ex, lint = derive_level(sw, known_count(sw, 2, upto), d)
+    lvl, ex = derive_level(sw, known_count(sw, 2, upto), d)
     return lvl.id if lvl is not None else '-'
 
 
@@ -3594,7 +3820,7 @@ def test_21_no_fixed_count():
 def test_ids_and_windows():
     print('--- technical requirement (a): identities use absolute times, stable under window shifts')
     import re
-    id_pat = re.compile(r'^(SH|SL)\d{12}_\d{12}_\d{12}$|^(HH|LL|IH|IL)\d{12}_\d{12}$|^F\d{12}[UD]$')
+    id_pat = re.compile(r'^(SH|SL)\d{12}_\d{12}_\d{12}$|^(HH|LL)\d{12}_\d{12}$|^(IH|IL)\d{12}$|^F\d{12}[UD]$')
     ev_pat = re.compile(r'^[A-Z_]+@\d{12}#[A-Za-z0-9_+]+$')
     setup_pat = re.compile(r'^(WICK|SWEEP)@\d{12}#(SH|SL)\d{12}_\d{12}_\d{12}$')
     bad = 0
@@ -3627,14 +3853,17 @@ def test_ids_and_windows():
                          ('c_history', (1, 2, 3)), ('b2_active_retro', (1, 2, 3, 5)), ('m_w_a_is_wick', (1, 2, 3))):
         c = case_by_name(name)
         full = replay(c.bars, len(c.bars), c.params())
-        fmap = dict(((e.type, e.bar_time), e.id()) for e in full.events)
+        # revision 14: several events of one type can share a bar (one per internal level), so a (type, bar) maps to a SET of ids
+        fmap = {}
+        for e in full.events:
+            fmap.setdefault((e.type, e.bar_time), set()).add(e.id())
         for sft in shifts:
             sh = replay(c.bars[sft:], len(c.bars) - sft, c.params())
             for e in sh.events:
                 k = (e.type, e.bar_time)
                 if k in fmap:
                     common_total += 1
-                    if fmap[k] != e.id():
+                    if e.id() not in fmap[k]:
                         stable = False
             if sh.state.has_level and full.state.has_level and sh.state.lv_price == full.state.lv_price and sh.state.lv_id != full.state.lv_id:
                 stable = False
@@ -3741,8 +3970,11 @@ def test_24_diagnostics():
     check((not d.reliable) and d.reason == 'AB_EVENT_DIFF+ANCHOR_IN_WARMUP' and d.field_diff is None and d.org_diff == 'ORG_DIFF A=BREAK B=SEED',
           'p16b: all 12 compared fields are equal, the origin NAME differs (ORG_DIFF A=BREAK B=SEED, provenance); both biases are BULL/HOLD with the same level')
     i, ea, eb = d.event_diff
-    check(i == 0 and ea.type == EV_INT_SWEEP and eb.type == EV_SEED and ts(ea.bar_time) == '202601130800' and ts(eb.bar_time) == '202601120400',
-          'p16b: the first differing event of the zone is #0, A INTERNAL_SWEEP at 202601130800 versus B SEED at 202601120400 (absolute times)')
+    # REWRITTEN in revision 14: the per-level internal liquidity raises an INTERNAL_SWEEP at 202601130400 (the level
+    # IL202601121200, ignored by the single-candidate selector) before the sweep that used to be first (202601130800);
+    # A still differs from B by exactly the same cause (B starts later and can only SEED).
+    check(i == 0 and ea.type == EV_INT_SWEEP and eb.type == EV_SEED and ts(ea.bar_time) == '202601130400' and ts(eb.bar_time) == '202601120400',
+          'p16b: the first differing event of the zone is #0, A INTERNAL_SWEEP at 202601130400 versus B SEED at 202601120400 (absolute times)')
     check(d.a.start == c.bars[0].time and d.a.bars == ev.r_eff and d.b.start == c.bars[n - ev.b_depth].time and d.b.bars == ev.b_depth and
           d.a.warm_end == c.bars[ev.warm].time and d.b.warm_end == c.bars[n - ev.b_depth + ev.warm].time and
           d.zone_start == ev.trusted_from == d.b.warm_end,
@@ -4185,8 +4417,10 @@ def test_28_revision10():
           'R17: a different setup_id is flagged: AB_SETUP_DIFF')
     check(one_diff(lambda a, b: setattr(a, 'ex_consumed', not a.ex_consumed)) == 'AB_STRUCTURE_DIFF',
           'R21: a different consumed flag of the pending continuation (HH/LL) candidate is flagged: AB_STRUCTURE_DIFF alone')
-    check(one_diff(lambda a, b: setattr(a, 'li_consumed', not a.li_consumed)) == 'AB_STRUCTURE_DIFF',
-          'R21: a different consumed flag of the pending interior candidate is flagged: AB_STRUCTURE_DIFF alone')
+    # REWRITTEN in revision 14 (the single interior candidate with a consumed flag no longer exists): the LI element is
+    # the SET of unconsumed in-scope internal levels; a different set is a structure difference (R21b-R21d below).
+    check(one_diff(lambda a, b: setattr(a, 'li_key', a.li_key + ',IH000000000000' if a.li_key != '-' else 'IH000000000000')) == 'AB_STRUCTURE_DIFF',
+          'R21: a different set of unconsumed internal levels (LI) is flagged: AB_STRUCTURE_DIFF alone')
     check(one_diff(lambda a, b: setattr(a, 'lv_known', a.lv_known + PERIOD)) == 'AB_STRUCTURE_DIFF'
           and one_diff(lambda a, b: setattr(a, 'lv_price', a.lv_price + 1.0)) == 'AB_STRUCTURE_DIFF',
           'R17: a different level known time or price is flagged: AB_STRUCTURE_DIFF alone')
@@ -4368,6 +4602,364 @@ def test_28d_context():
           'M15_OUTCOME is NOT implemented as a market event of the stateless replay (no mechanism is defined)')
 
 
+# ----------------------------------------------------------------- revision 14 tests ----
+def li_of_key(key):
+    return key.split(';LI=')[1].split(';')[0]
+
+
+def liq_brute_key(bars, sw, p, t, dir_, lv_pivot, lv_price, history=True):
+    """INDEPENDENT reference of the LI key at the end of bar t (no cache, no helper of the model): the swings of the
+    side opposite to the bias, confirmed by the close of t, pivot later than the protecting level's pivot, strictly
+    inside it, and (history=True) NOT crossed (adverse extreme strictly beyond) by any closed bar from pivot + right + 1
+    to t. history=False gives the GEOMETRIC scope only (consumption ignored)."""
+    s = -dir_
+    ids = []
+    for x in sw:
+        if x.index + p.right > t or x.is_high != (s > 0) or x.pivot_time <= lv_pivot or not (s * (x.price - lv_price) < 0):
+            continue
+        crossed = False
+        if history:
+            for j in range(x.index + p.right + 1, t + 1):
+                if s * (adverse_ext(bars[j], s) - x.price) > 0:
+                    crossed = True
+                    break
+        if not crossed:
+            ids.append(interior_id('IH' if s > 0 else 'IL', x.pivot_time))
+    return ','.join(sorted(ids)) if ids else '-'
+
+
+def replay_levels(bars, p):
+    """replay with the protecting level of every bar recorded (test helper)"""
+    st = St()
+    sw, _ = t2.find_swings(bars, len(bars), p.left, p.right, p.period)
+    fv = t2.find_fvgs(bars, len(bars), p.period)
+    tracks = []
+    events = []
+    out = []
+    for t in range(len(bars)):
+        process_bar(t, bars, sw, fv, p, st, tracks, events)
+        out.append((st.dir, st.has_level, st.lv_pivot, st.lv_price, st.li_key, st.has_lint, st.li_id, st.li_price))
+    return out, sw, events
+
+
+class Lcg(object):
+    """small deterministic generator (the test must not depend on the random module of a Python version)"""
+    def __init__(self, seed):
+        self.x = (seed * 2654435761 + 12345) % 4294967296
+
+    def u(self, a, b):
+        self.x = (self.x * 1664525 + 1013904223) % 4294967296
+        return a + (b - a) * (self.x / 4294967296.0)
+
+
+def random_bars(seed, n):
+    g = Lcg(seed)
+    c = 100.0
+    out = []
+    for i in range(n):
+        c += g.u(-6, 6)
+        hw = g.u(0.5, 7)
+        h = c + hw * g.u(0.2, 1.6)
+        l = c - hw * g.u(0.2, 1.6)
+        cl = c + g.u(-hw, hw) * 0.8
+        h = max(h, cl)
+        l = min(l, cl)
+        out.append(Bar(T0 + i * PERIOD, round(h, 2), round(l, 2), round(cl, 2)))
+    return out
+
+
+def replay_forgetful(bars, n, p, k0):
+    """MODEL-ONLY negative control: a replay that IGNORES every crossing before bar k0 (a B that lacks part of the
+    consumption history). The product never does this."""
+    orig = globals()['liq_first_cross']
+
+    def forgetful(st, bars_, p_, sw, i, upto):
+        r = orig(st, bars_, p_, sw, i, upto)
+        return r if r >= k0 else -1
+    globals()['liq_first_cross'] = forgetful
+    try:
+        return replay(bars, n, p)
+    finally:
+        globals()['liq_first_cross'] = orig
+
+
+def test_29_internal_liquidity_layer():
+    print('--- 29. revision 14 PROPOSAL / PROTOTYPE (awaiting the client): per-level internal liquidity (observation layer)')
+    p = Params(left=2, right=2, period=PERIOD, lookback=300, rebuild=1000, hard_cap=5000)
+    base = len(liq_demo([]).bars())          # index of the crossing row of the demo series
+    for pref in ('', 'm_'):
+        tag = 'SELL' if pref == '' else 'BUY'
+        K = 'IH' if pref == '' else 'IL'
+        KF = 'IL' if pref == '' else 'IH'      # the kind after a flip (the other side)
+        d0 = 'BEAR' if pref == '' else 'BULL'
+
+        def case(kind):
+            return case_by_name(pref + 'l14_' + kind)
+
+        def rp(kind):
+            return rep_of(pref + 'l14_' + kind)
+
+        def at(kind, i):
+            c = case(kind)
+            return [e for e in rp(kind).events if e.bar_time == c.bars[i].time]
+
+        def liv(kind, i):
+            return li_of_key(rp(kind).keys[i])
+
+        def idt(i, k=None):
+            return (k or K) + ts(T0 + i * PERIOD)
+
+        def keyset(*ids):
+            return ','.join(sorted(ids)) if ids else '-'
+        # ---- 29a several levels in one bar keep their own result
+        r = rp('multi_break_sweep')
+        ev = at('multi_break_sweep', base)
+        pre = liv('multi_break_sweep', base - 1).split(',')
+        check(len(pre) == 2 and pre[0] < pre[1],
+              '%s 29a: before the crossing bar two unconsumed internal levels are in the set (100 with the earlier pivot, 90 with the later pivot)' % tag)
+        lv100, lv90 = pre
+        check([e.type for e in ev] == [EV_INT_BREAK, EV_INT_SWEEP] and ev[0].ref == lv90 and ev[1].ref == lv100,
+              '%s 29a: close beyond the LOWER later-pivot level = INTERNAL_BREAK for it, wick over the HIGHER earlier-pivot level = INTERNAL_SWEEP for it, in one bar, breaks first, neither deletes the other' % tag)
+        check(dval(ev[1].detail, 'setup') == '1' and dval(ev[1].detail, 'top') == '1' and dval(ev[1].detail, 'restart') == '0'
+              and dval(ev[0].detail, 'setup') == '' and r.hist[base][1] == 'SWEEP_WAIT' and dir_name(r.state.dir) == d0
+              and EV_FLIP not in types_of(r) and r.hist[base][2].startswith('SWEEP@' + ts(T0 + base * PERIOD)),
+              '%s 29a: the sweep creates ONE SWEEP setup (ACTIVE -> SWEEP_WAIT) from the swept level; bias unchanged, no FLIP' % tag)
+        check(liv('multi_break_sweep', base) == '-', '%s 29a: both crossed levels left the set (consumed)' % tag)
+        # ---- 29b two levels swept in one bar: ONE setup, from the most adverse level
+        ev = at('multi_two_sweeps', base)
+        pre = liv('multi_two_sweeps', base - 1).split(',')
+        check([e.type for e in ev] == [EV_INT_SWEEP, EV_INT_SWEEP] and ev[0].ref == pre[1] and ev[1].ref == pre[0]
+              and [dval(e.detail, 'top') for e in ev] == ['0', '1'] and [dval(e.detail, 'setup') for e in ev] == ['0', '1'],
+              '%s 29b: two levels swept in one bar: both raise INTERNAL_SWEEP (most adverse LAST); the setup is created ONCE, from the most adverse level (top=1, setup=1)' % tag)
+        check(rp('multi_two_sweeps').hist[base][1] == 'SWEEP_WAIT' and not [e for e in ev if e.type == EV_SETUP_ENDED]
+              and liv('multi_two_sweeps', base) == '-',
+              '%s 29b: one setup per bar, both levels consumed' % tag)
+        # ---- 29c close beyond both levels: two breaks (by pivot time), no sweep, no setup
+        ev = at('multi_two_breaks', base)
+        pre = liv('multi_two_breaks', base - 1).split(',')
+        r = rp('multi_two_breaks')
+        check([e.type for e in ev] == [EV_INT_BREAK, EV_INT_BREAK] and [e.ref for e in ev] == pre
+              and r.hist[base][1] == 'ACTIVE' and r.hist[base][2] == '' and liv('multi_two_breaks', base) == '-',
+              '%s 29c: close beyond both levels: two INTERNAL_BREAK (earlier pivot first), no sweep, no setup, both consumed' % tag)
+        # ---- 29c2 a close EQUAL to a level is not a close beyond it
+        ev = at('close_equal', base)
+        pre = liv('close_equal', base - 1).split(',')
+        check([e.type for e in ev] == [EV_INT_SWEEP, EV_INT_SWEEP] and ev[0].ref == pre[1] and ev[1].ref == pre[0]
+              and EV_INT_BREAK not in types_of(rp('close_equal')),
+              '%s 29c2: a close EQUAL to the level 90 is not a close beyond it: both levels are swept, none is broken' % tag)
+        # ---- 29d touch versus strict crossing, interior level
+        ev = at('touch_inner', base)
+        pre = liv('touch_inner', base - 1).split(',')
+        check([e.type for e in ev] == [EV_INT_BREAK] and ev[0].ref == pre[1] and liv('touch_inner', base) == pre[0],
+              '%s 29d: a high EQUAL to the internal level 100 is a touch: no sweep, no consumption (the level stays in the set; only the close beyond 90 breaks that level)' % tag)
+        ev = at('touch_inner', base + 1)
+        check([e.type for e in ev] == [EV_INT_SWEEP] and ev[0].ref == pre[0] and dval(ev[0].detail, 'setup') == '1'
+              and liv('touch_inner', base + 1) == '-',
+              '%s 29d: the next bar crosses 100 strictly (100.5): INTERNAL_SWEEP, and the level is consumed' % tag)
+        # ---- 29e touch of the protecting level itself
+        r = rp('touch_level')
+        check([e.type for e in at('touch_level', base)] == [EV_INT_BREAK, EV_INT_SWEEP] and EV_WICK not in types_of(r) and EV_FLIP not in types_of(r)
+              and dir_name(r.state.dir) == d0 and r.state.lv_price == rp('multi_break_sweep').state.lv_price,
+              '%s 29e: a high EQUAL to the protecting level is not a structural wick; the interior events are raised normally, the level is unchanged' % tag)
+        # ---- 29f structural priority
+        r = rp('beyond_level')
+        check([e.type for e in at('beyond_level', base)] == [EV_WICK] and r.hist[base][1] == 'HOLD' and liv('beyond_level', base) == '-',
+              '%s 29f: a high strictly beyond the protecting level is a WICK only (no INTERNAL_*); the interior levels it crossed are consumed silently' % tag)
+        check(at('beyond_level', base + 1) == [] and liv('beyond_level', base + 1) == '-',
+              '%s 29f: the next bar crosses a level that the wick bar consumed silently: no event (consumption is historical)' % tag)
+        check([e.type for e in at('flip_level', base)] == [EV_FLIP] and liv('flip_level', base) == '-',
+              '%s 29f: a close strictly beyond the protecting level is a FLIP only (no INTERNAL_*); the set is empty (no level after a flip)' % tag)
+        # ---- 29g / 29h HOLD and RECONFIRMED are not replaced by a sweep
+        for kind, ph, num in (('hold_sweep', 'HOLD', 'g'), ('recon_sweep', 'RECONFIRMED', 'h')):
+            r = rp(kind)
+            sw_ev = [e for e in r.events if e.type == EV_INT_SWEEP]
+            i = bar_idx(case(kind), sw_ev[0].bar_time) if sw_ev else -1
+            check(len(sw_ev) == 1 and dval(sw_ev[0].detail, 'setup') == '0' and dval(sw_ev[0].detail, 'top') == '1'
+                  and dval(sw_ev[0].detail, 'restart') == '0' and r.hist[i - 1][1] == ph and r.hist[i][1] == ph
+                  and r.hist[i][2] == r.hist[i - 1][2] and r.hist[i][2].startswith('WICK@') and not [e for e in r.events if e.type == EV_SETUP_ENDED],
+                  '%s 29%s: a sweep seen in %s is raised with setup=0 (top=1); the phase, setup_id and setup type are NOT replaced (no SETUP_ENDED)' % (tag, num, ph))
+        # ---- 29i the level moves (ratchet): the scope changes; a consumed level is not revived
+        c = case('ratchet')
+        r = rp('ratchet')
+        a105, h2, hs = idt(29), idt(36), idt(39)
+        lv, sw_, _ = replay_levels(c.bars, p)
+        check(liv('ratchet', 38) == keyset(a105, h2),
+              '%s 29i: under the first protecting level the set holds the high A (105) and the internal high h2 (103)' % tag)
+        ev = at('ratchet', 39)
+        check([e.type for e in ev] == [EV_INT_SWEEP] and ev[0].ref == h2 and dval(ev[0].detail, 'setup') == '1' and liv('ratchet', 39) == a105
+              and liv('ratchet', 40) == a105,
+              '%s 29i: the sweep bar (high 104, close below h2) sweeps h2 only; its OWN high is not in the set at its own bar nor on the next two bars' % tag)
+        check(liv('ratchet', 41) == keyset(a105, hs) and liv('ratchet', 49) == keyset(a105, hs),
+              '%s 29i: the sweep bar high enters the set only when it is confirmed (after two lower bars)' % tag)
+        check(r.hist[48][5] == r.hist[49][5] and r.hist[49][5] != r.hist[50][5] and liv('ratchet', 50) == hs,
+              '%s 29i: when the lower low is confirmed the protecting level moves to A (ratchet): A leaves the set (it is the level), the scope shrinks' % tag)
+        geo = liq_brute_key(c.bars, sw_, p, 50, lv[50][0], lv[50][2], lv[50][3], history=False)
+        check(h2 in geo.split(',') and h2 not in liv('ratchet', 50).split(','),
+              '%s 29i: NO REVIVAL: h2 lies inside the new level (pivot later, price inside) but stays consumed, as it was consumed under the old level' % tag)
+        check(at('ratchet', 52) == [] and [e.type for e in at('ratchet', 53)] == [EV_SETUP_ENDED, EV_INT_SWEEP]
+              and at('ratchet', 53)[1].ref == hs and dval(at('ratchet', 53)[1].detail, 'restart') == '1'
+              and dval(at('ratchet', 53)[1].detail, 'setup') == '1',
+              '%s 29i: a bar crossing the consumed h2 only raises nothing; the next bar crosses the sweep-bar high: one INTERNAL_SWEEP (restart=1), the old SWEEP setup is REPLACED' % tag)
+        # ---- 29j flip: the scope is re-evaluated, a level crossed before it entered the scope stays consumed
+        c = case('flip_scope')
+        r = rp('flip_scope')
+        x37, y42 = idt(37, KF), idt(42, KF)
+        lv, sw_, _ = replay_levels(c.bars, p)
+        check([e.type for e in at('flip_scope', 40)] == [EV_FLIP] and liv('flip_scope', 40) == '-' and not lv[41][1],
+              '%s 29j: FLIP: the set is empty, the new bias has no protecting level and no internal level' % tag)
+        check(lv[42][1] and liv('flip_scope', 42) == '-',
+              '%s 29j: the new protecting level appears (bar 42) and the swing X, crossed by that very bar while the bias had no level, is already consumed' % tag)
+        geo = liq_brute_key(c.bars, sw_, p, 42, lv[42][0], lv[42][2], lv[42][3], history=False)
+        check(x37 in geo.split(','),
+              '%s 29j: X is inside the new level in pivot and price (geometric scope) although it is consumed: the historical consumption does not depend on the scope at the time' % tag)
+        check(liv('flip_scope', 44) == y42 and r.hist[45][1] == 'ACTIVE',
+              '%s 29j: the low of the crossing bar itself becomes a level only after its confirmation' % tag)
+        ev = at('flip_scope', 46)
+        check([e.type for e in ev] == [EV_INT_SWEEP] and ev[0].ref == y42 and liv('flip_scope', 46) == '-',
+              '%s 29j: a later bar crossing both X and Y raises ONE event, for Y only (X was consumed before it entered the scope)' % tag)
+        # ---- 29k no look-ahead: first usable bar, own high, confirmation
+        c = case('first_usable')
+        ev = at('first_usable', 42)
+        check(liv('first_usable', 40) == idt(29) and liv('first_usable', 41) == keyset(idt(29), hs),
+              '%s 29k: a swing joins the set at the end of the bar that confirms it (pivot + 2), not before' % tag)
+        check([e.type for e in ev] == [EV_SETUP_ENDED, EV_INT_SWEEP] and ev[1].ref == hs and dval(ev[1].detail, 'setup') == '1',
+              '%s 29k: the FIRST usable bar (pivot + 3) already crosses it: INTERNAL_SWEEP' % tag)
+        check([e.type for e in at('first_usable', 39)] == [EV_INT_SWEEP] and at('first_usable', 39)[0].ref == h2,
+              '%s 29k: at its own bar the sweep bar raises only the event of the level it crosses, never one about its own high' % tag)
+    # ---- 29l prefix replay equals full replay (no look-ahead), all revision 14 series
+    bad = []
+    n_pref = 0
+    for pref in ('', 'm_'):
+        for kind in LIQ_KINDS:
+            name = pref + 'l14_' + kind
+            c = case_by_name(name)
+            full = rep_of(name)
+            for k in range(30, len(c.bars) + 1, 2):
+                pr = replay(c.bars[:k], k, c.params())
+                n_pref += 1
+                ev_full = [e.text() for e in full.events if e.bar_time <= c.bars[k - 1].time]
+                if pr.keys != full.keys[:k] or [e.text() for e in pr.events] != ev_full:
+                    bad.append((name, k))
+    check(not bad and n_pref > 300,
+          '29l: the replay of every prefix gives the keys and events of the full replay up to that bar (no look-ahead; %d prefixes of %d series) %s' % (n_pref, 2 * len(LIQ_KINDS), bad[:3]))
+    # ---- 29m the LI key equals an independent brute-force reference on every bar (scenarios + random series)
+    bad = []
+    n_bars = 0
+    n_levels = 0
+    series = []
+    for pref in ('', 'm_'):
+        for kind in LIQ_KINDS:
+            series.append((pref + 'l14_' + kind, case_by_name(pref + 'l14_' + kind).bars))
+    for sd in range(30):
+        series.append(('random%d' % sd, random_bars(sd, 220)))
+    for nm, bars in series:
+        lv, sw_, _ = replay_levels(bars, p)
+        for t in range(len(bars)):
+            d_, has_l, lvp, lvpr, key, has_lint, li_id, li_price = lv[t]
+            exp = liq_brute_key(bars, sw_, p, t, d_, lvp, lvpr) if (d_ != 0 and has_l) else '-'
+            n_bars += 1
+            if key != exp:
+                bad.append((nm, t))
+            if key != '-':
+                n_levels += len(key.split(','))
+                ok = has_lint and li_id in key.split(',')
+                if not ok:
+                    bad.append((nm, t, 'display'))
+            elif has_lint:
+                bad.append((nm, t, 'display'))
+    check(not bad and n_levels > 500,
+          '29m: the LI key equals an independent brute-force reference on every one of %d bars (%d level slots, 28 scenarios and 30 random series) %s' % (n_bars, n_levels, bad[:3]))
+    # ---- 29n the regression case (mirror of the 25.09 12:00 example, generic units)
+    for pref in ('', 'm_'):
+        tag = 'SELL' if pref == '' else 'BUY'
+        K = 'IH' if pref == '' else 'IL'
+        c = case_by_name(pref + 'l14_regression')
+        r = rep_of(pref + 'l14_regression')
+        evs = [e for e in r.events if e.type in (EV_INT_SWEEP, EV_RECONFIRMED, EV_RECONF_LOST, EV_FLIP, EV_WICK, EV_SETUP_ENDED)]
+        sweep = [e for e in evs if e.type == EV_INT_SWEEP]
+        i = bar_idx(c, sweep[0].bar_time) if sweep else -1
+        h_id = K + ts(T0 + 36 * PERIOD)
+        check([e.type for e in evs] == [EV_INT_SWEEP, EV_RECONFIRMED, EV_RECONF_LOST, EV_RECONFIRMED] and sweep[0].ref == h_id,
+              '%s 29n: the confirmed internal high h (pivot before the latest lower low, below the protecting level, not the highest after the extreme) is swept: INTERNAL_SWEEP, then RECONFIRMED, RECONF_LOST, RECONFIRMED; no FLIP, no WICK' % tag)
+        check(r.hist[i - 1][1] == 'ACTIVE' and r.hist[i][1] == 'SWEEP_WAIT' and r.hist[i][0] == r.hist[i - 1][0] and dval(sweep[0].detail, 'setup') == '1',
+              '%s 29n: the sweep takes the setup from ACTIVE to SWEEP_WAIT, the bias is unchanged' % tag)
+        lvp = set(h[5] for h in r.hist[i - 8:])
+        check(len(lvp) == 1, '%s 29n: the protecting level stays untouched (same price on the bars around and after the sweep)' % tag)
+        sid = set(h[2] for h in r.hist[i:])
+        phases = [r.hist[k][1] for k in range(i, len(c.bars))]
+        seq = [phases[0]]
+        for ph_ in phases[1:]:
+            if ph_ != seq[-1]:
+                seq.append(ph_)
+        fv_ids = [e.ref for e in evs if e.type in (EV_RECONFIRMED, EV_RECONF_LOST)]
+        check(len(sid) == 1 and list(sid)[0].startswith('SWEEP@' + ts(sweep[0].bar_time)) and seq == ['SWEEP_WAIT', 'RECONFIRMED', 'SWEEP_WAIT', 'RECONFIRMED']
+              and r.state.recon_reason == 'INTERNAL' and fv_ids[0] == fv_ids[1] and fv_ids[2] != fv_ids[0],
+              '%s 29n: ONE setup_id through SWEEP_WAIT -> RECONFIRMED(INTERNAL) -> RECONF_LOST -> SWEEP_WAIT -> RECONFIRMED (the lost FVG is not reused; a second FVG reconfirms)' % tag)
+    # ---- 29o event detail and comparison signature
+    n_sw = 0
+    bad = []
+    for pref in ('', 'm_'):
+        for kind in LIQ_KINDS:
+            r = rep_of(pref + 'l14_' + kind)
+            per_bar = {}
+            for e in r.events:
+                if e.type == EV_INT_SWEEP:
+                    n_sw += 1
+                    keys_ = [x.split('=')[0] for x in e.detail.split(';')]
+                    if keys_ != ['dir', 'lint', 'sweep', 'restart', 'setup', 'top'] or e.sig != e.id() or dval(e.detail, 'lint') != e.ref:
+                        bad.append((kind, 'detail'))
+                    per_bar.setdefault(e.bar_time, []).append(e)
+                elif e.type == EV_INT_BREAK:
+                    if e.detail != 'dir=%s;lint=%s' % (e.detail.split(';')[0][4:], e.ref) or e.sig != e.id():
+                        bad.append((kind, 'break'))
+            for bt, lst in per_bar.items():
+                if [dval(e.detail, 'top') for e in lst].count('1') != 1 or [dval(e.detail, 'setup') for e in lst].count('1') > 1 \
+                        or [e for e in lst if dval(e.detail, 'setup') == '1' and dval(e.detail, 'top') != '1']:
+                    bad.append((kind, 'top/setup'))
+    check(not bad and n_sw >= 20,
+          '29o: INTERNAL_SWEEP detail is dir;lint;sweep;restart;setup;top (restart= kept for compatibility), one top and at most one setup per bar; INTERNAL_BREAK detail unchanged; the comparison signature is the event id only (%d sweeps) %s' % (n_sw, bad[:3]))
+    # ---- 29p a replay keeps nothing between replays
+    c1 = case_by_name('l14_ratchet')
+    c2 = case_by_name('l14_flip_scope')
+    a1 = replay(c1.bars, len(c1.bars), p)
+    replay(c2.bars, len(c2.bars), p)
+    replay(c1.bars[:40], 40, p)
+    a2 = replay(c1.bars, len(c1.bars), p)
+    check(a1.keys == a2.keys and [e.text() for e in a1.events] == [e.text() for e in a2.events] and replay_text(a1) == replay_text(a2)
+          and a1.state is not a2.state and a1.state.liq_cache is not a2.state.liq_cache,
+          '29p: replays in between change nothing: the consumption cache belongs to one replay (a fresh state per replay)')
+    # ---- 29q SELL and BUY are mirror images
+    bad = []
+    for kind in LIQ_KINDS:
+        if swap_sides(replay_text(rep_of('l14_' + kind))) != strip_prices(replay_text(rep_of('m_l14_' + kind))):
+            bad.append(kind)
+    check(not bad, '29q: SELL and BUY revision 14 series give mirror-image transcripts (roles swapped, prices dropped) %s' % bad)
+    # ---- 29r A/B negative controls for the LI element
+    for pref in ('', 'm_'):
+        tag = 'SELL' if pref == '' else 'BUY'
+        c = case_by_name(pref + 'l14_flip_scope')
+        n = 46                                           # up to the bar before the second crossing of the level X
+        ra = replay(c.bars[:n], n, p)
+        rb = replay_forgetful(c.bars[:n], n, p, 43)
+        ka, kb = struct_key(ra.state), struct_key(rb.state)
+        fa, fb = state_fields(ra.state, ra.tracks), state_fields(rb.state, rb.tracks)
+        diff = [la for (la, va), (lb, vb) in zip(fa, fb) if va != vb]
+        check(diff == ['LI'] and ka != kb,
+              '%s 29r: a B whose consumption history lacks one crossing differs from A ONLY in the unconsumed set (LI): the unconsumed set is a state element' % tag)
+        why = ab_reasons(ka, kb, setup_key(ra.state, ra.tracks), setup_key(rb.state, rb.tracks),
+                         events_sig_text(ra.events, 0), events_sig_text(rb.events, 0), ra.state.dir, 10 ** 12, 0)
+        check(why == 'AB_STRUCTURE_DIFF',
+              '%s 29r: the A/B comparison flags it: AB_STRUCTURE_DIFF alone (no setup or event difference)' % tag)
+        check(ab_without(ra, rb, {'LI'}) and not ab_without(ra, rb, set()) and first_diff_field(fa, fb)[0] == 'LI',
+              '%s 29r: NEGATIVE CONTROL: with the LI element removed from the compared key the same two windows would be called equal (so the element is what catches it); the first differing field is named LI' % tag)
+        rc = replay(c.bars[:n], n, p)
+        check(ab_reasons(ka, struct_key(rc.state), setup_key(ra.state, ra.tracks), setup_key(rc.state, rc.tracks),
+                         events_sig_text(ra.events, 0), events_sig_text(rc.events, 0), ra.state.dir, 10 ** 12, 0) == '',
+              '%s 29r: two identical replays compare as reliable (the control is not always firing)' % tag)
+    check(STATE_FIELDS.index('LI') < STRUCT_FIELD_COUNT and 'set' in FIELD_MEANING['LI'] and len(STATE_FIELDS) == 12,
+          '29r: LI is one of the 12 listed fields, in the STRUCTURE part, described as a set')
+
+
 def test_deferred():
     print('--- deferred groups (NOT counted as PASS)')
     deferred('test 9 (EA lifecycle and reload: no duplicate objects, clear/rebuild as in T002)')
@@ -4476,6 +5068,7 @@ def main():
     test_28d_context()
     test_ids_and_windows()
     test_consumer()
+    test_29_internal_liquidity_layer()
     test_deferred()
     print('')
     print('%d passed, %d failed, %d deferred (deferred are NOT passes)' % (len(PASSES), len(FAILS), len(DEFERRED)))
