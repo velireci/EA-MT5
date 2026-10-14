@@ -45,3 +45,7 @@ Base of the 1%; costs; combined 2% numbers and pending reservation; 2 vs 3 trade
 
 ## Codex MT5 fixture correction, 2026-10-14
 Owner ran d992258: 1090 passed, 2 failed (blocked/zero-plan registry unchanged assertions). Diagnostic script showed newly resized string cells were not equal to empty strings before authorization; the zero-plan result was BLOCK PLAN_NOT_OK with count0 and both cells unchanged. The test incorrectly assumed blank initialization. Codex explicitly initializes local registry fixtures and checks full before/after contents for the two assertions, retaining refusal/count/reason checks. TradePlanning and T005/T006 are unchanged. Python T007 43/0; MetaEditor corrected script 0 errors, 0 warnings (3043 ms). Actual corrected MT5 run is PENDING; the earlier failed result is not a PASS.
+
+
+## Corrected owner run at40fede0
+Owner supplied 2026.10.14 19:36:11.672 T007_PlanningTest-40fede0 (XAUUSD,M15),1092 passed,0failed. Relayed evidence. This supersedes pending corrected-test execution, not the preserved earlier failed observation. Pure-module scope only.

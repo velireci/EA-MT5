@@ -151,3 +151,17 @@ Një kuti shënohet vetëm me provë konkrete. Për testin ruaj versionin, rezul
 - [x] Kontroll i kufizuar vetëm me lexim: pa arsye për rishkrim masiv; dublikim i vogël vizatimi dhe optimizime të mundshme pa nevojë të matur.
 - [x] Defektet numerike T005 të këtij kontrolli u korrigjuan dhe u verifikuan te 67f02e5.
 - [ ] Pastrim vetëm kur ndryshimi i ardhshëm ose matja e performancës e justifikon.
+
+
+## T007 — module të pastra të verifikuara
+- [x] Plan, lejim dhe kërkesë anulimi; pa urdhra.
+- [x] Codex Python43/0 dhe kompilim0/0.
+- [x] Pronari MT5 PlanningTest-40fede0:1092 passed/0failed.
+
+## T008 — pamje brokeri vetëm me lexim
+- [x] Kandidat manual me E/SL/target dhe risk monetar të furnizuar; ripërdor T005–T007.
+- [x] Parametrat realë të simbolit dhe kontrolli me OrderCalcProfit; politikat e panjohura bllokojnë.
+- [x] Codex Python8 të reja; T006/T007/T008 së bashku98 kalojnë; EA/test kompilim0/0.
+- [ ] Pronari: T008_BrokerLossTest në MT5.
+- [ ] Pronari: EA default INPUT_UNSET dhe preview me kandidat manual në broker.
+Status: integrim vetëm për kontroll, jo sinjal ose urdhër; risku dhe ekspozimi i jashtëm nuk lexohen automatikisht.
