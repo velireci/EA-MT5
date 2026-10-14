@@ -375,7 +375,8 @@ bool EA_OnReport(SEaState &s,const string request_id,const ENUM_EA_REPORT kind,c
         }
       s.status=EA_ST_DONE;
       s.executed_steps=steps;
-      s.confirmations++;
+      if(s.confirmations<1)                       // ONE confirmation per request
+         s.confirmations=1;
       s.reason="";
       EA_ResultInit(r,EA_EV_OK,"");
       return(true);

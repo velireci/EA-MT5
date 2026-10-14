@@ -5,6 +5,8 @@
 // ONE SOURCE OF STATE: ER_Reconcile is a CONTROLLED TRANSITION on the SAME SEaState that ExitActivation.mqh owns; it returns a decision
 // and applies the permitted transition only here: CONFIRMED -> DONE (the only way out of NEEDS_RECONCILIATION), PARTIAL -> NEEDS_RECONCILIATION,
 // BLOCK -> BLOCKED, NOT_EXECUTED / UNKNOWN / INVALID_INPUT -> no change. It never produces a request and never changes the 80/20 plan.
+// CONFIRMED needs executions_complete == true (a matching sum of volume does not make the list complete) and keeps confirmations at 1
+// per request even when DONE is lost by a re-check and regained.
 // Executed steps are recomputed from each snapshot (not accumulated); inside a snapshot an execution is identified by exec_id.
 #ifndef VELO_EXIT_RECONCILIATION_MQH
 #define VELO_EXIT_RECONCILIATION_MQH
@@ -256,6 +258,11 @@ bool ER_Reconcile(SEaState &st,const SErSnapshot &snap,SErOutcome &o)
          ER_Block(st,o,StringFormat("VOLUME_MISMATCH: position %.10g lot is not initial - requested (%I64d steps)",snap.volume_current,expected),linked,dups,unl);
          return(false);
         }
+      if(!complete)
+        {
+         ER_NotDone(st,o,done_before,linked,"UNKNOWN: INCOMPLETE_EVIDENCE: the linked executions equal the request and the position matches, but the list is not declared complete (a sum of volume does not make it complete)",ER_UNKNOWN,dups,unl);
+         return(false);
+        }
       if(done_before)
         {
          ER_Out(o,ER_CONFIRMED,"ALREADY_DONE");
@@ -266,7 +273,8 @@ bool ER_Reconcile(SEaState &st,const SErSnapshot &snap,SErOutcome &o)
         }
       st.status=EA_ST_DONE;
       st.executed_steps=linked;
-      st.confirmations++;
+      if(st.confirmations<1)                      // ONE confirmation per request, also when DONE was lost and is regained
+         st.confirmations=1;
       st.reason="";
       ER_Out(o,ER_CONFIRMED,"");
       o.linked_steps=linked;

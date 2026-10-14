@@ -6,7 +6,8 @@ by the caller from whatever it already knows; this module only judges it.
 
 ONE SOURCE OF STATE (no second state machine): reconcile() is a CONTROLLED TRANSITION on the SAME State object that
 t011_activation_reference owns. It returns a decision AND, only through this function, applies the permitted transition to that state:
-  CONFIRMED  -> status DONE (from REQUEST_PENDING or NEEDS_RECONCILIATION), confirmations += 1 (once), executed_steps set.
+  CONFIRMED  -> status DONE (from REQUEST_PENDING or NEEDS_RECONCILIATION); confirmations becomes 1 and STAYS 1 for the request even when DONE is
+                lost (re-check) and regained; executed_steps set. Needs executions_complete == True.
                 The ONLY way out of NEEDS_RECONCILIATION. A quote or a plain report can never do it (activation module unchanged).
   PARTIAL    -> status NEEDS_RECONCILIATION (a partial fill stays for reconciliation), executed_steps = the snapshot's linked steps.
   NOT_EXECUTED / UNKNOWN / INVALID_INPUT -> no change.
@@ -27,7 +28,9 @@ DECISION ORDER, first failure wins (reasons start with the tag):
                   position cannot be matched, so DONE is never possible), EXEC_ID_CONFLICT, VOLUME_NOT_ON_GRID (an execution), OVERFILL
                   (linked steps > requested steps).
   then with linked = sum of the linked steps, expected = initial_steps - linked, cur = position steps (-1 off the grid):
-    linked == requested:  cur == expected -> CONFIRMED;  else BLOCK (VOLUME_MISMATCH: the position differs from initial - requested).
+    linked == requested:  cur != expected -> BLOCK (VOLUME_MISMATCH: the position differs from initial - requested);
+                          list not declared complete -> UNKNOWN (INCOMPLETE_EVIDENCE: a matching sum is not proof of a complete list);
+                          else CONFIRMED.
     0 < linked < requested: cur == expected -> PARTIAL;  else complete list -> BLOCK, incomplete -> UNKNOWN (an unseen fill may explain it).
     linked == 0:  cur == initial and complete -> NOT_EXECUTED;  cur == initial and incomplete -> UNKNOWN;
                   cur != initial: complete -> BLOCK (volume changed without a linked execution: manual change?), incomplete -> UNKNOWN.
@@ -152,11 +155,16 @@ def reconcile(state, snap):
     if linked == req:
         if cur != expected:
             return _block(state, 'VOLUME_MISMATCH: position %.10g lot is not initial - requested (%d steps)' % (snap.volume_current, expected), **common)
+        if not complete:
+            out = _not_done(state, done_before, linked, 'UNKNOWN: INCOMPLETE_EVIDENCE: the linked executions equal the request and the position matches, but the list is not declared complete (a sum of volume does not make it complete)')
+            out.decision, out.linked_steps, out.duplicates, out.unlinked = UNKNOWN, linked, dups, unlinked
+            return out
         if done_before:
             return Outcome(CONFIRMED, 'ALREADY_DONE', **common)
         state.status = act.DONE
         state.executed_steps = linked
-        state.confirmations += 1
+        if state.confirmations < 1:                  # ONE confirmation per request, also when DONE was lost and is regained
+            state.confirmations = 1
         state.reason = ''
         return Outcome(CONFIRMED, '', changed=True, **common)
     if linked > 0 and cur == expected:

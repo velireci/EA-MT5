@@ -15,25 +15,27 @@ def scenario(name):
 
 def _blank():
     return dict(scn=_scn[0], kind='', pos=0, d=0, level=0.0, bid=0.0, ask=0.0, vinit=0.0, vcur=0.0, vmin=0.0, step=0.01, vmax=0.0,
-                rid='', rkind=0, rvol=0.0, found=1, comp=0, ex=[], dec='', st='', lk=0, dup=0, unl=0, chg=0, conf=0)
+                rid='', rkind=0, rvol=0.0, found=1, comp=0, ex=[], dec='', st='', lk=0, dup=0, unl=0, chg=0, conf=-1)
 
 
-def Q(d=a.BUY, level=2000.0, bid=2000.0, ask=2000.3, vinit=0.5, vcur=0.5, st=a.REQUEST_PENDING, pos=7, vmin=0.01, step=0.01):
+def Q(d=a.BUY, level=2000.0, bid=2000.0, ask=2000.3, vinit=0.5, vcur=0.5, st=a.REQUEST_PENDING, pos=7, vmin=0.01, step=0.01, conf=-1):
     r = _blank()
-    r.update(kind='Q', pos=pos, d=d, level=level, bid=bid, ask=ask, vinit=vinit, vcur=vcur, vmin=vmin, step=step, vmax=100.0, st=st)
+    r.update(kind='Q', pos=pos, d=d, level=level, bid=bid, ask=ask, vinit=vinit, vcur=vcur, vmin=vmin, step=step, vmax=100.0, st=st, conf=conf)
     ROWS.append(r)
 
 
-def R(kind, vol=0.0, st=a.NEEDS_RECONCILIATION, rid=RID, step=0.01):
+def R(kind, vol=0.0, st=a.NEEDS_RECONCILIATION, rid=RID, step=0.01, conf=-1):
     r = _blank()
-    r.update(kind='R', rid=rid, rkind=kind, rvol=vol, step=step, st=st)
+    r.update(kind='R', rid=rid, rkind=kind, rvol=vol, step=step, st=st, conf=conf)
     ROWS.append(r)
 
 
-def S(dec, st, ex=(), vcur=0.1, comp=0, found=1, pos=7, rid=RID, step=0.01, lk=0, dup=0, unl=0, chg=0, conf=0):
+def S(dec, st, ex=(), vcur=0.1, comp=None, found=1, pos=7, rid=RID, step=0.01, lk=0, dup=0, unl=0, chg=0, conf=-1):
+    if comp is None:                    # only a complete list can be CONFIRMED (round of 7ac7f4b review)
+        comp = 1 if dec == 'CONFIRMED' else 0
     r = _blank()
     r.update(kind='S', found=found, pos=pos, rid=rid, step=step, vcur=vcur, comp=comp, ex=list(ex), dec=dec, st=st, lk=lk, dup=dup,
-             unl=unl, chg=chg, conf=conf)
+             unl=unl, chg=chg, conf=(0 if conf == -1 else conf))
     ROWS.append(r)
 
 
@@ -131,6 +133,49 @@ scenario('BUY_DONE_THEN_CONSISTENT_SNAPSHOT'); Q(); S('CONFIRMED', DONE, [E('e1'
 scenario('BUY_DONE_THEN_MANUAL_CHANGE'); Q(); S('CONFIRMED', DONE, [E('e1', 0.4)], lk=40, chg=1, conf=1); S('BLOCK', BLK, [E('e1', 0.4)], vcur=0.07, lk=40, chg=1, conf=1)
 scenario('BUY_DONE_THEN_FEWER_EXECUTIONS'); Q(); S('CONFIRMED', DONE, [E('e1', 0.4)], lk=40, chg=1, conf=1); S('PARTIAL', REC, [E('e1', 0.1)], vcur=0.4, lk=10, chg=1, conf=1)
 scenario('BUY_DONE_THEN_UNKNOWN_EVIDENCE'); Q(); S('CONFIRMED', DONE, [E('e1', 0.4)], lk=40, chg=1, conf=1); S('UNKNOWN', REC, [], vcur=0.5, comp=0, chg=1, conf=1)
+
+# ---- review of 7ac7f4b: ONE confirmation per request, also when DONE is lost and regained
+FULL_OK = dict(ex=[E('e1', 0.4)], lk=40)
+scenario('BUY_FULL_THEN_UNKNOWN_THEN_SAME_FULL')
+Q(); S('CONFIRMED', DONE, [E('e1', 0.4)], lk=40, chg=1, conf=1)
+S('UNKNOWN', REC, [], vcur=0.1, comp=0, chg=1, conf=1)
+S('CONFIRMED', DONE, [E('e1', 0.4)], lk=40, chg=1, conf=1)
+scenario('SELL_FULL_THEN_UNKNOWN_THEN_SAME_FULL')
+Q(**QSELL); S('CONFIRMED', DONE, [E('e1', 0.4)], lk=40, chg=1, conf=1)
+S('UNKNOWN', REC, [], vcur=0.1, comp=0, chg=1, conf=1)
+S('CONFIRMED', DONE, [E('e1', 0.4)], lk=40, chg=1, conf=1)
+scenario('BUY_REPEATED_LOSS_AND_REGAIN_CYCLES')
+Q()
+for _i in range(4):
+    S('CONFIRMED', DONE, [E('e1', 0.4)], lk=40, chg=1, conf=1)
+    S('UNKNOWN', REC, [], vcur=0.1, comp=0, chg=1, conf=1)
+scenario('SELL_REPEATED_LOSS_AND_REGAIN_CYCLES')
+Q(**QSELL)
+for _i in range(4):
+    S('CONFIRMED', DONE, [E('e1', 0.4)], lk=40, chg=1, conf=1)
+    S('PARTIAL', REC, [E('e1', 0.1)], vcur=0.4, lk=10, chg=1, conf=1)
+scenario('BUY_LOSS_THEN_PLAIN_REPORT_AND_QUOTES_CANNOT_REGAIN_DONE')
+Q(); S('CONFIRMED', DONE, [E('e1', 0.4)], lk=40, chg=1, conf=1); S('UNKNOWN', REC, [], vcur=0.1, comp=0, chg=1, conf=1)
+R(a.FULL, 0.4, st=REC, conf=1); R(a.TIMEOUT, 0.0, st=REC, conf=1); Q(bid=2003.0, ask=2003.3, vcur=0.1, st=REC, conf=1)
+S('CONFIRMED', DONE, [E('e1', 0.4)], lk=40, chg=1, conf=1)
+scenario('SELL_LOSS_THEN_PLAIN_REPORT_AND_QUOTES_CANNOT_REGAIN_DONE')
+Q(**QSELL); S('CONFIRMED', DONE, [E('e1', 0.4)], lk=40, chg=1, conf=1); S('UNKNOWN', REC, [], vcur=0.1, comp=0, chg=1, conf=1)
+R(a.FULL, 0.4, st=REC, conf=1); Q(d=a.SELL, level=1990.0, bid=1988.0, ask=1988.4, vcur=0.1, st=REC, conf=1)
+S('CONFIRMED', DONE, [E('e1', 0.4)], lk=40, chg=1, conf=1)
+scenario('BUY_BLOCKED_AFTER_LOSS_KEEPS_ONE_CONFIRMATION')
+Q(); S('CONFIRMED', DONE, [E('e1', 0.4)], lk=40, chg=1, conf=1); S('BLOCK', BLK, [E('e1', 0.4)], vcur=0.07, lk=40, chg=1, conf=1)
+S('BLOCK', BLK, [E('e1', 0.4)], lk=0, chg=0, conf=1)
+# ---- review of 7ac7f4b: CONFIRMED needs a complete list; a matching sum of volume does not make the list complete
+scenario('BUY_MATCHING_SUM_BUT_INCOMPLETE_LIST_IS_UNKNOWN')
+Q(); S('UNKNOWN', PEND, [E('e1', 0.4)], lk=40, comp=0); S('CONFIRMED', DONE, [E('e1', 0.4)], lk=40, chg=1, conf=1)
+scenario('SELL_MATCHING_SUM_BUT_INCOMPLETE_LIST_IS_UNKNOWN')
+Q(**QSELL); S('UNKNOWN', PEND, [E('e1', 0.3), E('e2', 0.1)], lk=40, comp=0); S('CONFIRMED', DONE, [E('e1', 0.3), E('e2', 0.1)], lk=40, chg=1, conf=1)
+scenario('BUY_TIMEOUT_THEN_INCOMPLETE_FULL_STAYS_FOR_RECONCILIATION')
+Q(); R(a.TIMEOUT); S('UNKNOWN', REC, [E('e1', 0.4)], lk=40, comp=0); S('CONFIRMED', DONE, [E('e1', 0.4)], lk=40, chg=1, conf=1)
+scenario('BUY_INCOMPLETE_LIST_WITH_DUPLICATE_STILL_UNKNOWN')
+Q(); S('UNKNOWN', PEND, [E('e1', 0.4), E('e1', 0.4)], lk=40, dup=1, comp=0)
+scenario('BUY_INCOMPLETE_FULL_WITH_MANUAL_CHANGE_STILL_BLOCKS')
+Q(); S('BLOCK', BLK, [E('e1', 0.4)], vcur=0.07, comp=0, lk=40, chg=1)
 
 
 def _n(v):

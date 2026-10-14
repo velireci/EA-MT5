@@ -56,13 +56,8 @@ for f in $NEWFILES; do
 done
 echo "  INFO ASCII-only checked for every activation file"
 
-echo "=== S5: nothing else changed relative to $BASE (T001-T010, the split module, the panel, the checklist untouched) ==="
+echo "=== S5: the files the activation must not change are identical to $BASE (the tree has moved on: reconciliation) ==="
 if git cat-file -e "$BASE^{commit}" 2>/dev/null; then
-  changed=$(git diff --name-only "$BASE" -- . ; git ls-files --others --exclude-standard)
-  printf '%s\n' docs/STATE.md tools/t011-static-checks.sh reports/T011-verification.md $NEWFILES > "$NEG/allowed.txt"
-  extra=$(echo "$changed" | sort -u | grep -v '^$' | grep -vxFf "$NEG/allowed.txt" || true)
-  if [ -z "$extra" ]; then echo "  PASS changed/new paths are only the activation files, T011 docs and docs/STATE.md"
-  else echo "$extra" | sed 's/^/  FAIL unexpected change: /'; FAIL=1; fi
   for p in docs/PROJECT_CHECKLIST.md docs/PROJECT_PROGRESS.html src/include/ExitSplit.mqh tests/t011_split_reference.py src/include/PositionSizing.mqh src/include/TradeGeometry.mqh src/include/H4Bias.mqh src/include/H4Structure.mqh src/include/TradePlanning.mqh src/include/NewsSpreadFilters.mqh src/include/SessionPolicy.mqh src/include/BrokerLossCheck.mqh src/include/H4BiasDrawer.mqh src/include/H4BiasLayers.mqh; do
     git diff --quiet "$BASE" -- "$p" && echo "  PASS $p identical to $BASE" || { echo "  FAIL $p differs from $BASE"; FAIL=1; }
   done

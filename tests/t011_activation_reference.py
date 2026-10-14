@@ -210,7 +210,8 @@ def on_report(state, request_id, kind, executed_volume, volume_step):
             return _res('BLOCKED', state, reason='VOLUME_MISMATCH: FULL confirmation of %d steps, requested %d' % (steps, state.request_steps))
         state.status = DONE
         state.executed_steps = steps
-        state.confirmations += 1
+        if state.confirmations < 1:                  # ONE confirmation per request
+            state.confirmations = 1
         state.reason = ''
         return Result('OK')
     if kind == PARTIAL:

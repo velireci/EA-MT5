@@ -29,10 +29,10 @@ def run_rows(mod_act, mod_rec, mods_eq=True):
             res = mod_act.on_quote(st, row['pos'], row['d'], row['level'], row['bid'], row['ask'], row['vinit'], row['vcur'], row['vmin'], row['step'], row['vmax'])
             if res.action != 'NONE' and row['st'] != act.REQUEST_PENDING:
                 bad.append((i, cur, 'unexpected request', res.action))
-            got, exp = (st.status,), (row['st'],)
+            got, exp = (st.status,) + ((st.confirmations,) if row['conf'] >= 0 else ()), (row['st'],) + ((row['conf'],) if row['conf'] >= 0 else ())
         elif row['kind'] == 'R':
             mod_act.on_report(st, row['rid'], row['rkind'], row['rvol'], row['step'])
-            got, exp = (st.status,), (row['st'],)
+            got, exp = (st.status,) + ((st.confirmations,) if row['conf'] >= 0 else ()), (row['st'],) + ((row['conf'],) if row['conf'] >= 0 else ())
         else:
             snap = mod_rec.Snapshot(bool(row['found']), row['pos'], row['rid'], row['step'], row['vcur'],
                                     [mod_rec.Exec(*e) for e in row['ex']], bool(row['comp']))
@@ -70,6 +70,8 @@ class Scenarios(unittest.TestCase):
             act.on_report(st, 'X2R80-7', act.FULL, 0.4, 0.01)
             self.assertEqual(st.status, act.NEEDS_RECONCILIATION)
         o = rec.reconcile(st, rec.Snapshot(True, 7, 'X2R80-7', 0.01, 0.1, [rec.Exec('e1', 'X2R80-7', 0.4)], False))
+        self.assertEqual((o.decision, st.status, st.confirmations), (rec.UNKNOWN, act.NEEDS_RECONCILIATION, 0))        # a matching sum alone is not a complete list
+        o = rec.reconcile(st, rec.Snapshot(True, 7, 'X2R80-7', 0.01, 0.1, [rec.Exec('e1', 'X2R80-7', 0.4)], True))
         self.assertEqual((o.decision, st.status, st.confirmations), (rec.CONFIRMED, act.DONE, 1))
 
     def test_reconcile_never_creates_a_request_or_changes_the_plan(self):
@@ -93,7 +95,7 @@ class Scenarios(unittest.TestCase):
         self.assertEqual(rec.reconcile(st, rec.Snapshot(True, 7, 'X2R80-7', 0.01, 0.33, ex17, False)).decision, rec.INVALID_INPUT)
         self.assertEqual(st, before)
         ex16 = [rec.Exec('e%d' % i, 'X2R80-7', 0.02) for i in range(15)] + [rec.Exec('e15', 'X2R80-7', 0.1)]     # 0.3 + 0.1 = 0.4
-        o = rec.reconcile(st, rec.Snapshot(True, 7, 'X2R80-7', 0.01, 0.1, ex16, False))
+        o = rec.reconcile(st, rec.Snapshot(True, 7, 'X2R80-7', 0.01, 0.1, ex16, True))
         self.assertEqual((o.decision, o.linked_steps, st.status), (rec.CONFIRMED, 40, act.DONE))
 
 
@@ -145,6 +147,40 @@ class Properties(unittest.TestCase):
                     self.assertEqual(o.linked_steps, st.request_steps)
                 self.assertGreaterEqual(o.linked_steps, 0)
 
+    def test_one_confirmation_per_request_over_many_cycles(self):
+        for d, level, bid, ask in ((act.BUY, 2000.0, 2000.0, 2000.3), (act.SELL, 1990.0, 1989.0, 1989.4)):
+            st = act.State()
+            act.on_quote(st, 7, d, level, bid, ask, 0.5, 0.5, 0.01, 0.01, 100.0)
+            full = rec.Snapshot(True, 7, 'X2R80-7', 0.01, 0.1, [rec.Exec('e1', 'X2R80-7', 0.4)], True)
+            lost = rec.Snapshot(True, 7, 'X2R80-7', 0.01, 0.1, [], False)           # Codex repro: no executions, incomplete -> UNKNOWN
+            for cycle in range(25):
+                self.assertEqual(rec.reconcile(st, full).decision, rec.CONFIRMED)
+                self.assertEqual((st.status, st.confirmations), (act.DONE, 1), cycle)
+                self.assertEqual(rec.reconcile(st, full).decision, rec.CONFIRMED)    # same evidence again while DONE
+                self.assertEqual((st.status, st.confirmations), (act.DONE, 1))
+                o = rec.reconcile(st, lost)
+                self.assertEqual((o.decision, st.status, st.confirmations), (rec.UNKNOWN, act.NEEDS_RECONCILIATION, 1), cycle)
+                # the plain report path cannot regain DONE nor change the count
+                act.on_report(st, 'X2R80-7', act.FULL, 0.4, 0.01)
+                self.assertEqual((st.status, st.confirmations), (act.NEEDS_RECONCILIATION, 1))
+
+    def test_report_path_keeps_one_confirmation_when_pending_again(self):
+        # REQUEST_PENDING with an old confirmation is not reachable through the allowed transitions (a request starts at 0);
+        # the guard is checked on a hand-built state anyway
+        st = act.State()
+        act.on_quote(st, 7, act.BUY, 2000.0, 2000.0, 2000.3, 0.5, 0.5, 0.01, 0.01, 100.0)
+        st.confirmations = 1
+        self.assertEqual(act.on_report(st, 'X2R80-7', act.FULL, 0.4, 0.01).event, 'OK')
+        self.assertEqual((st.status, st.confirmations), (act.DONE, 1))
+
+    def test_confirmed_needs_a_complete_list(self):
+        for complete, dec in ((False, rec.UNKNOWN), (True, rec.CONFIRMED)):
+            st = act.State()
+            act.on_quote(st, 7, act.BUY, 2000.0, 2000.0, 2000.3, 0.5, 0.5, 0.01, 0.01, 100.0)
+            o = rec.reconcile(st, rec.Snapshot(True, 7, 'X2R80-7', 0.01, 0.1, [rec.Exec('e1', 'X2R80-7', 0.4)], complete))
+            self.assertEqual(o.decision, dec)
+            self.assertEqual(st.status, act.DONE if complete else act.REQUEST_PENDING)
+
     def test_idempotent_snapshots(self):
         st = act.State()
         act.on_quote(st, 7, act.BUY, 2000.0, 2000.0, 2000.3, 0.5, 0.5, 0.01, 0.01, 100.0)
@@ -189,7 +225,9 @@ class Mutants(unittest.TestCase):
             ('incomplete evidence blocks instead of unknown', [("    if complete:\n        return _block(state, what, **common)", "    if True:\n        return _block(state, what, **common)")]),
             ('blocked state is left', [("    if state.status == act.BLOCKED:\n        return Outcome(BLOCK, 'ALREADY_BLOCKED", "    if False:\n        return Outcome(BLOCK, 'ALREADY_BLOCKED")]),
             ('DONE state kept on bad evidence', [("    if done_before:\n        state.status = act.NEEDS_RECONCILIATION", "    if False:\n        state.status = act.NEEDS_RECONCILIATION")]),
-            ('confirmation counted every time', [("        if done_before:\n            return Outcome(CONFIRMED, 'ALREADY_DONE', **common)", "        if False:\n            return Outcome(CONFIRMED, 'ALREADY_DONE', **common)")]),
+            ('confirmation counted every time DONE is regained', [("        if state.confirmations < 1:                  # ONE confirmation per request, also when DONE was lost and is regained\n            state.confirmations = 1", "        state.confirmations += 1")]),
+            ('incomplete list confirms', [("        if not complete:\n            out = _not_done(state, done_before, linked, 'UNKNOWN: INCOMPLETE_EVIDENCE", "        if False:\n            out = _not_done(state, done_before, linked, 'UNKNOWN: INCOMPLETE_EVIDENCE")]),
+            ('re-check of DONE confirmed again', [("        if done_before:\n            return Outcome(CONFIRMED, 'ALREADY_DONE', **common)", "        if False:\n            return Outcome(CONFIRMED, 'ALREADY_DONE', **common)")]),
             ('execution off the grid accepted', [("        if k < 0:", "        if False:")]),
         ]
         for name, pairs in cases:

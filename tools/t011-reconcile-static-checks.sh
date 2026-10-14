@@ -29,10 +29,11 @@ grep -q 'PS_GridSteps(' $HDR && grep -q '#include "ExitActivation.mqh"' $HDR && 
 for bad in 'EA_OnQuote' 'EA_OnReport' 'ES_Split' 'EA_ACT_REQUEST_PARTIAL_CLOSE' 'EA_RequestId' 'st\.request_steps *=[^=]' 'st\.initial_steps *=[^=]' 'st\.volume_step *=[^=]' 'st\.request_id *=[^=]' 'st\.position_id *=[^=]' 'st\.close_volume *=[^=]'; do
   if grep -qE -- "$bad" $HDR; then echo "  FAIL header contains $bad (it must neither request nor re-plan)"; FAIL=1; else echo "  PASS header does not contain $bad"; fi
 done
-for pat in 'st.status=EA_ST_DONE' 'st.confirmations++' 'linked>req' 'cur!=expected' 'snap.volume_step!=st.volume_step' 'snap.position_id!=st.position_id' 'snap.request_id!=st.request_id' '!snap.position_found' 'EXEC_ID_CONFLICT' 'if(complete)' 'ALREADY_BLOCKED'; do
+for pat in 'st.status=EA_ST_DONE' 'linked>req' 'cur!=expected' 'snap.volume_step!=st.volume_step' 'snap.position_id!=st.position_id' 'snap.request_id!=st.request_id' '!snap.position_found' 'EXEC_ID_CONFLICT' 'if(complete)' 'if(!complete)' 'st.confirmations<1' 'ALREADY_BLOCKED'; do
   grep -qF -- "$pat" $HDR && echo "  PASS header has: $pat" || { echo "  FAIL header lacks: $pat"; FAIL=1; }
 done
 [ "$(grep -c 'st.status=EA_ST_DONE' $HDR)" = "1" ] && echo "  PASS DONE is set in exactly one place" || { echo "  FAIL DONE count"; FAIL=1; }
+[ "$(grep -c 'st.confirmations++\|confirmations+=' $HDR)" = "0" ] && echo "  PASS confirmations is never incremented (set to 1 once per request)" || { echo "  FAIL confirmations incremented"; FAIL=1; }
 
 echo "=== S4: balance, format strings, includes, ASCII ==="
 python3 tools/t001-check-balance.py $HDR $TST || FAIL=1
@@ -62,11 +63,11 @@ echo "  INFO ASCII-only checked for every reconciliation file"
 echo "=== S5: nothing else changed relative to $BASE (T001-T010, the split module, the panel, the checklist untouched) ==="
 if git cat-file -e "$BASE^{commit}" 2>/dev/null; then
   changed=$(git diff --name-only "$BASE" -- . ; git ls-files --others --exclude-standard)
-  printf '%s\n' docs/STATE.md reports/T011-verification.md $NEWFILES > "$NEG/allowed.txt"
+  printf '%s\n' docs/STATE.md reports/T011-verification.md src/include/ExitActivation.mqh tests/t011_activation_reference.py tools/t011-activation-static-checks.sh $NEWFILES > "$NEG/allowed.txt"
   extra=$(echo "$changed" | sort -u | grep -v '^$' | grep -vxFf "$NEG/allowed.txt" || true)
-  if [ -z "$extra" ]; then echo "  PASS changed/new paths are only the reconciliation files, T011 docs and docs/STATE.md"
+  if [ -z "$extra" ]; then echo "  PASS changed/new paths are only the reconciliation files, the one-confirmation guard in ExitActivation, T011 docs and docs/STATE.md"
   else echo "$extra" | sed 's/^/  FAIL unexpected change: /'; FAIL=1; fi
-  for p in docs/PROJECT_CHECKLIST.md docs/PROJECT_PROGRESS.html src/include/ExitSplit.mqh src/include/ExitActivation.mqh tests/t011_split_reference.py tests/t011_activation_reference.py src/include/PositionSizing.mqh src/include/TradeGeometry.mqh src/include/H4Bias.mqh src/include/H4Structure.mqh src/include/TradePlanning.mqh src/include/NewsSpreadFilters.mqh src/include/SessionPolicy.mqh src/include/BrokerLossCheck.mqh src/include/H4BiasDrawer.mqh src/include/H4BiasLayers.mqh; do
+  for p in docs/PROJECT_CHECKLIST.md docs/PROJECT_PROGRESS.html src/include/ExitSplit.mqh tests/t011_split_reference.py src/include/PositionSizing.mqh src/include/TradeGeometry.mqh src/include/H4Bias.mqh src/include/H4Structure.mqh src/include/TradePlanning.mqh src/include/NewsSpreadFilters.mqh src/include/SessionPolicy.mqh src/include/BrokerLossCheck.mqh src/include/H4BiasDrawer.mqh src/include/H4BiasLayers.mqh; do
     git diff --quiet "$BASE" -- "$p" && echo "  PASS $p identical to $BASE" || { echo "  FAIL $p differs from $BASE"; FAIL=1; }
   done
 else
