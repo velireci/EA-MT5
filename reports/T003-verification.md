@@ -502,3 +502,10 @@ See tasks section 14.3 (statement | case | A | B | which agrees | note). Result:
 
 ### 18.6 Not verified
 MetaEditor compilation and MT5 (not available and not involved); real candles; the client's agreement with any of A, B or SP1; equivalence of SP1 with A beyond the 12 SELL cases; behaviour on random or real series (B was not run there); that the case shapes resemble the client's pictures (they do not use them). B is a diagnostic, not a candidate. Next action: Codex reviews tasks section 14 and this section before any algorithm change.
+
+
+## 19. Internal liquidity selection: the 2026.09.25 12:00 example (2026-10-14; parent's scratchpad run on the owner's private CSV; model only; product logic NOT changed; proposal in tasks/T003-h4-bias-change.md section 15)
+- Facts from the CSV (MT5 server time; the CSV is not in the repository): see tasks 15.1. The 12:00 candle crossed the known swing high 4303.22 with its high 4315.66 and closed at 4298.04; the model raised no event; from 09.24 20:00 to 09.25 16:00 the state has no interior candidate; the candidate becomes 4315.66 (the wick's own high) only from 09.25 20:00.
+- Correction of my first chat answer: I had read stale `li_*` fields (the previous candidate, 4371.20) as the current interior candidate. `has_lint` was false. The cause of the missing event is the selector definition (one candidate anchored after the pivot of the latest extreme), not a collision with the protecting level.
+- Demonstration of the proposed rule (scratchpad, 15.5): INTERNAL_SWEEP on that bar, no look-ahead on two prefixes, one consumption per level, 69 events (38 sweeps, 31 breaks) over the series.
+- Evidence by source: facts = parent's run; client interpretation = relayed by the owner; the proposal = technical. Not verified: MetaEditor/MT5 behaviour of any such rule (nothing implemented), the equality of the MT5 candle with the client's TradingView candle, the client's agreement.
