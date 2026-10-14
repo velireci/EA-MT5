@@ -5,9 +5,11 @@ Updated: 2026-10-14 (Europe/Tirane). Snapshot, not a transcript.
 - Codex is the sole writer for the first T004 round, authorised by the owner while Claude is paused.
 - T004 branch: codex/t004-m15-confirmation, based on exact T003 commit 6676a01b63992261b63a9938ace17300658a012f.
 - Read tasks/T004-m15-confirmation.md and reports/T004-verification.md before continuing.
-- Delivered scope: pure H4-to-M15 observer, explicit external level interface and T003 context adapter. No automatic M15 structural selector, multi-timeframe EA integration or trading.
+- Delivered scope: pure H4-to-M15 observer, external level interface, T003 context adapter and a separate disabled-by-default experimental latest-unbroken-fractal candidate selector. No live multi-timeframe EA integration or trading.
 - Default source and timing gates block. The opt-in FVG timing proposal is candle A at/after BOS candle. RETURN_OBSERVED is not entry permission.
-- Next action: owner runs the compiled T004_LogicTest in MT5; reviewer checks the new module. Then define the M15 structural selector/timing proposal and live integration without silently choosing between T002/T003.
+- Owner ran T004_LogicTest-51884ec in MT5: 49 passed, 0 failed (2026.10.14 14:21:21.639, relayed). Observer/bridge/source script remain unchanged since that version.
+- Selector round: Codex Python 56/0 (33 observer + 23 selector); MetaEditor T004_SelectorTest 0 errors / 0 warnings. Selector MT5 execution pending. Independent review found no actionable defect in the selector scope.
+- Next action: owner runs T004_SelectorTest in MT5. Then review M15 structural selection/timing and integrate a chronological observer without silently choosing between T002/T003. Q04 remains open; a fractal candidate is not client approval.
 - Claude must switch to this branch only after handoff; do not continue writing T004 on the T003 branch.
 
 ## Verified T003 baseline: 6676a01

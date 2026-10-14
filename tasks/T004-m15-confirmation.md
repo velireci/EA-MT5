@@ -1,6 +1,6 @@
 # T004 - H4 to M15 confirmation foundation
 
-Status: FIRST BOUNDED ROUND IMPLEMENTED; MT5 execution pending. Base 6676a01; branch codex/t004-m15-confirmation. Owner authorised Codex as sole writer on 2026-10-14 while Claude is paused. No changes to T001-T003 source or existing tests/tools. No merge or trading.
+Status: FIRST BOUNDED ROUND VERIFIED IN MT5: owner 49 passed, 0 failed at 51884ec. Experimental selector round in progress. Base 6676a01; branch codex/t004-m15-confirmation. Owner authorised Codex as sole writer on 2026-10-14 while Claude is paused. No changes to T001-T003 source or existing tests/tools. No merge or trading.
 
 ## Confirmed flow
 H4 context/FVG -> wick touch allowed -> wait for the touching H4 candle to close -> new M15 structure break -> M15 FVG -> return. After a liquidity event the existing requirement for a new H4 FVG stands. M5 is removed. Sources: DECISIONS S5/E6/N4/N5.
@@ -24,3 +24,12 @@ SELL/BUY mirrors; H4/M15 boundary; future/unclosed data; missing or future level
 
 ## Remaining integration
 Automatic M15 structural level selection and chosen timing policy need separate review. H4 normal-flow touch observer, chronological multi-timeframe orchestration, live baselining and chart display are not supplied here. T003 bias can disagree with HH/HL structure; this task does not resolve it. No order-ready flag exists.
+
+## Second bounded round: experimental swing candidate (Q04 stays open)
+The owner authorised continuing after the 49/0 MT5 run. Implement an additive, explicitly disabled-by-default candidate selector. Reuse the existing strict Left/Right swing mathematics (default 2/2, configurable 1..10); do not claim that a fractal is the client's structural swing. Alternatives considered: external level only (first round, no automatic candidate), latest confirmed unbroken swing (this isolated proposal), a multi-leg structural selector (not selected because no client definition is available).
+
+BUY considers swing highs; SELL considers swing lows. At the evaluated M15 bar's open, use ONLY the earlier closed-bar prefix. Select the latest confirmed swing of that side whose price has not already been exceeded by a prior body close. Wick and equality do not consume it. Older eligible swings can be selected if a newer one was consumed. No level means no BOS candidate.
+
+Search a bounded lookback (default 300, at least Left+Right+1, at most 1000) within the last contiguous M15 segment. Report the actual window start, pivot/confirmation and ambiguous count. Never create a swing across missing intervals. Short history, malformed input and no level are distinct statuses. More history may reveal an older candidate: bounded coverage is not full-history certainty. No new A/B guarantee is claimed.
+
+The selector neither mutates the H4/M15 observer nor selects direction. Caller passes the result to M4Step only after selecting source and FVG timing. Pre-context M15 swings may provide a level, but the BOS bar must still open after context activation. This round includes synthetic full-path tests selector -> BOS -> FVG -> return for both directions. No live EA, order permission or client-approved MSS claim.
