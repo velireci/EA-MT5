@@ -2,18 +2,14 @@
 Updated: 2026-10-14 (Europe/Tirane). Snapshot, not a transcript.
 
 ## Resume here
-- Codex is the sole writer for the first T004 round, authorised by the owner while Claude is paused.
-- T004 branch: codex/t004-m15-confirmation, based on exact T003 commit 6676a01b63992261b63a9938ace17300658a012f.
-- Read tasks/T004-m15-confirmation.md and reports/T004-verification.md before continuing.
-- Delivered scope: pure H4-to-M15 observer, external level interface, T003 adapter, disabled-by-default swing proposal and a separate chronological read-only observer EA. Only T003 RECONFIRMED contexts are integrated; ordinary H4 touch path remains unfinished. No trading.
-- Default source and timing gates block. The opt-in FVG timing proposal is candle A at/after BOS candle. RETURN_OBSERVED is not entry permission.
-- Owner ran T004_LogicTest-51884ec in MT5: 49 passed, 0 failed (2026.10.14 14:21:21.639, relayed). Observer/bridge/source script remain unchanged since that version.
-- Owner ran T004_SelectorTest-786568a in MT5: 37 passed, 0 failed (2026.10.14 14:32:33.054, relayed).
-- Current round: Codex Python 66/0; MetaEditor T004_TimelineTest and XauUsdM15Observer each 0 errors / 0 warnings. Read-only review found a missing current-level drawing; fixed and re-reviewed with no outstanding concrete findings.
-- Next action: owner runs TimelineTest in MT5, then attaches XauUsdM15Observer on a new XAUUSD M15 chart for historical 2026.10.06 00:00, explicitly opting into all three proposals. EA runtime/chart/loading/recovery and replay cost are UNVERIFIED.
-- All EA events are REPLAY facts, never NEW or entry permission. Historical mode is static after successful copy; live replays on boundaries/recovery. Q04 remains open; a fractal candidate is not client approval. See docs/T004-m15.md for settings and limits.
-- Owner TimelineTest-cfa5f00: 19/0. Historical EA observed RETURN_OBSERVED, H4 BEAR/RECONFIRMED/CONVERGED, BOS4152, 69 facts/8 FVGs, 3531ms. Switching H4->M15 exposed an actual restart-cache defect (empty context with stale BOS). EA v1.01 fixes full OnInit/cache reset; Python67/0, re-reviewed. Updated TimelineTest and actual chart-switch retest pending. No strategy change.
-- Claude must switch to this branch only after handoff; do not continue writing T004 on the T003 branch.
+- T004 branch codex/t004-m15-confirmation (PR #4) on exact T003 commit 6676a01. T001-T003 logic/tests/tools byte-identical to 6676a01 (checked by tools/t004-static-checks.sh).
+- Read tasks/T004-m15-confirmation.md (four rounds, decision inventory) and reports/T004-verification.md first.
+- Delivered: pure H4-to-M15 observer, disabled-by-default M15 swing proposal, chronological read-only EA XauUsdM15Observer v1.02, and (round 4) the ORDINARY H4 FVG-touch context source H4TouchContext.mqh, distinct from the T003 RECONFIRMED source. No orders, SL/TP, risk or M5. All events are REPLAY facts; RETURN_OBSERVED is not entry permission.
+- Four opt-ins, all UNSELECTED by default: context source (T003 RECONF, or ordinary T002 touch with AFTER_LOSS / FIRST_ONLY re-touch policy), M15 level (latest fractal), FVG timing (A at/after BOS). Ordinary source rules are TECHNICAL PROPOSALS (open decisions OD1-OD6 in the task file). T002/T003 direction disagreement is flagged, never resolved. Q04 stays open.
+- Relayed owner MT5 evidence (not our runs): LogicTest 49/0 at 51884ec; SelectorTest 37/0 at 786568a; TimelineTest 19/0 at cfa5f00; EA eedbe92 historical 2026.10.06: H4 BEAR/RECONFIRMED/CONVERGED, RETURN_OBSERVED, BOS 4152.00, 8 FVGs, 69 facts, survived M15->H4->M15 (rebuild after timeframe change verified, not strategy validity). Codex relayed: Python 67 tests, EA and updated Timeline script compile 0/0; updated TimelineTest MT5 run pending.
+- Round 4 executed in this environment: Python 94 tests (67 + 27 new) pass; T001-T003 checks rerun; no C++ compiler. MetaEditor compile of EA v1.02, H4TouchContext.mqh and T004_OrdinaryTest.mq5: UNVERIFIED. MT5 runs UNVERIFIED.
+- Next action: Codex compiles XauUsdM15Observer, T004_OrdinaryTest and the updated T004_TimelineTest in MetaEditor; the owner runs both scripts in MT5, then observes the EA historically with source 2 or 3 plus the other two opt-ins. Replay cost of the ordinary scan is unmeasured.
+- Claude must not continue T004 writing on the T003 branch.
 
 ## Verified T003 baseline: 6676a01
 - Codex MetaEditor: XauUsdH4Bias, T003_LogicTest and T003_LayersTest each 0 errors / 0 warnings.

@@ -1,11 +1,15 @@
 // Read-only T004 prototype. Closed-bar REPLAY facts, NOT trading signals.
 #property strict
-#property version "1.01"
+#property version "1.02"
 #include "include/TimeframeWatcher.mqh"
 #include "include/H4M15Bridge.mqh"
+#include "include/H4TouchContext.mqh"
 #include "include/M15Timeline.mqh"
 
-enum ENUM_M4_SOURCE {M4_SOURCE_UNSELECTED=0,M4_T003_RECONF_PROPOSAL=1};
+// Two DISTINCT context sources, never combined or prioritised. All choices default UNSELECTED.
+// 2/3 are the ordinary H4 FVG-touch path (T002 rules, PROPOSAL); they differ only in the re-touch policy.
+enum ENUM_M4_SOURCE {M4_SOURCE_UNSELECTED=0,M4_T003_RECONF_PROPOSAL=1,
+                      M4_T002_TOUCH_AFTER_LOSS_PROPOSAL=2,M4_T002_TOUCH_FIRST_ONLY_PROPOSAL=3};
 enum ENUM_M4_SELECTOR {M4_LEVEL_UNSELECTED=0,M4_LATEST_FRACTAL_PROPOSAL=1};
 enum ENUM_M4_TIMING {M4_TIMING_UNSELECTED=0,M4_A_AFTER_BOS_PROPOSAL=1};
 input ENUM_M4_SOURCE InpContextSource=M4_SOURCE_UNSELECTED;
@@ -16,6 +20,7 @@ input int InpH4RebuildBars=2000;
 input int InpH4LookbackBars=300;
 input int InpH4LeftBars=2;
 input int InpH4RightBars=2;
+input int InpOrdinaryWarmBars=120;          // ordinary source: H4 closes scanned before the replay start
 input int InpM15ReplayBars=512;
 input int InpM15LookbackBars=300;
 input int InpM15LeftBars=2;
@@ -30,6 +35,9 @@ SM4State g_state;
 SM4Candidate g_fvgs[];
 SM4Event g_events[];
 SM4TimelineInfo g_info;
+SM4OrdInfo g_ord;
+string g_notes[];
+string g_open_t003="-",g_agree_open="-",g_agree_now="-";
 SM4Selection g_current;
 MqlRates g_mbars[],g_hbars[];
 SM4ContextUpdate g_updates[];
@@ -41,6 +49,18 @@ uint g_duration=0;
 string PREFIX="velo_t004_";
 
 string Stamp(const datetime t) {return(t>0 ? TimeToString(t,TIME_DATE|TIME_MINUTES) : "-");}
+bool Ordinary() {return(InpContextSource==M4_T002_TOUCH_AFTER_LOSS_PROPOSAL || InpContextSource==M4_T002_TOUCH_FIRST_ONLY_PROPOSAL);}
+string SourceId()
+  {
+   if(Ordinary()) return(M4_SRC_T002_TOUCH);
+   return(InpContextSource==M4_T003_RECONF_PROPOSAL ? M4_SRC_T003 : "NONE SELECTED");
+  }
+void ResetOrdinary()
+  {
+   ZeroMemory(g_ord);g_ord.status="-";
+   ArrayResize(g_notes,0);
+   g_open_t003="-";g_agree_open="-";g_agree_now="-";
+  }
 void Clear(const string reason)
   {
    if(g_problem!=reason) Print("T004 CLEARED: ",reason,". REPLAY only, no NEW events or orders.");
@@ -49,6 +69,7 @@ void Clear(const string reason)
    g_info.status=reason;
    g_current.status="DISABLED";M4NoLevel(g_current.level);
    g_h4_status="-";g_t2="UNKNOWN";g_h4_bias="UNKNOWN";
+   ResetOrdinary();
    ObjectsDeleteAll(0,PREFIX);
   }
 
@@ -74,11 +95,18 @@ int CopyClosed(const ENUM_TIMEFRAMES tf,const datetime cut,const int want,MqlRat
    return(ArraySize(out));
   }
 
+// T003 view of the first n closed H4 bars (prefix only).
+void T003View(const int n,SH3Eval &ev,SH3SetupCtx &c)
+  {
+   SH3Track tracks[];SH3Event events[];
+   H3Evaluate(g_hbars,n,g_params,ev,tracks,events);
+   H3SetupContext(ev.st,tracks,ev.nt,c);
+  }
+
 void Snapshot(const int n,const datetime known)
   {
-   SH3Eval ev;SH3Track tracks[];SH3Event events[];
-   H3Evaluate(g_hbars,n,g_params,ev,tracks,events);
-   SH3SetupCtx c;H3SetupContext(ev.st,tracks,ev.nt,c);
+   SH3Eval ev;SH3SetupCtx c;
+   T003View(n,ev,c);
    int k=ArraySize(g_updates);ArrayResize(g_updates,k+1,64);
    g_updates[k].known=known;
    M4ContextFromH3(c,ev.reliable,g_updates[k].context,InpContextSource==M4_T003_RECONF_PROPOSAL);
@@ -98,21 +126,43 @@ bool Build(const datetime cut)
    int first=nm-InpM15ReplayBars;
    g_replay_start=g_mbars[first].time;
    int extra=(int)((cut-g_replay_start+14399)/14400)+2;
-   int depth=(int)MathMin(10000,MathMax(g_params.rebuild,3*g_params.lookback)+extra);
+   bool ordinary=Ordinary();
+   int need=(int)MathMax(g_params.rebuild,3*g_params.lookback);
+   if(ordinary) need=(int)MathMax(need,InpH4LookbackBars+InpOrdinaryWarmBars);
+   int depth=(int)MathMin(10000,need+extra);
    int nh=CopyClosed(PERIOD_H4,cut,depth,g_hbars);
    if(nh<=0) {Clear("H4 copy not ready");return(false);}
    if(InpAsOfTime==0 && g_hbars[nh-1].time!=g_h4.ClosedOpenTime())
      {Clear("H4 boundary changed during copy");return(false);}
    int initial=H4ClosedCountAsOf(g_hbars,nh,g_replay_start,14400);
-   if(initial<g_params.rebuild)
-     {Clear("H4 replay history loading: "+IntegerToString(initial)+" / "+IntegerToString(g_params.rebuild));return(false);}
+   int h4_need=(ordinary ? InpH4LookbackBars+InpOrdinaryWarmBars : g_params.rebuild);
+   if(initial<h4_need)
+     {Clear("H4 replay history loading: "+IntegerToString(initial)+" / "+IntegerToString(h4_need));return(false);}
    ArrayResize(g_updates,0);
-   Snapshot(initial,g_replay_start);
-   for(int i=initial;i<nh;i++)
+   ResetOrdinary();
+   if(!ordinary)
      {
-      datetime known=g_hbars[i].time+14400;
-      if(known>cut) break;
-      Snapshot(i+1,known);           // prefix only, never the final H4 state for earlier M15
+      Snapshot(initial,g_replay_start);
+      for(int i=initial;i<nh;i++)
+        {
+         datetime known=g_hbars[i].time+14400;
+         if(known>cut) break;
+         Snapshot(i+1,known);           // prefix only, never the final H4 state for earlier M15
+        }
+     }
+   else
+     {
+      // Ordinary H4 FVG-touch path: pure chronological scan (prefix windows only). T003 is evaluated
+      // below for DISPLAY and the disagreement flag; it never feeds or overrides this source.
+      int retouch=(InpContextSource==M4_T002_TOUCH_FIRST_ONLY_PROPOSAL ? M4_RETOUCH_FIRST_ONLY : M4_RETOUCH_AFTER_LOSS);
+      M4OrdinaryScan(g_hbars,nh,initial-InpOrdinaryWarmBars,g_params.left,g_params.right,
+                     InpH4LookbackBars,retouch,g_updates,g_notes,g_ord);
+      if(g_ord.status!="OK") {Clear("ordinary scan "+g_ord.status);return(false);}
+      SH3Eval fe;SH3SetupCtx fc;
+      T003View(nh,fe,fc);
+      g_h4_depth=fe.r_eff;
+      g_h4_bias=H3ReportedDirection(fe);
+      g_h4_status=g_h4_bias+" / "+H3PhaseName(fe.st.phase)+" / "+H3FlagName(fe.flag);
      }
    MqlRates base[];ArrayResize(base,g_params.lookback);
    ArrayCopy(base,g_hbars,0,nh-g_params.lookback,g_params.lookback);
@@ -129,12 +179,33 @@ bool Build(const datetime cut)
    M4SelectSwingProposal(g_mbars,nm,g_state.context.direction,g_current,
                          g_state.has_context && InpM15Level==M4_LATEST_FRACTAL_PROPOSAL &&
                          policy==M4_A_AT_OR_AFTER_BREAK,InpM15LeftBars,InpM15RightBars,InpM15LookbackBars);
+   if(ordinary && g_state.has_context)
+     {
+      SH3Eval oe;SH3SetupCtx oc;
+      T003View(H4ClosedCountAsOf(g_hbars,nh,g_state.context.valid_from,14400),oe,oc);
+      g_open_t003=H3ReportedDirection(oe);
+      g_agree_open=M4DirectionAgreement(g_state.context.direction,g_open_t003);
+     }
+   g_agree_now=M4DirectionAgreement(g_state.has_context ? g_state.context.direction : 0,
+                                    ordinary ? g_h4_bias : g_t2);
    g_duration=GetTickCount()-began;
    g_cut=cut;g_built=true;g_problem="";
    PrintFormat("T004 REPLAY SUMMARY | cut %s | M15 phase %s | H4 %s | T002 %s | replay %d bars from %s | %d facts | %u ms. No NEW events, no orders.",
                Stamp(cut),g_state.phase,g_h4_status,g_t2,g_info.processed,Stamp(g_replay_start),ArraySize(g_events),g_duration);
    Print("T004 REPLAY CONTEXT | ",g_state.context.setup," | H4 FVG ",g_state.context.fvg,
          " | eligible ",Stamp(g_state.context.valid_from)," | selected source ",g_state.context.source);
+   if(ordinary)
+     {
+      PrintFormat("T004 REPLAY ORDINARY | %d H4 closes from %s | %d records %d revoked %d replaced | T003 at touch %s [%s] now %s [%s]. Disagreement is flagged, never resolved.",
+                  g_ord.steps,Stamp(g_hbars[initial-InpOrdinaryWarmBars].time),g_ord.opened,g_ord.closed,g_ord.replaced,
+                  g_open_t003,g_agree_open,g_h4_bias,g_agree_now);
+      int nn=ArraySize(g_notes);
+      for(int i=(int)MathMax(0,nn-InpRecentLogEvents);i<nn;i++)
+         Print("T004 REPLAY H4TOUCH | known ",Stamp(g_updates[i].known)," | ",g_notes[i]," | ",g_updates[i].context.fvg);
+     }
+   else
+      PrintFormat("T004 REPLAY T003 CONTEXT | context vs T002 baseline %s [%s]. Disagreement is flagged, never resolved.",
+                  g_t2,g_agree_now);
    int ne=ArraySize(g_events);
    for(int i=(int)MathMax(0,ne-InpRecentLogEvents);i<ne;i++)
       Print("T004 REPLAY FACT | ",g_events[i].type," bar ",Stamp(g_events[i].time),
@@ -197,9 +268,12 @@ void Draw()
    ObjectSetInteger(0,bg,OBJPROP_XSIZE,width);ObjectSetInteger(0,bg,OBJPROP_YSIZE,height);
    ObjectSetInteger(0,bg,OBJPROP_BGCOLOR,C'16,20,26');ObjectSetInteger(0,bg,OBJPROP_BORDER_COLOR,clrDimGray);
    ObjectSetInteger(0,bg,OBJPROP_SELECTABLE,false);
-   Line(0,"T004 T003-RECONFIRMATION -> M15 PROPOSAL - NO TRADING",clrYellow,width,height);
+   string title=(Ordinary() ? "T004 ORDINARY H4 FVG TOUCH (T002) -> M15 PROPOSAL - NO TRADING" :
+                 (InpContextSource==M4_T003_RECONF_PROPOSAL ? "T004 T003-RECONFIRMATION -> M15 PROPOSAL - NO TRADING" :
+                  "T004 NO CONTEXT SOURCE SELECTED - NO TRADING"));
+   Line(0,title,clrYellow,width,height);
    Line(1,(InpAsOfTime>0 ? "HISTORICAL server as-of " : "LIVE closed-bar REPLAY ")+Stamp(g_cut),clrAqua,width,height);
-   Line(2,"Source "+EnumToString(InpContextSource),clrSilver,width,height);
+   Line(2,"Source "+EnumToString(InpContextSource)+" ["+SourceId()+"]",clrSilver,width,height);
    Line(3,"M15 level "+EnumToString(InpM15Level),clrSilver,width,height);
    Line(4,"FVG timing "+EnumToString(InpFvgTiming),clrSilver,width,height);
    if(!g_built) {Line(5,g_problem,clrOrange,width,height);ChartRedraw();return;}
@@ -210,7 +284,19 @@ void Draw()
    Line(9,"Replay "+IntegerToString(g_info.processed)+" M15 bars from "+Stamp(g_replay_start),clrSilver,width,height);
    Line(10,"FVG candidates "+IntegerToString(ArraySize(g_fvgs))+" | facts "+IntegerToString(ArraySize(g_events)),clrSilver,width,height);
    bool disagree=(g_t2=="BULLISH" && g_h4_bias=="BEAR") || (g_t2=="BEARISH" && g_h4_bias=="BULL");
-   Line(11,(disagree ? "MODEL DISAGREEMENT: " : "T002 baseline: ")+g_t2+" | T003 prototype "+g_h4_bias,(disagree ? clrTomato : clrSilver),width,height);
+   if(Ordinary())
+     {
+      bool differ=(g_agree_open=="DISAGREE" || g_agree_now=="DISAGREE");
+      string side=(!g_state.has_context ? "none" : (g_state.context.direction>0 ? "BUY" : "SELL"));
+      Line(11,(differ ? "SOURCE DISAGREEMENT: " : "T003 view: ")+"T002 touch "+side+" | T003 at touch "+g_open_t003+" ["+g_agree_open+"] now "+g_h4_bias+" ["+g_agree_now+"]",
+           (differ ? clrTomato : clrSilver),width,height);
+      Line(13,"Touch scan: "+IntegerToString(g_ord.steps)+" H4 closes | "+IntegerToString(g_ord.opened)+" records, "+IntegerToString(g_ord.closed)+" revoked, "+IntegerToString(g_ord.replaced)+" replaced",clrSilver,width,height);
+     }
+   else
+     {
+      bool ctxdiff=(g_agree_now=="DISAGREE");
+      Line(11,(disagree || ctxdiff ? "MODEL DISAGREEMENT: " : "T002 baseline: ")+g_t2+" | T003 prototype "+g_h4_bias+" | ctx vs T002 ["+g_agree_now+"]",(disagree || ctxdiff ? clrTomato : clrSilver),width,height);
+     }
    Line(12,"REPLAY facts only. RETURN_OBSERVED is NOT entry permission.",clrOrange,width,height);
    ChartRedraw();
   }
@@ -231,6 +317,7 @@ int OnInit()
   {
    // On a timeframe change MT5 can retain globals from the preceding instance.
    M4ResetReplay(g_state,g_fvgs,g_events,g_info,g_built,g_cut);
+   ResetOrdinary();
    g_problem="initialising";g_h4_status="-";g_t2="UNKNOWN";g_h4_bias="UNKNOWN";
    g_replay_start=0;g_h4_depth=0;g_duration=0;
    ZeroMemory(g_current);g_current.status="DISABLED";
@@ -241,6 +328,7 @@ int OnInit()
       InpH4LeftBars<1 || InpH4LeftBars>10 || InpH4RightBars<1 || InpH4RightBars>10 ||
       InpM15LeftBars<1 || InpM15LeftBars>10 || InpM15RightBars<1 || InpM15RightBars>10 ||
       InpM15LookbackBars<InpM15LeftBars+InpM15RightBars+1 || InpM15LookbackBars>1000 ||
+      InpOrdinaryWarmBars<10 || InpOrdinaryWarmBars>1000 ||
       InpM15ReplayBars<16 || InpM15ReplayBars>5000 || InpPollSeconds<1 || InpPollSeconds>60 ||
       InpMaxFvgs<0 || InpMaxFvgs>30 || InpRecentLogEvents<0 || InpRecentLogEvents>20)
      {Print("T004 INIT FAILED: invalid inputs (see docs/T004-m15.md).");return(INIT_PARAMETERS_INCORRECT);}
@@ -248,7 +336,7 @@ int OnInit()
    g_params.left=InpH4LeftBars;g_params.right=InpH4RightBars;
    g_h4.Configure(_Symbol,PERIOD_H4,3);g_m15.Configure(_Symbol,PERIOD_M15,3);
    Print("T004 read-only observer. Three explicit proposal opt-ins, no order functions. All events are REPLAY, never NEW.");
-   Print("T004 currently connects T003 RECONFIRMED contexts only; ordinary H4 touch integration remains unfinished.");
+   Print("T004 context sources (distinct, never combined): T003_PROTOTYPE RECONFIRMED, or T002_H4_TOUCH_PROPOSAL ordinary H4 FVG touch. Source selected: ",EnumToString(InpContextSource));
    if(!EventSetTimer(InpPollSeconds)) return(INIT_FAILED);
    Poll();return(INIT_SUCCEEDED);
   }
