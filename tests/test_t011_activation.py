@@ -136,6 +136,34 @@ class Properties(unittest.TestCase):
                     self.assertEqual(st.confirmations, 1)
             self.assertLessEqual(actions, 1)
 
+    def test_request_step_is_stored_and_used(self):
+        for d, level, bid, ask in ((a.BUY, 2000.0, 2000.0, 2000.3), (a.SELL, 1990.0, 1989.0, 1989.4)):
+            st = a.State()
+            res = a.on_quote(st, 7, d, level, bid, ask, 0.5, 0.5, 0.01, 0.01, 100.0)
+            self.assertEqual((res.request_steps, round(res.request_volume, 12), st.volume_step), (40, 0.4, 0.01))
+            res = a.on_report(st, 'X2R80-7', a.FULL, 0.04, 0.001)         # the Codex defect: 0.04 lot on 0.001 is also 40 steps
+            self.assertEqual((res.event, st.status, st.confirmations), ('BLOCKED', a.BLOCKED, 0))
+            self.assertIn('STEP_CHANGED', res.reason)
+
+    def test_invalid_first_quote_binds_nothing(self):
+        base = dict(position_id=7, direction=a.BUY, level_2r=2000.0, bid=1999.0, ask=1999.3, volume_initial=0.1, volume_current=0.1,
+                    volume_min=0.01, volume_step=0.01, volume_max=100.0)
+        for key, bad in (('volume_step', 0.0), ('volume_step', float('nan')), ('volume_min', 0.0), ('volume_max', 0.0),
+                         ('volume_max', float('inf')), ('volume_min', 0.015), ('volume_max', 5.005), ('volume_initial', 0.105)):
+            for d, level in ((a.BUY, 2000.0), (a.SELL, 1990.0)):
+                st = a.State()
+                kw = dict(base, direction=d, level_2r=level, **{key: bad})
+                if key == 'volume_initial':
+                    kw['volume_current'] = bad
+                res = a.on_quote(st, **kw)
+                self.assertEqual(res.event, 'INVALID_INPUT', (key, bad))
+                self.assertEqual((st.bound, st.status, st.position_id, st.volume_initial, st.volume_step), (False, a.IDLE, 0, 0.0, 0.0))
+        st = a.State()
+        a.on_quote(st, **dict(base, volume_max=float('nan')))
+        self.assertFalse(st.bound)
+        self.assertEqual(a.on_quote(st, **dict(base, position_id=8)).event, 'OK')
+        self.assertEqual(st.position_id, 8)
+
     def test_state_is_only_what_the_caller_passes(self):
         st1, st2 = a.State(), a.State()
         a.on_quote(st1, 7, a.BUY, 2000.0, 2000.0, 2000.3, 0.1, 0.1, 0.01, 0.01, 100.0)
@@ -161,6 +189,20 @@ class Mutants(unittest.TestCase):
             setattr(m, k, v)
         return m
 
+    def _mutant2(self, old, new, old2, new2):
+        src = _read('tests', 't011_activation_reference.py')
+        self.assertIn(old, src)
+        self.assertIn(old2, src)
+        ns = {'__name__': 't011_mutant2'}
+        exec(compile(src.replace(old, new, 1).replace(old2, new2, 1), 't011_mutant2', 'exec'), ns)
+
+        class M:
+            pass
+        m = M()
+        for k, v in ns.items():
+            setattr(m, k, v)
+        return m
+
     def test_mutants_are_caught(self):
         cases = [
             ('BUY uses ask', "(bid >= level_2r) if direction == BUY else (ask <= level_2r)", "(ask >= level_2r) if direction == BUY else (ask <= level_2r)"),
@@ -177,11 +219,18 @@ class Mutants(unittest.TestCase):
             ('volume mismatch ignored after DONE', "if cur != expected:", "if False:"),
             ('identity not checked', "elif (state.position_id, state.direction, state.level, state.volume_initial) != (position_id, direction, level_2r, volume_initial):", "elif False:"),
             ('request id not stable', "return 'X2R80-%d' % position_id", "return 'X2R80-%d' % (position_id + len(str(position_id)))"),
+            ('report step not compared with the request step', "    if volume_step != state.volume_step:\n        state.status = BLOCKED", "    if False:\n        state.status = BLOCKED"),
+            ('the Codex defect: no step comparison and the volume converted on the reported step', "    if volume_step != state.volume_step:\n        state.status = BLOCKED\n        return _res('BLOCKED', state, reason='STEP_CHANGED: report step", "    if False:\n        state.status = BLOCKED\n        return _res('BLOCKED', state, reason='STEP_CHANGED: report step"),
+            ('quote step change after DONE ignored', "    if volume_step != state.volume_step:\n        state.status = NEEDS_RECONCILIATION", "    if False:\n        state.status = NEEDS_RECONCILIATION"),
+            ('invalid volume parameters bind the identity', "    sp = es.split(volume_initial, volume_min, volume_step, volume_max)\n    if sp.status == es.INVALID_INPUT:\n        return Result('INVALID_INPUT', reason='SPLIT_' + sp.reason)\n    # 2 stop states", "    sp = es.split(volume_initial, volume_min, volume_step, volume_max)\n    # 2 stop states"),
             ('unset split still requests', "    if sp.status == es.SPLIT_POLICY_UNSET:\n        return Result('SPLIT_POLICY_UNSET', reason=sp.reason)", "    if False:\n        pass"),
         ]
         for name, old, new in cases:
             with self.subTest(name):
                 m = self._mutant(old, new)
+                if name.startswith('the Codex defect'):
+                    m = self._mutant2(old, new, 't006._grid_steps(executed_volume, state.volume_step) if executed_volume > 0 else 0',
+                                      't006._grid_steps(executed_volume, volume_step) if executed_volume > 0 else 0')
                 try:
                     bad = run_rows(m)
                 except Exception:

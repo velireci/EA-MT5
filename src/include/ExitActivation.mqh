@@ -55,6 +55,7 @@ struct SEaState
    int direction;
    double level;
    double volume_initial;
+   double volume_step;           // the grid of the request: reports, duplicates and the remainder check use THIS step
    string request_id;
    long request_steps;
    double close_volume;
@@ -115,6 +116,7 @@ void EA_StateInit(SEaState &s)
    s.direction=0;
    s.level=0.0;
    s.volume_initial=0.0;
+   s.volume_step=0.0;
    s.request_id="";
    s.request_steps=0;
    s.close_volume=0.0;
@@ -146,9 +148,10 @@ bool EA_PositiveFinite(const double x) {return(TG_Finite(x) && x>0.0);}
 
 void EA_DoneQuote(SEaState &s,const double volume_current,const double volume_step,SEaResult &r)
   {
-   if(!EA_PositiveFinite(volume_step))
+   if(volume_step!=s.volume_step)
      {
-      EA_ResultInit(r,EA_EV_INVALID_INPUT,"INVALID_VOLUME_STEP: must be finite and > 0");
+      s.status=EA_ST_NEEDS_RECONCILIATION;
+      EA_Set(s,r,EA_EV_RECONCILE_REQUIRED,StringFormat("STEP_CHANGED: volume step %.10g is not the step %.10g of the request; reconcile with the broker",volume_step,s.volume_step));
       return;
      }
    long cur=PS_GridSteps(volume_current,volume_step);
@@ -209,6 +212,14 @@ bool EA_OnQuote(SEaState &s,const ulong position_id,const int direction,const do
       EA_ResultInit(r,EA_EV_INVALID_INPUT,StringFormat("INVALID_VOLUME_CURRENT: %.10g must be finite and > 0",volume_current));
       return(false);
      }
+   // 1b the volume parameters are validated on EVERY quote (ExitSplit), BEFORE anything is bound or changed
+   SEsResult sp;
+   ES_Split(volume_initial,volume_min,volume_step,volume_max,sp);
+   if(sp.status==ES_INVALID_INPUT)
+     {
+      EA_ResultInit(r,EA_EV_INVALID_INPUT,"SPLIT_"+sp.reason);
+      return(false);
+     }
    // 2 stop states change nothing
    if(s.status==EA_ST_NEEDS_RECONCILIATION)
      {
@@ -252,13 +263,6 @@ bool EA_OnQuote(SEaState &s,const ulong position_id,const int direction,const do
    bool reached=(direction==1 ? bid>=level_2r : ask<=level_2r);
    if(!reached)
       return(false);
-   SEsResult sp;
-   ES_Split(volume_initial,volume_min,volume_step,volume_max,sp);
-   if(sp.status==ES_INVALID_INPUT)
-     {
-      EA_ResultInit(r,EA_EV_INVALID_INPUT,"SPLIT_"+sp.reason);
-      return(false);
-     }
    if(sp.status==ES_SPLIT_POLICY_UNSET)
      {
       EA_ResultInit(r,EA_EV_SPLIT_POLICY_UNSET,sp.reason);
@@ -277,6 +281,7 @@ bool EA_OnQuote(SEaState &s,const ulong position_id,const int direction,const do
    s.request_steps=sp.close_steps;
    s.initial_steps=sp.initial_steps;
    s.close_volume=sp.close_volume;
+   s.volume_step=volume_step;
    s.reason="";
    EA_ResultInit(r,EA_EV_OK,"");
    r.action=EA_ACT_REQUEST_PARTIAL_CLOSE;
@@ -332,9 +337,15 @@ bool EA_OnReport(SEaState &s,const string request_id,const ENUM_EA_REPORT kind,c
       EA_Set(s,r,EA_EV_BLOCKED,"WRONG_REQUEST_ID: "+request_id+" is not "+s.request_id);
       return(false);
      }
+   if(volume_step!=s.volume_step)
+     {
+      s.status=EA_ST_BLOCKED;
+      EA_Set(s,r,EA_EV_BLOCKED,StringFormat("STEP_CHANGED: report step %.10g is not the step %.10g of the request; the volume is not compared on another grid",volume_step,s.volume_step));
+      return(false);
+     }
    long steps=0;
    if(executed_volume>0.0)
-      steps=PS_GridSteps(executed_volume,volume_step);
+      steps=PS_GridSteps(executed_volume,s.volume_step);
    if(steps<0)
      {
       s.status=EA_ST_BLOCKED;

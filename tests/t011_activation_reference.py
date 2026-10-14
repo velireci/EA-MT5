@@ -31,6 +31,10 @@ STATES (state.status): IDLE -> REQUEST_PENDING -> DONE, plus the two stop states
                        NOT accepted here).
   BLOCKED              inconsistent input (identity, level, wrong id/volume). Every later quote or report changes nothing and
                        returns BLOCKED.
+VOLUME STEP: the step of the request is stored in the state. A report (also a duplicate) with another step is BLOCKED
+(STEP_CHANGED); a quote in DONE with another step is NEEDS_RECONCILIATION. The executed volume is converted to steps with the stored
+step only, so 0.04 lot on a 0.001 grid can never confirm 0.4 lot (40 steps) on a 0.01 grid.
+VALIDATION: the volume parameters are validated (ExitSplit) on EVERY quote before anything is bound; invalid input binds nothing.
 IDENTITY: the first valid quote binds position_id, direction, level_2R and volume_initial; a later quote with another value is
 BLOCKED (IDENTITY_CHANGED). Invalid input (non-finite, <= 0, ask < bid, direction not BUY/SELL, id <= 0, empty request id)
 returns INVALID_INPUT and changes nothing.
@@ -59,6 +63,7 @@ class State:
     direction: int = 0
     level: float = 0.0
     volume_initial: float = 0.0
+    volume_step: float = 0.0       # the grid of the request: reports, duplicates and the remainder check use THIS step
     request_id: str = ''
     request_steps: int = 0
     close_volume: float = 0.0
@@ -108,6 +113,10 @@ def on_quote(state, position_id, direction, level_2r, bid, ask, volume_initial, 
     for tag, v in (('INVALID_VOLUME_INITIAL', volume_initial), ('INVALID_VOLUME_CURRENT', volume_current)):
         if not _num(v) or v <= 0:
             return Result('INVALID_INPUT', reason='%s: %s must be finite and > 0' % (tag, t006._g(v)))
+    # 1b the volume parameters are validated on EVERY quote (ExitSplit), BEFORE anything is bound or changed
+    sp = es.split(volume_initial, volume_min, volume_step, volume_max)
+    if sp.status == es.INVALID_INPUT:
+        return Result('INVALID_INPUT', reason='SPLIT_' + sp.reason)
     # 2 stop states change nothing
     if state.status == NEEDS_RECONCILIATION:
         return Result('RECONCILE_REQUIRED', reason='RECONCILE_REQUIRED: ' + state.reason)
@@ -130,9 +139,6 @@ def on_quote(state, position_id, direction, level_2r, bid, ask, volume_initial, 
     # 5 IDLE
     if not reached:
         return Result('OK', reason='')
-    sp = es.split(volume_initial, volume_min, volume_step, volume_max)
-    if sp.status == es.INVALID_INPUT:
-        return Result('INVALID_INPUT', reason='SPLIT_' + sp.reason)
     if sp.status == es.SPLIT_POLICY_UNSET:
         return Result('SPLIT_POLICY_UNSET', reason=sp.reason)
     cur = t006._grid_steps(volume_current, volume_step)
@@ -145,13 +151,16 @@ def on_quote(state, position_id, direction, level_2r, bid, ask, volume_initial, 
     state.request_steps = sp.close_steps
     state.initial_steps = sp.initial_steps
     state.close_volume = sp.close_volume
+    state.volume_step = volume_step
     state.reason = ''
     return Result('OK', REQUEST_ACTION, '', state.request_id, sp.close_volume, sp.close_steps)
 
 
 def _done_quote(state, volume_current, volume_step):
-    if not _num(volume_step) or volume_step <= 0:
-        return Result('INVALID_INPUT', reason='INVALID_VOLUME_STEP: must be finite and > 0')
+    if volume_step != state.volume_step:
+        state.status = NEEDS_RECONCILIATION
+        return _res('RECONCILE_REQUIRED', state, reason='STEP_CHANGED: volume step %.10g is not the step %.10g of the request; reconcile with the broker' %
+                    (volume_step, state.volume_step))
     cur = t006._grid_steps(volume_current, volume_step)
     expected = state.initial_steps - state.request_steps
     if cur != expected:
@@ -180,7 +189,11 @@ def on_report(state, request_id, kind, executed_volume, volume_step):
     if request_id != state.request_id:
         state.status = BLOCKED
         return _res('BLOCKED', state, reason='WRONG_REQUEST_ID: %s is not %s' % (request_id, state.request_id))
-    steps = t006._grid_steps(executed_volume, volume_step) if executed_volume > 0 else 0
+    if volume_step != state.volume_step:
+        state.status = BLOCKED
+        return _res('BLOCKED', state, reason='STEP_CHANGED: report step %.10g is not the step %.10g of the request; the volume is not compared on another grid' %
+                    (volume_step, state.volume_step))
+    steps = t006._grid_steps(executed_volume, state.volume_step) if executed_volume > 0 else 0
     if steps < 0:
         state.status = BLOCKED
         return _res('BLOCKED', state, reason='VOLUME_NOT_ON_GRID: executed volume %.10g is not a multiple of step %.10g' % (executed_volume, volume_step))

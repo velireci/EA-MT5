@@ -26,7 +26,7 @@ done
 echo "=== S3: split and grid reused, transitions present ==="
 grep -q 'ES_Split(' $HDR && grep -q 'PS_GridSteps(' $HDR && grep -q '#include "ExitSplit.mqh"' $HDR && ! grep -q 'ES_CLOSE_NUM\|ES_CLOSE_DEN\|PS_GRID_ULPS\|DBL_EPSILON' $HDR \
   && echo "  PASS ES_Split and PS_GridSteps are called, no 4/5 or grid tolerance of its own" || { echo "  FAIL split/grid reuse"; FAIL=1; }
-for pat in 'bid>=level_2r : ask<=level_2r' 'EA_ST_REQUEST_PENDING' 'EA_ST_NEEDS_RECONCILIATION' 'EA_ST_BLOCKED' 'WRONG_REQUEST_ID' 'DUPLICATE_IGNORED' 'steps!=s.request_steps' 'cur!=sp.initial_steps'; do
+for pat in 'bid>=level_2r : ask<=level_2r' 'EA_ST_REQUEST_PENDING' 'EA_ST_NEEDS_RECONCILIATION' 'EA_ST_BLOCKED' 'WRONG_REQUEST_ID' 'DUPLICATE_IGNORED' 'steps!=s.request_steps' 'cur!=sp.initial_steps' 'volume_step!=s.volume_step' 'PS_GridSteps(executed_volume,s.volume_step)' 'sp.status==ES_INVALID_INPUT'; do
   grep -qF -- "$pat" $HDR && echo "  PASS header has: $pat" || { echo "  FAIL header lacks: $pat"; FAIL=1; }
 done
 grep -c 'EA_ACT_REQUEST_PARTIAL_CLOSE' $HDR | grep -qx 3 && echo "  PASS the request action is set in exactly one place (plus enum and name)" || { echo "  FAIL request action count"; FAIL=1; }
