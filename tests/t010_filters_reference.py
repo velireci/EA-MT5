@@ -69,15 +69,15 @@ def query_range(now):
 
 
 def classify_calendar_read(ret, last_error, array_size):
-    """CalendarValueHistory's return type is DISPUTED (bool vs count); safe under both. ret==1 with array_size>1 is accepted
-    only because a bool true is 1: it never hides events (more present than reported is not a loss)."""
+    """CalendarValueHistory returns int, the number of values (current official documentation, relayed by Codex). Accept only
+    ret == array_size (0 == 0 included) once errors and negative values are excluded; anything else is missing/partial/inconsistent."""
     if array_size < 0 or last_error != 0 or ret < 0:
         return Q_ERROR
     if ret == 0:
         return Q_OK if array_size == 0 else Q_ERROR
     if ret > array_size:
         return Q_ERROR
-    if ret == array_size or ret == 1:
+    if ret == array_size:
         return Q_OK
     return Q_ERROR
 

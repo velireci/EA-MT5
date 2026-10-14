@@ -138,7 +138,7 @@ def check_guards(files):
                  'if(!events[i].time_ok || events[i].time<=0) {out.unknown++;continue;}',
                  'if(query_status==NF_Q_TESTER)', 'max_points==NF_SPREAD_UNSET', 'ask<bid',
                  'if(array_size<0 || last_error!=0 || ret<0) return(NF_Q_ERROR);', 'if(ret>array_size) return(NF_Q_ERROR);',
-                 'if(ret==array_size || ret==1) return(NF_Q_OK);', 'NF_FloorDay((long)now-NF_WINDOW_SECONDS)-NF_DAY_SECONDS',
+                 'if(ret==array_size) return(NF_Q_OK);', 'NF_FloorDay((long)now-NF_WINDOW_SECONDS)-NF_DAY_SECONDS',
                  'NF_FloorDay((long)now+NF_WINDOW_SECONDS)+2*NF_DAY_SECONDS-1'):
         if need not in hdr:
             bad |= fail(files[0], 'guard expression missing: %s' % need)
@@ -161,7 +161,7 @@ def check_reader(files):
     if all(p >= 0 for p in pos) and pos != sorted(pos):
         bad |= fail(ea, 'reader calls are out of order (range, history, error, classifier, per-value conversion)')
     if re.search(r'bool\s+\w+\s*=\s*CalendarValueHistory', rb):
-        bad |= fail(ea, 'CalendarValueHistory result stored as bool (return type is disputed; keep int)')
+        bad |= fail(ea, 'CalendarValueHistory result stored as bool (returns int per the official documentation; keep int)')
     if re.search(r'now\s*[-+]\s*NF_WINDOW_SECONDS', rb):
         bad |= fail(ea, 'reader queries now+-window instead of the widened NF_QueryRange')
     return bad
@@ -170,7 +170,7 @@ def check_reader(files):
 def check_contract(files):
     raw = read(files[0])
     bad = 0
-    for req in ('SERVER time', 'both boundaries INCLUDED', 'BLOCKED wins over UNKNOWN', 'NO default', 'NOT decided', 'DISPUTED', 'NF_QueryRange', 'WIDENED'):
+    for req in ('SERVER time', 'both boundaries INCLUDED', 'BLOCKED wins over UNKNOWN', 'NO default', 'NOT decided', 'returns int, the number of values', 'NF_QueryRange', 'WIDENED'):
         if req not in raw:
             bad |= fail(files[0], 'contract text missing: %s' % req)
     return bad

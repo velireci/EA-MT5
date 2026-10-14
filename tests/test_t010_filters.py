@@ -136,10 +136,11 @@ class CalendarReadTests(unittest.TestCase):
         # the same event with a defined time outside the window does not block
         self.assertEqual(ref.news_evaluate(NOW, [ref.Event(time=D)]).state, ref.CLEAR)
 
-    def test_reader_result_is_never_a_bool_only_decision(self):
-        # same answer whether CalendarValueHistory returned bool or a count: true(1) with N values, count N
-        for n in (1, 2, 5):
-            self.assertEqual(ref.classify_calendar_read(1, 0, n), ref.classify_calendar_read(n, 0, n))
+    def test_only_a_count_equal_to_the_array_size_is_accepted(self):
+        # int per the official documentation: ret=1 with N>1 values is a partial/inconsistent read, not a bool true
+        for n in (2, 3, 5):
+            self.assertEqual(ref.classify_calendar_read(1, 0, n), ref.Q_ERROR)
+            self.assertEqual(ref.classify_calendar_read(n, 0, n), ref.Q_OK)
 
 
 class SpreadTests(unittest.TestCase):
@@ -240,11 +241,13 @@ MUTANTS = {
                                              'NEGATIVE_RET'),
     'read error ignored by the classifier': ("    if array_size < 0 or last_error != 0 or ret < 0:", "    if array_size < 0 or ret < 0:",
                                              'ZERO_RET_WITH_ERROR'),
-    'ret above size accepted': ("    if ret > array_size:\n        return Q_ERROR\n    if ret == array_size or ret == 1:",
-                                "    if ret >= array_size or ret == 1:", 'RET_ABOVE_SIZE_PARTIAL'),
-    'ret below size accepted': ("    if ret == array_size or ret == 1:", "    if ret >= 0:", 'RET_BELOW_SIZE_PARTIAL'),
-    'bool only without number check': ("    if ret > array_size:\n        return Q_ERROR\n    if ret == array_size or ret == 1:\n        return Q_OK\n    return Q_ERROR",
-                                       "    return Q_OK", 'RET_ABOVE_SIZE_PARTIAL'),
+    'ret above size accepted': ("    if ret > array_size:\n        return Q_ERROR\n    if ret == array_size:",
+                                "    if ret >= array_size:", 'RET_ABOVE_SIZE_PARTIAL'),
+    'ret below size accepted': ("    if ret == array_size:", "    if ret >= 0:", 'RET_BELOW_SIZE_PARTIAL'),
+    'bool-compat exception re-added (ret 1 with many values)': ("    if ret == array_size:", "    if ret == array_size or ret == 1:",
+                                                                'RET_ONE_BUT_THREE_VALUES'),
+    'classifier accepts everything': ("    if ret > array_size:\n        return Q_ERROR\n    if ret == array_size:\n        return Q_OK\n    return Q_ERROR",
+                                      "    return Q_OK", 'RET_ABOVE_SIZE_PARTIAL'),
     'zero ret with values accepted': ("return Q_OK if array_size == 0 else Q_ERROR", "return Q_OK", 'ZERO_RET_BUT_VALUES'),
     'range narrowed back to now +-1800': ("    lo = floor_day(now - WINDOW_SECONDS) - DAY_SECONDS\n    hi = floor_day(now + WINDOW_SECONDS) + 2 * DAY_SECONDS - 1",
                                           "    lo = now - WINDOW_SECONDS\n    hi = now + WINDOW_SECONDS", 'COV_USD_HIGH_UNDEFINED_SAME_DAY_OUTSIDE_WINDOW'),

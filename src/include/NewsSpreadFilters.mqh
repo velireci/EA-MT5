@@ -18,12 +18,11 @@
 //    Over-blocking is the safe direction. The BLOCK window itself stays exactly [event-1800,event+1800] for defined-time events;
 //    a defined-time event in the widened range but outside the window does NOT block. Invalid when now<=0, from<0 or
 //    to>NF_MAX_DATETIME (3000-12-31 23:59:59).
-// 2) NF_ClassifyCalendarRead(ret,last_error,array_size): the RETURN TYPE of CalendarValueHistory is DISPUTED (a 2019 release post
-//    lists bool, Codex reports an int count; the official page was unreachable here). The reader stores the result as int, so
-//    bool (true=1,false=0) and a count both work. Rules, in order: array_size<0 -> ERROR; last_error!=0 -> ERROR; ret<0 -> ERROR;
-//    ret==0 -> OK only if array_size==0 (no events), else ERROR (inconsistent); ret>array_size -> ERROR (events missing =
-//    incomplete); ret==array_size -> OK; ret==1 with array_size>1 -> OK ONLY because a bool true is 1 (never hides events: more
-//    events present than reported is not a loss); any other ret<array_size -> ERROR (partial). Only NF_Q_OK may reach NF_NewsEvaluate
+// 2) NF_ClassifyCalendarRead(ret,last_error,array_size): CalendarValueHistory returns int, the number of values (current official
+//    documentation, relayed by Codex; the parent could not open the page from its environment). The reader stores the result as int.
+//    Rules, in order: array_size<0 -> ERROR; last_error!=0 -> ERROR; ret<0 -> ERROR; ret==0 -> OK only if array_size==0 (no events),
+//    else ERROR (inconsistent); ret>array_size -> ERROR (events missing = incomplete); ret==array_size -> OK; anything else
+//    (ret<array_size, e.g. ret=1 with array_size=3) -> ERROR (partial/inconsistent). Only NF_Q_OK may reach NF_NewsEvaluate
 //    as a successful query.
 //
 // SPREAD: spread_points=(ask-bid)/point. Maximum is an input in points with NO default: NF_SPREAD_UNSET (-1.0) = unset policy.
@@ -108,7 +107,7 @@ int NF_ClassifyCalendarRead(const int ret,const int last_error,const int array_s
    if(array_size<0 || last_error!=0 || ret<0) return(NF_Q_ERROR);
    if(ret==0) return(array_size==0 ? NF_Q_OK : NF_Q_ERROR);
    if(ret>array_size) return(NF_Q_ERROR);
-   if(ret==array_size || ret==1) return(NF_Q_OK);
+   if(ret==array_size) return(NF_Q_OK);
    return(NF_Q_ERROR);
   }
 void NF_NewsEvaluate(const datetime now,const SNfEvent &events[],const int count,const int query_status,SNfNews &out)

@@ -65,7 +65,7 @@ int ReadUsdCalendar(const datetime now,SNfEvent &events[],int &count)
    datetime query_from=0,query_to=0;
    if(!NF_QueryRange(now,query_from,query_to)) {Print("T010 CALENDAR query range invalid for server now ",(long)now);return(NF_Q_ERROR);}
    ResetLastError();
-   // The return type of CalendarValueHistory is disputed (bool vs count): keep it as int and classify with the pure helper.
+   // CalendarValueHistory returns int (the number of values): keep it as int and classify with the pure helper.
    int ret=CalendarValueHistory(values,query_from,query_to,NULL,"USD");
    int read_error=GetLastError();
    int total=ArraySize(values);
