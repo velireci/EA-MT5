@@ -109,3 +109,9 @@ Layers (T003 section 13.3): (1) CURRENT STRUCTURE for direction (HH/HL, LH/LL); 
 
 ## Approval policy
 Record client-confirmed additions with date and source in DECISIONS.md and then update this specification. Developer proposals must be visibly labeled PROPOSED and confined to visual/experimental work until confirmed. A platform constraint may require a documented client choice; it is not permission to silently change strategy.
+
+
+## T004 first round (2026-10-14) - observer infrastructure, not a strategy approval
+The owner authorised progress on the independent H4-to-M15 observer. Confirmed flow N4/N5 stands. New component M15Confirmation.mqh accepts an explicit ready H4 context and an externally selected proposed M15 level; no automatic structural selector is implemented. H4M15Bridge.mqh can adapt T003 context only with explicit source opt-in and reliability. It never chooses between T002 direction and T003 bias.
+
+Q04 remains open. Default FVG timing policy is UNSET. The only opt-in technical timing proposal implemented is candle A at/after the BOS candle, with closed contiguous M15 bars, a strict close beyond the supplied level and a later return (not candle C itself). All FVG candidates are reported rather than silently selecting an entry. These are development proposals, not client answers. RETURN_OBSERVED does not authorise orders. Task and limits: tasks/T004-m15-confirmation.md and docs/T004-m15.md. This first round is not full M15/live-EA integration.
