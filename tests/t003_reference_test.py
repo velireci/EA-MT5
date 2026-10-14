@@ -1,0 +1,5083 @@
+#!/usr/bin/env python3
+"""T003 reference model and controlled-data tests (PROPOSED H4 bias rules).
+
+IMPORTANT - what this file proves and what it does not:
+  * It is a Python re-implementation (a MODEL) of the PROPOSED algorithm in
+    tasks/T003-h4-bias-change.md up to revision 10 (the revision 10 PROTOTYPE:
+    structure/setup separation, ratchet, current level decides FLIP, RECONF_LOST
+    keeps the setup; PROPOSAL / PROTOTYPE, awaiting the client). The tests verify
+    THIS MODEL.
+    They do NOT execute or compile the MQL5 source src/include/H4Bias.mqh.
+  * src/tests/T003_LogicTest.mq5 runs the same cases inside MT5, but it has
+    NOT been compiled and NOT been run (MetaEditor was not available).
+    MQL5/Python equivalence is therefore UNPROVEN.
+  * Every T003 rule is a developer PROPOSAL awaiting the client's visual
+    validation. Nothing here is a client answer or a trading rule.
+  * Controlled data only; no price, date or candle index of the client's
+    pictures is used.
+  * Deferred (printed as DEFERRED, never counted as PASS): task tests 9, 18,
+    20 and the drawing/panel and M5/M15 items.
+
+Every place where the task text is unclear is marked "AMBIGUITY n" in
+src/include/H4Bias.mqh (list in its header); this model takes the same reading.
+(AMBIGUITY 1, 5, 10, 11, 20 are also marked below.)
+
+T002 code is reused unchanged (tests/t002_reference_test.py: swings, FVGs,
+direction). Window indexes are used inside the replay only; identities,
+comparisons and reports use absolute times and IDs built from them.
+
+Usage:
+  python3 tests/t003_reference_test.py              run all tests
+  python3 tests/t003_reference_test.py --emit-mql   print the generated case
+                                                    data block for the MQL5 test
+"""
+import math
+import os
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import t002_reference_test as t2  # noqa: E402  (reused, not modified)
+
+PERIOD = t2.PERIOD
+T0 = t2.T0
+Bar = t2.Bar
+ts = t2.ts
+
+BULL = 1
+BEAR = -1
+
+# event types
+EV_BREAK_SET = 'BREAK_SET'
+EV_FLIP = 'FLIP'
+EV_SEED = 'SEED'
+EV_CONFLICT = 'CONFLICT'
+EV_WICK = 'WICK'
+EV_NONE_WICK = 'NONE_WICK'
+EV_RECONFIRMED = 'RECONFIRMED'
+EV_RECONF_LOST = 'RECONF_LOST'
+EV_INT_SWEEP = 'INTERNAL_SWEEP'
+EV_CONTINUATION = 'CONTINUATION'
+EV_INT_BREAK = 'INTERNAL_BREAK'
+# revision 10 PROPOSAL / PROTOTYPE, awaiting the client (ratchet / level update)
+EV_SETUP_ENDED = 'SETUP_ENDED'
+EV_SNAP_CROSSED = 'SNAPSHOT_CROSSED'        # diagnostic only (never a market event, not compared)
+MARKET_TYPES = (EV_BREAK_SET, EV_FLIP, EV_SEED, EV_WICK, EV_RECONFIRMED,
+                EV_RECONF_LOST, EV_INT_SWEEP, EV_SETUP_ENDED)
+# setup end reasons (revision 10; M15_OUTCOME and SUPERSEDED_BY_STRUCTURE are NOT implemented)
+END_FLIP = 'INVALIDATED_BY_FLIP'
+END_REPLACED = 'REPLACED'
+
+
+# ------------------------------------------------------------- helpers ----
+def tx(t):
+    return '0' if t == 0 else ts(t)
+
+
+def pf(x):
+    # the MQL5 side uses DoubleToString(x, 2): refuse values on an exact rounding tie
+    frac = x * 100.0 - math.floor(x * 100.0)
+    if abs(frac - 0.5) < 1e-7:
+        raise ValueError('price on a rounding tie: %r' % x)
+    return '%.2f' % x
+
+
+def dir_name(d):
+    if d == BULL:
+        return 'BULL'
+    if d == BEAR:
+        return 'BEAR'
+    return 'NONE'
+
+
+class Params(object):
+    def __init__(self, left=2, right=2, period=PERIOD, lookback=300,
+                 rebuild=1000, hard_cap=5000, ratchet=True):
+        # ratchet=False is a MODEL-ONLY control (R0, plain re-derivation of revision 9 11.3): it
+        # documents why the ratchet and the snapshot role are coupled; the MQL5 code has no such switch
+        self.ratchet = ratchet
+        self.left = left
+        self.right = right
+        self.period = period
+        self.lookback = lookback
+        self.rebuild = rebuild
+        self.hard_cap = hard_cap
+
+
+def warm_up(p):
+    return p.lookback
+
+
+def check_depth(p):
+    return warm_up(p)
+
+
+# ----------------------------------------------------- identities (P2) ----
+# IDs are built from ABSOLUTE times only (pivot times). Window indexes never
+# enter an ID. (Requirement a.)
+def level_id(kind, t_level, t_ext, t_prev):
+    return '%s%s_%s_%s' % (kind, ts(t_level), ts(t_ext), ts(t_prev))
+
+
+def ext_id(kind, t_ext, t_prev):
+    return '%s%s_%s' % (kind, ts(t_ext), ts(t_prev))
+
+
+def interior_id(kind, t_int):
+    """revision 14 (PROPOSAL / PROTOTYPE): the id of an internal-liquidity level is the kind ('IH' bear /
+    'IL' bull) and the absolute pivot time of the swing. The pivot is the identity of the level; the
+    protecting level it is judged against is NOT part of the id (that changes with the ratchet)."""
+    return '%s%s' % (kind, ts(t_int))
+
+
+def event_id(etype, bar_time, ref):
+    return '%s@%s#%s' % (etype, ts(bar_time), ref)
+
+
+class Cand(object):
+    def __init__(self):
+        self.id = ''
+        self.price = 0.0
+        self.pivot_time = 0
+        self.ext_time = 0
+        self.prev_time = 0
+        self.known = 0
+        self.idx = -1          # window index of the pivot: INTERNAL only
+
+
+def known_count(sw, right, upto):
+    """number of swings confirmed by the close of bar `upto` (window index)"""
+    c = 0
+    for s in sw:
+        if s.index + right <= upto:
+            c += 1
+        else:
+            break
+    return c
+
+
+def derive_level(sw, nk, d):
+    """P2 / P14 candidates from the first nk swings, context direction d.
+    d=+1 bullish context: extremes are highs, level is a low.
+    d=-1 bearish context: extremes are lows, level is a high.
+    Returns (level, ext); each Cand or None.
+    level: most adverse swing strictly between the previous extreme and the
+           latest higher-high (bull) / lower-low (bear); ties -> earliest.
+    ext:   the latest higher-high (bull) / lower-low (bear).
+    Revision 14: the former third result (`lint`, the single interior candidate anchored to the latest
+    extreme) is REMOVED; the internal liquidity is the per-level layer below (liq_*)."""
+    ext_hi = (d > 0)
+    exts = []
+    oths = []
+    for i in range(nk):
+        if sw[i].is_high == ext_hi:
+            exts.append(sw[i])
+        else:
+            oths.append(sw[i])
+    k = -1
+    for j in range(len(exts) - 1, 0, -1):
+        if d * exts[j].price > d * exts[j - 1].price:
+            k = j
+            break
+    if k < 0:
+        return None, None
+    e = exts[k]
+    pe = exts[k - 1]
+    ex = Cand()
+    ex.id = ext_id('HH' if d > 0 else 'LL', e.pivot_time, pe.pivot_time)
+    ex.price = e.price
+    ex.pivot_time = e.pivot_time
+    ex.prev_time = pe.pivot_time
+    ex.known = e.confirm_time
+    ex.idx = e.index
+    best = None
+    for s in oths:
+        if pe.pivot_time < s.pivot_time and s.pivot_time < e.pivot_time:
+            if best is None or d * s.price < d * best.price:
+                best = s
+    lvl = None
+    if best is not None:
+        lvl = Cand()
+        lvl.id = level_id('SL' if d > 0 else 'SH', best.pivot_time, e.pivot_time, pe.pivot_time)
+        lvl.price = best.price
+        lvl.pivot_time = best.pivot_time
+        lvl.ext_time = e.pivot_time
+        lvl.prev_time = pe.pivot_time
+        lvl.known = max(best.confirm_time, e.confirm_time)
+        lvl.idx = best.index
+    return lvl, ex
+
+
+def adverse_ext(bar, s):
+    return bar.high if s > 0 else bar.low
+
+
+def scan_level(bars, i_from, i_to, price, s):
+    """bars i_from..i_to: (body_broken, last wick index or -1).
+    s = adverse sign (+1: above the level is adverse)."""
+    wick = -1
+    for i in range(i_from, i_to + 1):
+        if s * (bars[i].close - price) > 0:
+            return True, -1
+        if s * (adverse_ext(bars[i], s) - price) > 0:
+            wick = i
+    return False, wick
+
+
+def close_beyond_any(bars, i_from, i_to, price, s):
+    for i in range(i_from, i_to + 1):
+        if s * (bars[i].close - price) > 0:
+            return True
+    return False
+
+
+# ---------------------------------------------------------------- state ----
+class Track(object):
+    def __init__(self, fi, fid, lower=0.0, upper=0.0, time_a=0, conf=0):
+        self.f = fi          # index into the FVG list: INTERNAL
+        self.id = fid
+        self.lower = lower   # bounds and times are part of the SETUP key (revision 10, correction 3)
+        self.upper = upper
+        self.time_a = time_a
+        self.conf = conf     # confirm time of the FVG (close of candle C)
+        self.invalid = False
+        self.recorded = False
+
+
+def make_track(fi, f):
+    return Track(fi, f.id, f.lower, f.upper, f.time_a, f.confirm_time)
+
+
+class St(object):
+    def __init__(self):
+        self.dir = 0
+        self.origin = 'NONE'
+        self.none_reason = 'NO_EVIDENCE'
+        self.phase = 'ACTIVE'
+        self.recon_reason = ''
+        self.bias_start = 0
+        self.origin_ref = 0
+        self.has_level = False
+        self.lv_id = ''
+        self.lv_price = 0.0
+        self.lv_pivot = 0
+        self.lv_ext = 0
+        self.lv_prev = 0
+        self.lv_known = 0
+        self.frozen = False       # DEPRECATED compatibility field: the structure is never frozen (revision 10), always False
+        self.has_ext = False
+        self.ex_id = ''
+        self.ex_price = 0.0
+        self.ex_consumed = False
+        # revision 14 (PROPOSAL / PROTOTYPE): the internal liquidity is a SET of levels. li_key is the sorted
+        # set of unconsumed in-scope levels usable at the next bar (the LI element of the structure key);
+        # li_n its size; has_lint / li_id / li_price are only the DISPLAY candidate (the most adverse level
+        # of the set; li_consumed is always False: a consumed level leaves the set). liq_cache is a per-replay
+        # cache (swing index -> (last scanned bar, first crossing bar)); it never survives a replay.
+        self.has_lint = False
+        self.li_id = ''
+        self.li_price = 0.0
+        self.li_consumed = False
+        self.li_key = '-'
+        self.li_n = 0
+        self.liq_cache = {}
+        self.has_wick = False
+        self.wk_src = 0
+        self.wk_known = 0
+        self.wk_det = 0
+        self.wk_retro = False
+        self.sweep_time = 0
+        self.src_time = 0
+        self.wait_start = 0
+        self.rec_id = ''
+        self.rec_from = 0         # close of the touching bar (valid-from of the reconfirmation); read-only context
+        self.setup_id = ''        # revision 10: '' = no setup (phase ACTIVE)
+        self.setup_type = ''      # WICK / SWEEP
+        self.snap_id = ''         # snapshot of the protecting level at the creation of the setup (REFERENCE ONLY)
+        self.snap_price = 0.0
+        self.snap_known = 0
+        self.pre = ''
+        self.t2dir = 'UNKNOWN'
+
+
+def wick_text(st):
+    if not st.has_wick:
+        return '-'
+    return '%s/%s/%s/%d' % (tx(st.wk_src), tx(st.wk_known), tx(st.wk_det), 1 if st.wk_retro else 0)
+
+
+def tracks_text(tracks):
+    """ALL tracks, for output (INVALID ones included)"""
+    if not tracks:
+        return '-'
+    out = []
+    for tr in tracks:
+        if tr.invalid:
+            sname = 'INVALID'
+        elif tr.recorded:
+            sname = 'RECORDED'
+        else:
+            sname = 'FRESH'
+        out.append('%s:%s' % (tr.id, sname))
+    return ','.join(out)
+
+
+def tracks_key_text(tracks):
+    """tracks that can still produce events (FRESH / RECORDED), with their bounds and confirm time.
+    INVALID tracks cannot produce an event and are NOT compared (11.7). Revision 10, correction 3:
+    bounds and times are kept in the compared key even though the current phase does not use them."""
+    out = []
+    for tr in tracks:
+        if tr.invalid:
+            continue
+        out.append('%s[%s-%s]@%s:%s' % (tr.id, pf(tr.lower), pf(tr.upper), tx(tr.conf),
+                                        'RECORDED' if tr.recorded else 'FRESH'))
+    if not out:
+        return '-'
+    return ','.join(out)
+
+
+def struct_key(st):
+    """STRUCTURE key (revision 10, PROPOSAL / PROTOTYPE, awaiting the client). What the market
+    structure will do next: bias, protecting level (id carries the pivot/ext/prev times, price, known
+    time), the pending extreme with its consumed flag, the SET of unconsumed in-scope internal levels (LI, revision 14), bias_start ONLY while the bias has no
+    protecting level (it matters only for the first level, 11.8). Origin NAME is provenance."""
+    return 'BIAS=%s;LV=%s;EX=%s;LI=%s;BS=%s' % (
+        dir_name(st.dir),
+        ('%s@%s/%s' % (st.lv_id, pf(st.lv_price), tx(st.lv_known))) if st.has_level else '-',
+        ('%s@%s/%d' % (st.ex_id, pf(st.ex_price), 1 if st.ex_consumed else 0)) if st.has_ext else '-',
+        st.li_key if st.li_key else '-',
+        tx(st.bias_start) if (st.dir != 0 and not st.has_level) else '-')
+
+
+def setup_key(st, tracks):
+    """SETUP key: what the setup context will do next. wait_start and the source time stay compared
+    in every phase, also RECONFIRMED, because they decide which touches count after RECONF_LOST."""
+    return 'SU=%s;PH=%s;SRC=%s;WAIT=%s;REC=%s;RSN=%s;EL=%s' % (
+        st.setup_id if st.setup_id else '-', st.phase if st.dir != 0 else '-',
+        tx(st.src_time), tx(st.wait_start),
+        st.rec_id if st.rec_id else '-', st.recon_reason if st.recon_reason else '-',
+        tracks_key_text(tracks))
+
+
+def prov_key(st):
+    """PROVENANCE / diagnostics: NOT compared by the A/B check, REPORTED (ORG_DIFF ...)."""
+    return 'ORG=%s;NR=%s;RETRO=%d;OREF=%s;BSP=%s' % (
+        st.origin, st.none_reason if st.dir == 0 else '-', 1 if st.wk_retro else 0,
+        tx(st.origin_ref), tx(st.bias_start) if (st.dir != 0 and st.has_level) else '-')
+
+
+def state_key(st, tracks):
+    """what replays A and B must agree on (STRUCTURE key + SETUP key). No window index, no depth."""
+    return struct_key(st) + ';' + setup_key(st, tracks)
+
+
+def hold_block(st):
+    """S3 (client): new entries of the previous setup are blocked in HOLD"""
+    return st.dir != 0 and st.phase == 'HOLD'
+
+
+def sweep_block(st):
+    """TECHNICAL PROPOSAL (F8, not a client statement): block during SWEEP_WAIT.
+    A separate flag so the owner decides; nothing here acts on it."""
+    return st.dir != 0 and st.phase == 'SWEEP_WAIT'
+
+
+def state_text(st, tracks):
+    return '%s;%s;WK=%s;SW=%s;ALL=%s;PRE=%s;T2=%s;BLKH=%d;BLKS=%d' % (
+        state_key(st, tracks), prov_key(st), wick_text(st), tx(st.sweep_time), tracks_text(tracks),
+        st.pre if st.pre else '-', st.t2dir,
+        1 if hold_block(st) else 0, 1 if sweep_block(st) else 0)
+
+
+class Event(object):
+    def __init__(self, etype, bar_time, ref, detail, sig=None):
+        self.type = etype
+        self.bar_time = bar_time
+        self.ref = ref
+        self.detail = detail
+        self.market = etype in MARKET_TYPES
+        # comparison signature (A/B): '' = not compared (diagnostic). Provenance-only detail tokens
+        # (t002=, retro, known=, restart, SEED versus BREAK_SET name) are NOT in the signature.
+        self.sig = event_id(etype, bar_time, ref) if sig is None else sig
+
+    def id(self):
+        return event_id(self.type, self.bar_time, self.ref)
+
+    def text(self):
+        return '%s{%s}' % (self.id(), self.detail)
+
+
+class Rep(object):
+    pass
+
+
+# --------------------------------------------------------------- replay ----
+def fvg_eligible(f, st, bull):
+    """P5 / P14: type = bias direction, candle A open time at or after the source
+    time (the physical wick bar, or the sweep bar). Not detected_at."""
+    return f.bullish == bull and f.time_a >= st.src_time
+
+
+def build_tracks(st, tracks, fv, bars, t, bull):
+    """(re)build the eligible FVG tracks for the current wait (P5 / P14).
+    Eligible: type = bias direction, candle A open >= src_time, C closed by t."""
+    del tracks[:]
+    for fi in range(len(fv)):
+        f = fv[fi]
+        if f.index_a + 2 > t:
+            continue
+        if not fvg_eligible(f, st, bull):
+            continue
+        tr = make_track(fi, f)
+        i = f.index_a + 3
+        while i <= t:
+            if f.bullish:
+                if bars[i].close < f.lower:
+                    tr.invalid = True
+            else:
+                if bars[i].close > f.upper:
+                    tr.invalid = True
+            i += 1
+        tracks.append(tr)
+
+
+def t2_dir_name(sw, nk):
+    return t2.derive_direction(sw[:nk])
+
+
+def origin_ref_of(open_t, cands):
+    r = open_t
+    for c in cands:
+        for v in (c.pivot_time, c.ext_time, c.prev_time):
+            if v != 0 and v < r:
+                r = v
+    return r
+
+
+def p10_resolve(n_up, n_dn, seed_dir):
+    """P10 precedence for one bar in NONE.
+    Returns (result, direction): a break outranks the seed, breaks of both
+    kinds give CONFLICT and the seed never overwrites a CONFLICT on that bar."""
+    if n_up > 0 and n_dn > 0:
+        return 'CONFLICT', 0
+    if n_up > 0:
+        return 'BREAK', BULL
+    if n_dn > 0:
+        return 'BREAK', BEAR
+    if seed_dir != 0:
+        return 'SEED', seed_dir
+    return 'NONE', 0
+
+
+def none_step(t, bars, sw, p, st, events):
+    """P10: start from NONE only."""
+    bar = bars[t]
+    open_t = bar.time
+    close_t = open_t + p.period
+    nkb = known_count(sw, p.right, t - 1)
+    nki = known_count(sw, p.right, t)
+    hit = {1: [], -1: []}       # direction of the break -> triggering candidates
+    for ctx in (BEAR, BULL):
+        lvl, ex = derive_level(sw, nkb, ctx)
+        s = -ctx
+        if lvl is not None:
+            if not close_beyond_any(bars, lvl.idx + 1, t - 1, lvl.price, s):
+                if s * (bar.close - lvl.price) > 0:
+                    hit[s].append(lvl)
+                elif s * (adverse_ext(bar, s) - lvl.price) > 0:
+                    events.append(Event(EV_NONE_WICK, open_t, lvl.id,
+                                        'lvl=%s;src=%s' % (lvl.id, ts(open_t))))
+        if ex is not None:
+            # favourable break of the latest HH (ctx=+1) / LL (ctx=-1)
+            if not close_beyond_any(bars, ex.idx + 1, t - 1, ex.price, ctx):
+                if ctx * (bar.close - ex.price) > 0:
+                    hit[ctx].append(ex)
+    up = hit[1]
+    dn = hit[-1]
+    # seed candidate (only used when step 1 produced neither a bias nor a conflict)
+    seed_dir = 0
+    seed_lvl = None
+    t2n = t2_dir_name(sw, nki)
+    if len(up) == 0 and len(dn) == 0 and (t2n == 'BEARISH' or t2n == 'BULLISH'):
+        d = BULL if t2n == 'BULLISH' else BEAR
+        lvl, ex = derive_level(sw, nki, d)
+        # AMBIGUITY 10: "defined" = not body-broken by a bar up to t-1 (P2 wording);
+        # bar t closing beyond its own seed level is handled by the retroactive scan.
+        if lvl is not None and not close_beyond_any(bars, lvl.idx + 1, t - 1, lvl.price, -d):
+            seed_dir = d
+            seed_lvl = lvl
+    res, rdir = p10_resolve(len(up), len(dn), seed_dir)
+    st.none_reason = 'NO_EVIDENCE'
+    if res == 'CONFLICT':
+        st.none_reason = 'CONFLICT'
+        events.append(Event(EV_CONFLICT, open_t, '%s+%s' % (up[0].id, dn[0].id),
+                            'up=%s;dn=%s' % (up[0].id, dn[0].id)))
+        return
+    if res == 'BREAK':
+        d = rdir
+        cands = up if d == BULL else dn
+        st.dir = d
+        st.origin = 'BREAK'
+        st.phase = 'ACTIVE'
+        st.bias_start = close_t
+        st.origin_ref = origin_ref_of(open_t, cands)
+        events.append(Event(EV_BREAK_SET, open_t, cands[0].id,
+                            'dir=%s;from=NONE;known=%s;t002=%s' % (dir_name(d), ts(cands[0].known), t2n),
+                            'START@%s#%s' % (ts(open_t), dir_name(d))))
+        return
+    if res == 'SEED':
+        d = rdir
+        refs = Cand()
+        refs.pivot_time = seed_lvl.pivot_time
+        refs.ext_time = seed_lvl.ext_time
+        refs.prev_time = seed_lvl.prev_time
+        # the swings the T002 direction used: last two highs and last two lows
+        lo = open_t
+        nh = 0
+        nl = 0
+        for i in range(nki - 1, -1, -1):
+            if sw[i].is_high:
+                if nh < 2:
+                    nh += 1
+                    if sw[i].pivot_time < lo:
+                        lo = sw[i].pivot_time
+            else:
+                if nl < 2:
+                    nl += 1
+                    if sw[i].pivot_time < lo:
+                        lo = sw[i].pivot_time
+        st.dir = d
+        st.origin = 'SEED'
+        st.phase = 'ACTIVE'
+        st.bias_start = close_t
+        st.origin_ref = origin_ref_of(lo, [refs])
+        events.append(Event(EV_SEED, open_t, seed_lvl.id,
+                            'dir=%s;t002=%s' % (dir_name(d), t2n),
+                            'START@%s#%s' % (ts(open_t), dir_name(d))))
+
+
+def clear_setup(st, tracks):
+    """no setup: phase ACTIVE. The STRUCTURE (level, candidates) is untouched."""
+    st.phase = 'ACTIVE'
+    st.recon_reason = ''
+    st.has_wick = False
+    st.wk_retro = False
+    st.sweep_time = 0
+    st.src_time = 0
+    st.wait_start = 0
+    st.rec_id = ''
+    st.rec_from = 0
+    st.setup_id = ''
+    st.setup_type = ''
+    st.snap_id = ''
+    st.snap_price = 0.0
+    st.snap_known = 0
+    del tracks[:]
+
+
+def setup_ended(st, open_t, reason, events, new_id=''):
+    """SETUP_ENDED(reason) for the live setup, if any (PROPOSAL / PROTOTYPE, awaiting the client).
+    Only INVALIDATED_BY_FLIP and REPLACED exist; RECONF_LOST is never an end."""
+    if st.setup_id == '':
+        return
+    detail = 'reason=%s;setup=%s' % (reason, st.setup_id)
+    if new_id:
+        detail += ';new=%s' % new_id
+    events.append(Event(EV_SETUP_ENDED, open_t, st.setup_id, detail,
+                        'SETUP_ENDED@%s#%s#%s' % (ts(open_t), st.setup_id, reason)))
+
+
+def do_flip(t, bars, p, st, tracks, events):
+    open_t = bars[t].time
+    close_t = open_t + p.period
+    old = st.dir
+    ref = st.lv_id
+    c = Cand()
+    c.pivot_time = st.lv_pivot
+    c.ext_time = st.lv_ext
+    c.prev_time = st.lv_prev
+    st.origin_ref = origin_ref_of(open_t, [c])
+    old_setup = st.setup_id
+    st.dir = -old
+    st.origin = 'BREAK'
+    st.bias_start = close_t
+    st.has_level = False
+    st.lv_id = ''
+    st.has_ext = False
+    st.has_lint = False
+    events.append(Event(EV_FLIP, open_t, ref, 'dir=%s;from=%s;known=%s' % (
+        dir_name(st.dir), dir_name(old), ts(st.lv_known)),
+        'FLIP@%s#%s#%s' % (ts(open_t), ref, dir_name(st.dir))))
+    if old_setup != '':
+        # the structure flipped: the setup is over for good (INVALIDATED_BY_FLIP)
+        events.append(Event(EV_SETUP_ENDED, open_t, old_setup, 'reason=%s;setup=%s' % (END_FLIP, old_setup),
+                            'SETUP_ENDED@%s#%s#%s' % (ts(open_t), old_setup, END_FLIP)))
+    clear_setup(st, tracks)
+
+
+def start_hold(t, bars, p, fv, st, tracks, events, wk_src, wk_det, retro):
+    """common part of every structural-wick setup start (wick at t, restart, retroactive): a NEW
+    setup with a new setup_id; a live setup is ENDED with reason REPLACED first. The snapshot is the
+    protecting level at this moment (REFERENCE ONLY). The structure is not touched."""
+    open_t = bars[t].time
+    new_id = 'WICK@%s#%s' % (ts(wk_src), st.lv_id)
+    setup_ended(st, open_t, END_REPLACED, events, new_id)
+    st.phase = 'HOLD'
+    st.setup_id = new_id
+    st.setup_type = 'WICK'
+    st.snap_id = st.lv_id
+    st.snap_price = st.lv_price
+    st.snap_known = st.lv_known
+    st.recon_reason = ''
+    st.rec_id = ''
+    st.rec_from = 0
+    st.has_wick = True
+    st.wk_src = wk_src
+    st.wk_known = wk_src + p.period
+    st.wk_det = wk_det
+    st.wk_retro = retro
+    st.sweep_time = 0
+    st.src_time = wk_src
+    st.wait_start = wk_det
+    build_tracks(st, tracks, fv, bars, t, st.dir == BULL)
+
+
+def wick_event(open_t, st, restart):
+    return Event(EV_WICK, open_t, st.lv_id,
+                 'dir=%s;lvl=%s;sw=%s;sk=%s;det=%s;retro=%d;restart=%d' % (
+                     dir_name(st.dir), st.lv_id, ts(st.wk_src), ts(st.wk_known),
+                     ts(st.wk_det), 1 if st.wk_retro else 0, 1 if restart else 0),
+                 'WICK@%s#%s#%s' % (ts(open_t), st.lv_id, ts(st.wk_src)))
+
+
+# ------------------------------------------------ internal liquidity (revision 14) ----
+# PROPOSAL / PROTOTYPE, awaiting the client (tasks/T003-h4-bias-change.md section 15, revision 14). Observation
+# layer only: it never decides FLIP, never moves the protecting level, never touches P2 / the ratchet.
+# Scope of the bar t (bear shown; bull is the mirror): confirmed swing highs (confirmed by the close of
+# bar t-1, i.e. confirm_time <= open of t), pivot LATER than the pivot of the CURRENT protecting level,
+# price strictly BELOW it. Consumption is HISTORICAL: a swing is consumed when any closed bar from its
+# first usable bar (index pivot + right + 1) up to the previous bar has its adverse extreme STRICTLY beyond
+# it, whatever the scope was at that time (a change of the protecting level never revives it). A touch (==)
+# is neither a crossing nor a consumption.
+def liq_first_cross(st, bars, p, sw, i, upto):
+    """index of the first bar j (sw[i].index + right + 1 <= j <= upto) whose adverse extreme is STRICTLY
+    beyond sw[i]; -1 when there is none up to `upto`. Cached per replay in st.liq_cache (each bar is
+    scanned at most once per swing)."""
+    x = sw[i]
+    s = 1 if x.is_high else -1
+    scanned, first = st.liq_cache.get(i, (x.index + p.right, -1))
+    if first < 0 and scanned < upto:
+        for j in range(scanned + 1, upto + 1):
+            if s * (adverse_ext(bars[j], s) - x.price) > 0:
+                first = j
+                break
+        scanned = first if first >= 0 else upto
+        st.liq_cache[i] = (scanned, first)
+    if first >= 0 and first <= upto:
+        return first
+    return -1
+
+
+def liq_scope(st, sw, nk, s, bars, p, upto):
+    """swing indexes (chronological) of the UNCONSUMED in-scope levels among the first nk (confirmed)
+    swings; consumption is judged up to bar `upto`"""
+    out = []
+    if not st.has_level:
+        return out
+    for i in range(nk - 1, -1, -1):
+        x = sw[i]
+        if x.pivot_time <= st.lv_pivot:
+            break                      # swings are chronological: nothing older can be later than the level
+        if x.is_high != (s > 0) or not (s * (x.price - st.lv_price) < 0):
+            continue
+        if liq_first_cross(st, bars, p, sw, i, upto) >= 0:
+            continue
+        out.append(i)
+    out.reverse()
+    return out
+
+
+def liq_top(sw, idx, s):
+    """the most adverse level of a non-empty list of swing indexes (ties: the LATEST pivot, as the sweep order)"""
+    best = idx[0]
+    for i in idx[1:]:
+        if (s * sw[i].price, sw[i].pivot_time) >= (s * sw[best].price, sw[best].pivot_time):
+            best = i
+    return best
+
+
+def liq_internal_events(t, bars, sw, fv, p, st, tracks, events, open_t, close_t, d, s, ph):
+    """INTERNAL_BREAK / INTERNAL_SWEEP of bar t, per level. Called only when the bar is NOT structural."""
+    bar = bars[t]
+    nk = known_count(sw, p.right, t - 1)
+    broke = []
+    swept = []
+    for i in liq_scope(st, sw, nk, s, bars, p, t - 1):
+        x = sw[i]
+        if s * (adverse_ext(bar, s) - x.price) > 0:          # strictly beyond; a touch (==) is NOT a crossing
+            if s * (bar.close - x.price) > 0:
+                broke.append(x)                                # body beyond this level
+            else:
+                swept.append(x)                                # wick beyond, close not beyond
+    broke.sort(key=lambda x: x.pivot_time)
+    swept.sort(key=lambda x: (s * x.price, x.pivot_time))      # most adverse LAST
+    kind = 'IH' if s > 0 else 'IL'
+    for x in broke:
+        lid = interior_id(kind, x.pivot_time)
+        events.append(Event(EV_INT_BREAK, open_t, lid, 'dir=%s;lint=%s' % (dir_name(d), lid)))
+    if not swept:
+        return
+    top = swept[-1]                                            # ONE setup per bar, from the most adverse level
+    made = 0
+    restart = 0
+    if ph == 'ACTIVE' or ph == 'SWEEP_WAIT':                   # never from HOLD / RECONFIRMED (11.5 open point)
+        made = 1
+        restart = 1 if ph == 'SWEEP_WAIT' else 0
+        new_id = 'SWEEP@%s#%s' % (ts(open_t), st.lv_id)
+        setup_ended(st, open_t, END_REPLACED, events, new_id)
+        st.phase = 'SWEEP_WAIT'
+        st.setup_id = new_id
+        st.setup_type = 'SWEEP'
+        st.snap_id = st.lv_id
+        st.snap_price = st.lv_price
+        st.snap_known = st.lv_known
+        st.has_wick = False
+        st.wk_retro = False
+        st.sweep_time = open_t
+        st.src_time = open_t
+        st.wait_start = close_t
+        st.rec_id = ''
+        st.rec_from = 0
+        st.recon_reason = ''
+        build_tracks(st, tracks, fv, bars, t, d == BULL)
+    for x in swept:
+        lid = interior_id(kind, x.pivot_time)
+        is_top = x is top
+        # DETAIL FORMAT (superset of revision 13): the old fields first and unchanged (restart= is 1 only on the
+        # event that restarted a SWEEP_WAIT), then setup= (1: this event created the setup) and top= (1: most
+        # adverse level swept in this bar). The comparison signature is the event id (type, bar, level id).
+        events.append(Event(EV_INT_SWEEP, open_t, lid,
+                            'dir=%s;lint=%s;sweep=%s;restart=%d;setup=%d;top=%d' % (
+                                dir_name(d), lid, ts(open_t), restart if is_top else 0,
+                                made if is_top else 0, 1 if is_top else 0)))
+
+
+def liq_update(t, bars, sw, p, st):
+    """end of bar t: the unconsumed in-scope set for the NEXT bar (swings confirmed by the close of t, scope of
+    the protecting level as it stands after the derive step). Sets li_key / li_n and the display candidate."""
+    st.li_key = '-'
+    st.li_n = 0
+    st.has_lint = False
+    st.li_id = ''
+    st.li_price = 0.0
+    st.li_consumed = False
+    if st.dir == 0 or not st.has_level:
+        return
+    s = -st.dir
+    nk = known_count(sw, p.right, t)
+    idx = liq_scope(st, sw, nk, s, bars, p, t)
+    if not idx:
+        return
+    kind = 'IH' if s > 0 else 'IL'
+    st.li_key = ','.join(interior_id(kind, sw[i].pivot_time) for i in idx)   # chronological = sorted (fixed-width stamps)
+    st.li_n = len(idx)
+    top = liq_top(sw, idx, s)
+    st.has_lint = True
+    st.li_id = interior_id(kind, sw[top].pivot_time)
+    st.li_price = sw[top].price
+
+
+def bias_step(t, bars, sw, fv, p, st, tracks, events):
+    """step (2) of the order inside one bar. Returns True when the bias flipped.
+    PROPOSAL / PROTOTYPE (revision 10, awaiting the client): the CURRENT protecting level decides, in
+    every phase; the snapshot is a reference only (SNAPSHOT_CROSSED is a diagnostic)."""
+    bar = bars[t]
+    open_t = bar.time
+    close_t = open_t + p.period
+    d = st.dir
+    s = -d
+    ph = st.phase
+    if st.has_level:
+        P = st.lv_price
+        if s * (bar.close - P) > 0:
+            do_flip(t, bars, p, st, tracks, events)
+            return True
+        if s * (adverse_ext(bar, s) - P) > 0:
+            restart = (ph == 'HOLD' or ph == 'RECONFIRMED')
+            start_hold(t, bars, p, fv, st, tracks, events, open_t, close_t, False)
+            events.append(wick_event(open_t, st, restart))
+            return False
+        if ph != 'ACTIVE' and st.snap_id != '' and s * (bar.close - st.snap_price) > 0:
+            # diagnostic only: a close beyond the snapshot that is not beyond the current level.
+            # With the ratchet this is unreachable (the current level is never farther than the snapshot).
+            events.append(Event(EV_SNAP_CROSSED, open_t, st.setup_id,
+                                'snap=%s;price=%s;cur=%s' % (st.snap_id, pf(st.snap_price), st.lv_id), ''))
+    # observation events: the structure runs in EVERY phase (a setup does not freeze it)
+    if st.has_ext and (not st.ex_consumed) and d * (bar.close - st.ex_price) > 0:
+        st.ex_consumed = True
+        events.append(Event(EV_CONTINUATION, open_t, st.ex_id,
+                            'dir=%s;ext=%s' % (dir_name(d), st.ex_id)))
+    if st.has_level:
+        liq_internal_events(t, bars, sw, fv, p, st, tracks, events, open_t, close_t, d, s, ph)
+    return False
+
+
+def dist_to_zone(f, price):
+    if f.lower <= price and price <= f.upper:
+        return 0.0
+    if price < f.lower:
+        return f.lower - price
+    return price - f.upper
+
+
+def sel_before(fa, da, fb, db):
+    if da != db:
+        return da < db
+    if fa.confirm_time != fb.confirm_time:
+        return fa.confirm_time > fb.confirm_time
+    return fa.id < fb.id
+
+
+def fvg_step(t, bars, fv, p, st, tracks, events):
+    """step (3): FVG eligibility / invalidation / touch for bar t.
+    PROPOSAL / PROTOTYPE (revision 10, awaiting the client): nothing freezes or thaws the structure.
+    RECONF_LOST removes the readiness and returns the setup to waiting (STRUCT -> HOLD, INTERNAL ->
+    SWEEP_WAIT) KEEPING setup_id, snapshot, wick/sweep record, wait_start and the other valid tracks;
+    rec_id is cleared. It is NEVER a SETUP_ENDED."""
+    bar = bars[t]
+    open_t = bar.time
+    d = st.dir
+    ph = st.phase
+    if ph != 'HOLD' and ph != 'SWEEP_WAIT' and ph != 'RECONFIRMED':
+        return
+    # newly confirmed eligible FVG (candle C = bar t)
+    a = t - 2
+    if a >= 0:
+        for fi in range(len(fv)):
+            f = fv[fi]
+            if f.index_a == a and fvg_eligible(f, st, d == BULL):
+                tracks.append(make_track(fi, f))
+    for tr in tracks:
+        f = fv[tr.f]
+        if f.index_a + 3 > t:
+            continue
+        if not tr.invalid:
+            if f.bullish:
+                if bar.close < f.lower:
+                    tr.invalid = True
+            else:
+                if bar.close > f.upper:
+                    tr.invalid = True
+    if st.phase == 'RECONFIRMED':
+        for tr in tracks:
+            if tr.recorded and tr.invalid:
+                tr.recorded = False
+                to = 'HOLD' if st.recon_reason == 'STRUCT' else 'SWEEP_WAIT'
+                events.append(Event(EV_RECONF_LOST, open_t, tr.id,
+                                    'fvg=%s;to=%s' % (tr.id, to),
+                                    'RECONF_LOST@%s#%s#%s' % (ts(open_t), tr.id, to)))
+                st.phase = to
+                st.recon_reason = ''
+                st.rec_id = ''
+                st.rec_from = 0
+    if st.phase == 'HOLD' or st.phase == 'SWEEP_WAIT':
+        best = None
+        bestd = 0.0
+        # AMBIGUITY 20a (kept as a defensive guard): a touch while NO protecting level is defined is
+        # not recorded. With the revision 10 structure this state cannot arise inside a setup (the
+        # level is never dropped, only a flip ends the setup); test 28 asserts that invariant.
+        for tr in tracks:
+            if st.phase == 'SWEEP_WAIT' and not st.has_level:
+                break
+            if tr.invalid:
+                continue
+            f = fv[tr.f]
+            if f.index_a + 3 > t:
+                continue
+            if bar.time >= st.wait_start and bar.low <= f.upper and bar.high >= f.lower:
+                dd = dist_to_zone(f, bar.close)
+                if best is None or sel_before(f, dd, fv[best.f], bestd):
+                    best = tr
+                    bestd = dd
+        if best is not None:
+            reason = 'STRUCT' if st.phase == 'HOLD' else 'INTERNAL'
+            st.phase = 'RECONFIRMED'
+            st.recon_reason = reason
+            st.rec_id = best.id
+            st.rec_from = open_t + p.period
+            best.recorded = True
+            events.append(Event(EV_RECONFIRMED, open_t, best.id,
+                                'fvg=%s;reason=%s' % (best.id, reason),
+                                'RECONFIRMED@%s#%s#%s' % (ts(open_t), best.id, reason)))
+
+
+def accept_candidate(lvl, st, bars, t, p):
+    """PL update, the revision 10 RATCHET (11.9), PROPOSAL / PROTOTYPE awaiting the client's answer
+    (does the protecting level move to the new high/low or does the old one stay?). Decides whether
+    the P2 candidate `lvl`, derived from the swings confirmed by the close of bar t, becomes the
+    protecting level (used from bar t+1). Returns (accept, wick_idx).
+      (i)   it comes from confirmed swings known at t (derive_level only uses those);
+      (ii)  its extreme pivot is LATER than the extreme pivot of the current level;
+      (iii) it is strictly more advanced in the trend direction (bear: lower, bull: higher);
+      (iv)  no closed bar between its pivot and t closed beyond it.
+    Without a current level only (i) and (iv) apply (P2 retroactive rule, unchanged)."""
+    d = st.dir
+    s = -d
+    body, wick_idx = scan_level(bars, lvl.idx + 1, t, lvl.price, s)
+    if body:
+        return False, -1
+    if st.has_level and p.ratchet:
+        if not (lvl.ext_time > st.lv_ext and s * lvl.price < s * st.lv_price):
+            return False, -1
+    return True, wick_idx
+
+
+def derive_step(t, bars, sw, fv, p, st, tracks, events):
+    """step (4): candidates for the NEXT bar from the prefix including bar t. Runs in EVERY phase.
+    A new level is used only from the FOLLOWING bar (events of bar t were judged against the level
+    known before t)."""
+    if st.dir == 0:
+        return
+    open_t = bars[t].time
+    d = st.dir
+    s = -d
+    nki = known_count(sw, p.right, t)
+    lvl, ex = derive_level(sw, nki, d)
+    # latest HH/LL (continuation)
+    if ex is None:
+        st.has_ext = False
+    else:
+        st.has_ext = True
+        st.ex_id = ex.id
+        st.ex_price = ex.price
+        st.ex_consumed = close_beyond_any(bars, ex.idx + 1, t, ex.price, d)
+    # protecting level
+    if lvl is None and not p.ratchet:
+        st.has_level = False          # R0 control only
+    if lvl is not None and not (st.has_level and st.lv_id == lvl.id):
+        ok, wick_idx = accept_candidate(lvl, st, bars, t, p)
+        if ok:
+            st.has_level = True
+            st.lv_id = lvl.id
+            st.lv_price = lvl.price
+            st.lv_pivot = lvl.pivot_time
+            st.lv_ext = lvl.ext_time
+            st.lv_prev = lvl.prev_time
+            st.lv_known = lvl.known
+            if wick_idx >= 0:
+                # retroactive wick: HOLD starts at detected_at, not at the wick. If this physical bar is
+                # already the source of the live WICK setup (the bar judged now against the previous
+                # level) no second setup is created (revision 10 decision). A SWEEP setup of the same
+                # bar IS replaced: the interior high became the protecting level (structural wick).
+                wk_src = bars[wick_idx].time
+                if not (st.setup_type == 'WICK' and st.src_time == wk_src):
+                    wk_known = wk_src + p.period
+                    det = max(lvl.known, wk_known, st.bias_start)
+                    start_hold(t, bars, p, fv, st, tracks, events, wk_src, det, det > wk_known)
+                    events.append(wick_event(open_t, st, False))
+        elif not p.ratchet:
+            # R0 control only: plain re-derivation drops the level when the candidate is crossed
+            st.has_level = False
+            return
+
+
+def process_bar(t, bars, sw, fv, p, st, tracks, events):
+    if st.dir == 0:
+        none_step(t, bars, sw, p, st, events)
+    else:
+        flipped = bias_step(t, bars, sw, fv, p, st, tracks, events)
+        if not flipped:
+            fvg_step(t, bars, fv, p, st, tracks, events)
+    derive_step(t, bars, sw, fv, p, st, tracks, events)
+    liq_update(t, bars, sw, p, st)
+
+
+def dval(detail, key):
+    """value of `key` in a 'k1=v1;k2=v2' event detail ('' when absent); the key must start the text or follow ';'"""
+    for part in detail.split(';'):
+        if part.startswith(key + '='):
+            return part[len(key) + 1:]
+    return ''
+
+
+def pre_wick_ids(st, fv, n):
+    """FVGs of the bias type that are older than the wick: reporting only"""
+    if st.dir == 0 or st.src_time == 0 or st.phase == 'ACTIVE':
+        return ''
+    ids = []
+    cnt = 0
+    for k in range(len(fv) - 1, -1, -1):
+        f = fv[k]
+        if f.index_a + 2 > n - 1:
+            continue
+        if f.bullish != (st.dir == BULL):
+            continue
+        if f.time_a < st.src_time:
+            cnt += 1
+            if len(ids) < 6:
+                ids.append(f.id)
+    if cnt == 0:
+        return ''
+    extra = ''
+    if cnt > len(ids):
+        extra = '+%d' % (cnt - len(ids))
+    return '%s%s' % (','.join(ids), extra)
+
+
+def diag_track_bar(rep, st, open_t, ne0):
+    """DIAGNOSTIC (behaviour neutral): flips, and runs of bars where a bias exists but has no
+    protecting level. Mirrors the counters of H3Replay."""
+    types = [e.type for e in rep.events[ne0:]]
+    for e in rep.events[ne0:]:
+        if e.type == EV_FLIP:
+            rep.n_flips += 1
+            rep.last_flip = e.bar_time
+    if st.dir != 0 and not st.has_level:
+        if rep.nolv_run_start == 0:
+            rep.nolv_run_start = open_t
+            rep.nolv_run_bars = 0
+            rep.nolv_runs += 1
+            if EV_FLIP in types:
+                rep.nolv_cause = 'FLIP'
+            elif EV_BREAK_SET in types:
+                rep.nolv_cause = 'BREAK_SET'
+            elif EV_SEED in types:
+                rep.nolv_cause = 'SEED'
+            else:
+                rep.nolv_cause = 'LEVEL_DROPPED'
+        rep.nolv_run_bars += 1
+        rep.nolv_total += 1
+    else:
+        rep.nolv_run_start = 0
+        rep.nolv_run_bars = 0
+        rep.nolv_cause = ''
+
+
+def diag_flips_after(rep):
+    if rep.nolv_run_start == 0:
+        return 0
+    c = 0
+    for e in rep.events:
+        if e.type == EV_FLIP and e.bar_time > rep.nolv_run_start:
+            c += 1
+    return c
+
+
+def replay(bars, n, p):
+    rep = Rep()
+    rep.events = []
+    rep.tracks = []
+    st = St()
+    sw, amb = t2.find_swings(bars, n, p.left, p.right, p.period)
+    fv = t2.find_fvgs(bars, n, p.period)
+    rep.key_before_last = ''
+    rep.keys = []
+    rep.hist = []
+    # DIAGNOSTIC counters (behaviour neutral, never part of the state key): bias without a level
+    rep.nolv_run_start = 0
+    rep.nolv_run_bars = 0
+    rep.nolv_cause = ''
+    rep.nolv_total = 0
+    rep.nolv_runs = 0
+    rep.n_flips = 0
+    rep.last_flip = 0
+    for t in range(n):
+        if t == n - 1:
+            rep.key_before_last = state_key(st, rep.tracks)
+        ne0 = len(rep.events)
+        process_bar(t, bars, sw, fv, p, st, rep.tracks, rep.events)
+        rep.keys.append(state_key(st, rep.tracks))
+        # PYTHON-ONLY per-bar record for the property tests (the MQL5 replay does not keep it)
+        rep.hist.append((st.dir, st.phase, st.setup_id, st.snap_price, st.has_level, st.lv_price, st.bias_start,
+                         len(rep.events) - ne0))
+        diag_track_bar(rep, st, bars[t].time, ne0)
+    rep.flips_after_run = diag_flips_after(rep)
+    if n > 0:
+        nkf = known_count(sw, p.right, n - 1)
+        st.t2dir = t2_dir_name(sw, nkf)
+    st.pre = pre_wick_ids(st, fv, n)
+    rep.state = st
+    rep.n = n
+    rep.last_time = bars[n - 1].time if n > 0 else 0
+    return rep
+
+
+def bar_index_by_time(bars, n, t):
+    """index of the bar that OPENS at exactly t in bars[0..n-1] (chronological), or -1"""
+    lo = 0
+    hi = n - 1
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        if bars[mid].time == t:
+            return mid
+        if bars[mid].time < t:
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    return -1
+
+
+def anchor_refs_named(st):
+    """(name, absolute time) of the references the state depends on (AMBIGUITY 5). Revision 10: no
+    frozen branch (the structure is never frozen). The references are the origin, the level's pivots
+    (if a level exists), the source wick of a structural setup and the sweep of an internal one. Zero
+    times are dropped."""
+    refs = [('origin', st.origin_ref)]
+    if st.has_level:
+        refs += [('lv_pivot', st.lv_pivot), ('lv_ext', st.lv_ext), ('lv_prev', st.lv_prev)]
+    if st.has_wick:
+        refs.append(('wick', st.wk_src))
+    if st.sweep_time != 0:
+        refs.append(('sweep', st.sweep_time))
+    return [(nm, r) for nm, r in refs if r != 0]
+
+
+def anchor_refs(st):
+    """absolute reference times the state depends on (see anchor_refs_named)"""
+    return [r for _, r in anchor_refs_named(st)]
+
+
+def anchor_time(st, p, bars, n):
+    """FINDING 1: earliest bar time the state depends on, by EXISTING bars.
+    Each reference is located by its absolute open time in the chronological series
+    bars[0..n-1]; the bars that confirm it are the p.left EXISTING bars before it (index
+    based, converted back to the absolute open time of that bar). Weekends and holes
+    in the history therefore never produce a time that is not a bar.
+    Returns (anchor, missing): anchor = 0 when not applicable (NONE, no reference) or
+    when the history lacks a needed bar; missing = '' or the reason (reference not found
+    in the series / fewer than left bars before it). Nothing is ever fabricated."""
+    if st.dir == 0:
+        return 0, ''
+    a = 0
+    for r in anchor_refs(st):
+        i = bar_index_by_time(bars, n, r)
+        if i < 0:
+            return 0, 'ANCHOR_REF_NOT_IN_SERIES %s' % ts(r)
+        if i < p.left:
+            return 0, 'ANCHOR_NEEDS_%d_BARS_BEFORE %s' % (p.left, ts(r))
+        c = bars[i - p.left].time
+        if a == 0 or c < a:
+            a = c
+    return a, ''
+
+
+def events_text(events, t_from):
+    out = []
+    for e in events:
+        if e.bar_time >= t_from:
+            out.append(e.text())
+    if not out:
+        return '-'
+    return '|'.join(out)
+
+
+class SetupContext(object):
+    pass
+
+
+def setup_context(st, tracks):
+    """READ-ONLY context of the live setup for the NEXT module (revision 10, correction 5; PROPOSAL /
+    PROTOTYPE). M15_OUTCOME is NOT a market event of the stateless replay (no mechanism is defined); this
+    is only what H4 offers: setup_id, direction, reason, the snapshot level (REFERENCE ONLY), the live
+    protecting level (the invalidation reference), the recorded FVG id and bounds, valid-from, ready."""
+    c = SetupContext()
+    c.valid = (st.dir != 0 and st.setup_id != '')
+    c.setup_id = st.setup_id
+    c.direction = dir_name(st.dir) if c.valid else 'NONE'
+    c.stype = st.setup_type
+    c.reason = ('STRUCT' if st.setup_type == 'WICK' else 'INTERNAL') if c.valid else ''
+    c.phase = st.phase if st.dir != 0 else '-'
+    c.ready = c.valid and st.phase == 'RECONFIRMED'
+    c.snap_id = st.snap_id
+    c.snap_price = st.snap_price
+    c.snap_known = st.snap_known
+    c.live_id = st.lv_id if st.has_level else ''
+    c.live_price = st.lv_price if st.has_level else 0.0
+    c.fvg_id = ''
+    c.fvg_lower = 0.0
+    c.fvg_upper = 0.0
+    c.fvg_conf = 0
+    c.valid_from = 0
+    if c.ready:
+        for tr in tracks:
+            if tr.recorded and tr.id == st.rec_id:
+                c.fvg_id = tr.id
+                c.fvg_lower = tr.lower
+                c.fvg_upper = tr.upper
+                c.fvg_conf = tr.conf
+        c.valid_from = max(st.rec_from, st.wait_start)
+    c.wait_start = st.wait_start
+    c.src_time = st.src_time
+    return c
+
+
+def setup_context_text(c):
+    if not c.valid:
+        return 'CTX=-'
+    return 'CTX=%s/%s/%s/%s/%s/ready=%d/snap=%s@%s/%s/live=%s@%s/fvg=%s[%s-%s]@%s/from=%s/wait=%s/src=%s' % (
+        c.setup_id, c.direction, c.stype, c.reason, c.phase, 1 if c.ready else 0,
+        c.snap_id, pf(c.snap_price), tx(c.snap_known), c.live_id if c.live_id else '-',
+        pf(c.live_price) if c.live_id else '-',
+        c.fvg_id if c.fvg_id else '-', pf(c.fvg_lower), pf(c.fvg_upper), tx(c.fvg_conf), tx(c.valid_from),
+        tx(c.wait_start), tx(c.src_time))
+
+
+def events_sig_text(events, t_from):
+    """the events the A/B check compares: by ABSOLUTE bar time, type and subject id, with the resulting
+    direction / reason where it matters. Provenance-only tokens and diagnostic events are left out."""
+    out = []
+    for e in events:
+        if e.bar_time >= t_from and e.sig != '':
+            out.append(e.sig)
+    if not out:
+        return '-'
+    return '|'.join(out)
+
+
+def replay_text(rep):
+    return 'REPLAY;ST=%s;%s;EV=%s' % (state_text(rep.state, rep.tracks), setup_context_text(setup_context(rep.state, rep.tracks)),
+                                       events_text(rep.events, 0))
+
+
+# ----------------------------------------------------------- P11 evaluate ----
+FLAG_CONVERGED = 'CONVERGED'
+FLAG_SEEDED = 'SEEDED'
+FLAG_LIMITED = 'LIMITED_BY_HISTORY'
+
+
+class Eval(object):
+    pass
+
+
+def ab_reasons(struct_a, struct_b, setup_a, setup_b, ev_sig_a, ev_sig_b, dir_a, anchor_a, trusted_a,
+               anchor_missing=''):
+    """P11 (ii)/(iii) by FUNCTION (revision 10, 11.7; PROPOSAL / PROTOTYPE): why a rebuild is not
+    reliable ('' = reliable). ev_sig_* are the event signatures dated inside B's trusted region only.
+    anchor_missing != '': the history lacks a bar the anchor needs (FINDING 1)."""
+    why = []
+    if struct_a != struct_b:
+        why.append('AB_STRUCTURE_DIFF')
+    if setup_a != setup_b:
+        why.append('AB_SETUP_DIFF')
+    if ev_sig_a != ev_sig_b:
+        why.append('AB_EVENT_DIFF')
+    if dir_a != 0 and anchor_missing != '':
+        why.append('ANCHOR_HISTORY_MISSING')
+    elif dir_a != 0 and anchor_a < trusted_a:
+        why.append('ANCHOR_IN_WARMUP')
+    return '+'.join(why)
+
+
+def ab_compare(repA, repB, zone_from, anchor_a, trusted_a, anchor_missing=''):
+    """the comparison used by evaluate(): (reasons, org_note). org_note is the informational ORG_DIFF
+    text (provenance: the origin NAME) and never a reason."""
+    why = ab_reasons(struct_key(repA.state), struct_key(repB.state),
+                     setup_key(repA.state, repA.tracks), setup_key(repB.state, repB.tracks),
+                     events_sig_text(repA.events, zone_from), events_sig_text(repB.events, zone_from),
+                     repA.state.dir, anchor_a, trusted_a, anchor_missing)
+    org = ''
+    if repA.state.origin != repB.state.origin and (repA.state.dir != 0 or repB.state.dir != 0):
+        org = 'ORG_DIFF A=%s B=%s' % (repA.state.origin, repB.state.origin)
+    return why, org
+
+
+def consumer_prev_ok(cur_reliable, prev_reliable, cur_key_prev, prev_key):
+    """the state before the latest bar counts only if it was RELIABLE and the
+    current window reproduces it"""
+    return cur_reliable and prev_reliable and cur_key_prev == prev_key
+
+
+def evaluate(bars_all, n_avail, p):
+    """Stateless fixed-depth rebuild with the A/B depth check (P11).
+    Only bars_all[0..n_avail-1] are read."""
+    ev = Eval()
+    ev.r_request = p.rebuild
+    ev.r_req = max(p.rebuild, 3 * p.lookback)
+    ev.r_eff = min(ev.r_req, p.hard_cap, n_avail)
+    ev.warm = warm_up(p)
+    ev.chk = check_depth(p)
+    ev.b_depth = 0
+    ev.reliable = False
+    ev.flag = FLAG_LIMITED
+    ev.reason = ''
+    ev.note = ''
+    ev.events = []
+    ev.key = ''
+    ev.key_prev = ''
+    ev.state = None
+    ev.tracks = []
+    ev.last_time = 0
+    ev.prev_ok = False
+    ev.cause = ''
+    ev.anchor = 0
+    ev.anchor_missing = ''
+    ev.n_avail = n_avail
+    ev.trusted_from = 0
+    notes = []
+    if p.rebuild < 3 * p.lookback:
+        notes.append('R raised to 3*L %d' % ev.r_req)
+    if ev.r_req > p.hard_cap:
+        notes.append('request %d clamped to HARD_CAP %d' % (ev.r_req, p.hard_cap))
+    if n_avail <= 0:
+        ev.reason = 'NO_BARS'
+        ev.note = ';'.join(notes)
+        return ev
+    if n_avail < min(ev.r_req, p.hard_cap):
+        notes.append('reduced depth %d of %d' % (ev.r_eff, ev.r_req))
+    ev.note = ';'.join(notes)
+    if ev.r_eff < 3 * p.lookback:
+        ev.reason = 'SHORT_HISTORY'
+        return ev
+    startA = n_avail - ev.r_eff
+    winA = bars_all[startA:n_avail]
+    repA = replay(winA, ev.r_eff, p)
+    ev.b_depth = ev.r_eff - ev.chk
+    winB = bars_all[n_avail - ev.b_depth:n_avail]
+    repB = replay(winB, ev.b_depth, p)
+    trB = winB[ev.warm].time
+    trA = winA[ev.warm].time
+    keyA = state_key(repA.state, repA.tracks)
+    keyB = state_key(repB.state, repB.tracks)
+    # the anchor is located in the FULL available series (not only in window A)
+    ev.anchor, ev.anchor_missing = anchor_time(repA.state, p, bars_all, n_avail)
+    why, org_note = ab_compare(repA, repB, trB, ev.anchor, trA, ev.anchor_missing)
+    if ev.anchor_missing != '':
+        ev.note = (ev.note + ';' if ev.note else '') + 'missing history: ' + ev.anchor_missing
+    if org_note:
+        ev.note = (ev.note + ';' if ev.note else '') + org_note
+    ev.state = repA.state
+    ev.tracks = repA.tracks
+    ev.key = keyA
+    ev.key_prev = repA.key_before_last
+    ev.last_time = repA.last_time
+    ev.trusted_from = trB
+    if why == '':
+        ev.reliable = True
+        if repA.state.dir != 0 and repA.state.origin == 'SEED':
+            ev.flag = FLAG_SEEDED
+        else:
+            ev.flag = FLAG_CONVERGED
+        ev.reason = 'converged at depth %d vs %d' % (ev.r_eff, ev.b_depth)
+        ev.events = repA.events
+    else:
+        ev.flag = FLAG_LIMITED
+        ev.reason = why
+        ev.events = []
+    return ev
+
+
+def reported_direction(ev):
+    if not ev.reliable:
+        return 'UNKNOWN'
+    return dir_name(ev.state.dir)
+
+
+def eval_text(ev):
+    s = 'EVAL;FLAG=%s;REASON=%s;DIR=%s;DEPTHS=req:%d,eff:%d,b:%d,warm:%d,chk:%d;ANCH=%s;NOTE=%s' % (
+        ev.flag, ev.reason, reported_direction(ev), ev.r_req, ev.r_eff, ev.b_depth,
+        ev.warm, ev.chk, tx(ev.anchor), ev.note if ev.note else '-')
+    if ev.reliable:
+        s += ';ST=%s;EV=%s' % (state_text(ev.state, ev.tracks), events_text(ev.events, 0))
+    elif ev.state is not None:
+        s += ';DIAG=%s' % ev.key
+    return s
+
+
+def evaluate_latest(bars_all, n, p):
+    """evaluation at the last bar plus the check of the state before it"""
+    cur = evaluate(bars_all, n, p)
+    prev = evaluate(bars_all, n - 1 if n > 1 else 0, p)
+    cur.prev_ok = consumer_prev_ok(cur.reliable, prev.reliable, cur.key_prev, prev.key)
+    cur.cause = ''
+    if cur.reliable and not prev.reliable:
+        cur.cause = 'REDERIVATION:LIMITED_EXIT'
+    elif (not cur.reliable) and prev.reliable:
+        cur.cause = 'REDERIVATION:LIMITED_ENTER'
+    elif cur.reliable and prev.reliable and cur.key_prev != prev.key:
+        if cur.r_eff != prev.r_eff:
+            cur.cause = 'REDERIVATION:DEPTH_CHANGED'
+        else:
+            cur.cause = 'REDERIVATION:WINDOW_SLID'
+    return cur
+
+
+# consumer (requirement b): cursor = open time of the last bar already consumed
+C_OK = 'OK'
+C_NOTHING_NEW = 'NOTHING_NEW'
+C_NOT_RELIABLE = 'NOT_RELIABLE'
+C_REDERIVED = 'REDERIVED'
+C_GAP = 'GAP'
+
+
+def baseline_cursor(ev):
+    return ev.last_time
+
+
+def consume_new(ev, cursor, period):
+    """returns (status, [events newer than the cursor]). Events are returned
+    only for the latest closed bar and only when the state before and after
+    it are both RELIABLE and A/B agree (ev.prev_ok from evaluate_latest)."""
+    if not ev.reliable:
+        return C_NOT_RELIABLE, []
+    if cursor >= ev.last_time:
+        return C_NOTHING_NEW, []
+    if cursor == 0 or cursor < ev.last_time - period:
+        return C_GAP, []
+    if not ev.prev_ok:
+        return C_REDERIVED, []
+    out = []
+    for e in ev.events:
+        if e.bar_time > cursor:
+            out.append(e)
+    return C_OK, out
+
+
+# ================================================================ diagnostics ====
+# Behaviour-neutral helpers that explain WHY an evaluation is (not) reliable. They never
+# change evaluate(); they re-run replays A and B and compare them. Mirrored by H3Diagnose
+# in src/include/H4Bias.mqh. All times are ABSOLUTE (YYYYMMDDHHMM, server time of the bars).
+STATE_FIELDS = ('BIAS', 'LV', 'EX', 'LI', 'BS', 'SU', 'PH', 'SRC', 'WAIT', 'REC', 'RSN', 'EL')
+STRUCT_FIELD_COUNT = 5            # BIAS LV EX LI BS = the STRUCTURE key; the rest is the SETUP key
+FIELD_MEANING = {'BIAS': 'dir', 'LV': 'protecting level id@price/known (id carries the pivot/ext/prev times)',
+                 'EX': 'pending latest HH/LL candidate id@price/consumed', 'LI': 'sorted set of the unconsumed in-scope internal liquidity levels usable at the next bar (ids; revision 14)',
+                 'BS': 'bias_start (only while the bias has no level)', 'SU': 'setup_id', 'PH': 'phase',
+                 'SRC': 'wick / sweep source time', 'WAIT': 'wait_start', 'REC': 'recorded FVG',
+                 'RSN': 'reconfirm reason', 'EL': 'live eligible FVG tracks with bounds and confirm time'}
+
+
+def state_fields(st, tracks):
+    """the compared key as an ORDERED list of (label, value); ';'.join('label=value') == state_key
+    (first the STRUCTURE fields, then the SETUP fields)"""
+    out = []
+    for part in (struct_key(st) + ';' + setup_key(st, tracks)).split(';'):
+        lab, val = part.split('=', 1)
+        out.append((lab, val))
+    return out
+
+
+def first_diff_field(fa, fb):
+    """first field (in the explicit order) whose values differ: (label, value_a, value_b) or None"""
+    for (la, va), (lb, vb) in zip(fa, fb):
+        if va != vb:
+            return la, va, vb
+    return None
+
+
+def anchor_binding(st, p, bars, n):
+    """(anchor, name, ref, missing): like anchor_time, plus WHICH reference gives the earliest
+    anchor (first in the reference order on a tie)"""
+    if st.dir == 0:
+        return 0, '', 0, ''
+    a = 0
+    nm = ''
+    rf = 0
+    for name, r in anchor_refs_named(st):
+        i = bar_index_by_time(bars, n, r)
+        if i < 0:
+            return 0, '', 0, 'ANCHOR_REF_NOT_IN_SERIES %s' % ts(r)
+        if i < p.left:
+            return 0, '', 0, 'ANCHOR_NEEDS_%d_BARS_BEFORE %s' % (p.left, ts(r))
+        c = bars[i - p.left].time
+        if a == 0 or c < a:
+            a = c
+            nm = name
+            rf = r
+    return a, nm, rf, ''
+
+
+def one_track_text(t):
+    return t.id + ':' + ('INVALID' if t.invalid else 'RECORDED' if t.recorded else 'FRESH')
+
+
+def track_diff_text(tra, trb):
+    """first differing track of two lists: 'track #i A=.. B=.. (counts na vs nb)' or ''"""
+    for i in range(max(len(tra), len(trb))):
+        xa = one_track_text(tra[i]) if i < len(tra) else '-'
+        xb = one_track_text(trb[i]) if i < len(trb) else '-'
+        if xa != xb:
+            return 'track #%d A=%s B=%s (counts %d vs %d)' % (i, xa, xb, len(tra), len(trb))
+    return ''
+
+
+def why_no_level(bars, n, p, d):
+    """why a bias of direction d has no protecting level at the end of bars[0..n-1]: the
+    candidate P2 would give, and the first bar that already closed beyond it"""
+    sw, _ = t2.find_swings(bars, n, p.left, p.right, p.period)
+    nk = known_count(sw, p.right, n - 1)
+    lvl, ex = derive_level(sw, nk, d)
+    if lvl is None:
+        if ex is None:
+            return 'NO_CANDIDATE: no latest %s in the swings known at the last bar' % ('HH' if d > 0 else 'LL')
+        return 'NO_CANDIDATE: %s found but no bounded swing between it and its predecessor' % ex.id
+    s = -d
+    for i in range(lvl.idx + 1, n):
+        if s * (bars[i].close - lvl.price) > 0:
+            return 'CONSUMED: candidate %s price %s closed beyond at %s' % (lvl.id, pf(lvl.price), ts(bars[i].time))
+    return 'CANDIDATE_DEFINED: %s price %s (not consumed; check the derive order)' % (lvl.id, pf(lvl.price))
+
+
+def diag_side(rep, bars_win, bars_all, n_avail, p, warm):
+    d = Diag()
+    st = rep.state
+    d.start = bars_win[0].time
+    d.bars = len(bars_win)
+    d.warm_end = bars_win[warm].time if len(bars_win) > warm else 0
+    d.dir = st.dir
+    d.phase = st.phase
+    d.origin = st.origin
+    d.origin_ref = st.origin_ref
+    d.bias_start = st.bias_start
+    d.has_level = st.has_level
+    d.lv_id = st.lv_id
+    d.lv_price = st.lv_price
+    d.lv_pivot = st.lv_pivot
+    d.lv_ext = st.lv_ext
+    d.lv_prev = st.lv_prev
+    d.lv_known = st.lv_known
+    d.frozen = False              # DEPRECATED (revision 10: nothing is frozen)
+    d.anchor, d.anchor_name, d.anchor_ref, d.anchor_missing = anchor_binding(st, p, bars_all, n_avail)
+    d.nolv_now = (st.dir != 0 and not st.has_level)
+    d.nolv_since = rep.nolv_run_start
+    d.nolv_bars = rep.nolv_run_bars
+    d.nolv_cause = rep.nolv_cause
+    d.nolv_total = rep.nolv_total
+    d.nolv_runs = rep.nolv_runs
+    d.flips = rep.n_flips
+    d.last_flip = rep.last_flip
+    d.flips_after_run = rep.flips_after_run
+    d.nolv_why = why_no_level(bars_win, len(bars_win), p, st.dir) if d.nolv_now else ''
+    d.n_events = len(rep.events)
+    return d
+
+
+class Diag(object):
+    pass
+
+
+def diagnose(bars_all, n_avail, p, ev):
+    """Explain an evaluation: ev is the result of evaluate(bars_all, n_avail, p). Returns a Diag.
+    d.valid is False when no replay ran (no bars / SHORT_HISTORY)."""
+    d = Diag()
+    d.valid = ev.state is not None
+    d.reliable = ev.reliable
+    d.reason = ev.reason
+    d.n_avail = n_avail
+    d.r_eff = ev.r_eff
+    d.b_depth = ev.b_depth
+    d.warm = ev.warm
+    d.chk = ev.chk
+    if not d.valid:
+        return d
+    winA = bars_all[n_avail - ev.r_eff:n_avail]
+    winB = bars_all[n_avail - ev.b_depth:n_avail]
+    repA = replay(winA, ev.r_eff, p)
+    repB = replay(winB, ev.b_depth, p)
+    d.series_first = bars_all[0].time
+    d.series_last = bars_all[n_avail - 1].time
+    d.a = diag_side(repA, winA, bars_all, n_avail, p, ev.warm)
+    d.b = diag_side(repB, winB, bars_all, n_avail, p, ev.warm)
+    d.zone_start = d.b.warm_end
+    d.field_diff = first_diff_field(state_fields(repA.state, repA.tracks),
+                                    state_fields(repB.state, repB.tracks))
+    d.org_diff = ''
+    if repA.state.origin != repB.state.origin and (repA.state.dir != 0 or repB.state.dir != 0):
+        d.org_diff = 'ORG_DIFF A=%s B=%s' % (repA.state.origin, repB.state.origin)
+    d.track_diff = ''
+    if d.field_diff is not None and d.field_diff[0] == 'EL':
+        d.track_diff = track_diff_text(repA.tracks, repB.tracks)
+    # events inside B's trusted region (the comparison zone)
+    # the zone compares event SIGNATURES (provenance-only tokens and diagnostic events are left out, as the
+    # A/B check does); the texts of the differing events are shown
+    za = [e for e in repA.events if e.bar_time >= d.zone_start and e.sig != '']
+    zb = [e for e in repB.events if e.bar_time >= d.zone_start and e.sig != '']
+    d.zone_na = len(za)
+    d.zone_nb = len(zb)
+    d.event_diff = None            # (index, event_a, event_b) of the first difference
+    d.event_count_diff = False
+    for i in range(min(len(za), len(zb))):
+        if za[i].sig != zb[i].sig:
+            d.event_diff = (i, za[i], zb[i])
+            break
+    if d.event_diff is None and len(za) != len(zb):
+        d.event_count_diff = True
+        d.event_extra = (za[len(zb)] if len(za) > len(zb) else zb[len(za)], 'A' if len(za) > len(zb) else 'B')
+    # state agreement on the common bars (B's bars; A has chk more bars in front)
+    off = ev.r_eff - ev.b_depth
+    ndiff = 0
+    first_t = 0
+    last_t = 0
+    for j in range(ev.b_depth):
+        if repA.keys[j + off] != repB.keys[j]:
+            ndiff += 1
+            if first_t == 0:
+                first_t = winB[j].time
+            last_t = winB[j].time
+    d.common_bars = ev.b_depth
+    d.common_diff = ndiff
+    d.common_first_diff = first_t
+    d.common_last_diff = last_t
+    return d
+
+
+def t_or_dash(t):
+    return tx(t) if t != 0 else '-'
+
+
+def dir_phase(side):
+    if side.dir == 0:
+        return 'NONE'
+    return '%s/%s' % (dir_name(side.dir), side.phase)
+
+
+def side_line(label, side):
+    if side.has_level:
+        lv = '%s@%s known %s pivots %s/%s/%s' % (side.lv_id, pf(side.lv_price), tx(side.lv_known),
+                                                 tx(side.lv_pivot), tx(side.lv_ext), tx(side.lv_prev))
+    else:
+        lv = 'none'
+    if side.anchor_missing:
+        anc = 'missing (%s)' % side.anchor_missing
+    elif side.anchor == 0:
+        anc = '-'
+    else:
+        anc = '%s via %s@%s' % (tx(side.anchor), side.anchor_name, tx(side.anchor_ref))
+    return '%s: %s origin %s ref %s since %s | level %s | anchor %s' % (
+        label, dir_phase(side), side.origin, t_or_dash(side.origin_ref), t_or_dash(side.bias_start), lv, anc)
+
+
+def nolv_line(label, side):
+    if not side.nolv_now:
+        if side.dir == 0:
+            return '%s: no bias (NONE)' % label
+        return '%s: level defined at the last bar; bars without a level in the window %d in %d run(s); flips %d (last %s)' % (
+            label, side.nolv_total, side.nolv_runs, side.flips, t_or_dash(side.last_flip))
+    return ('%s: level UNDEFINED since %s (%d bars, started by %s); runs %d, bars without level %d; flips in window %d '
+            '(last %s), flips after the run began %d; why: %s') % (
+        label, tx(side.nolv_since), side.nolv_bars, side.nolv_cause, side.nolv_runs, side.nolv_total,
+        side.flips, t_or_dash(side.last_flip), side.flips_after_run, side.nolv_why)
+
+
+def diag_lines(d):
+    """the diagnostic report, one line per list item (Experts log / replay tool / tests)"""
+    if not d.valid:
+        return ['DIAG1 no replay ran: %s (bars available %d)' % (d.reason, d.n_avail)]
+    out = []
+    out.append('DIAG1 %s reasons=%s | series %s..%s (%d bars) | A window %s..%s (%d bars) warm-up ends %s | '
+               'B window %s..%s (%d bars) warm-up ends %s | comparison zone from %s' % (
+                   'RELIABLE' if d.reliable else 'LIMITED', d.reason if not d.reliable else '-',
+                   tx(d.series_first), tx(d.series_last), d.n_avail,
+                   tx(d.a.start), tx(d.series_last), d.a.bars, tx(d.a.warm_end),
+                   tx(d.b.start), tx(d.series_last), d.b.bars, tx(d.b.warm_end), tx(d.zone_start)))
+    out.append('DIAG2 ' + side_line('A', d.a))
+    out.append('DIAG3 ' + side_line('B', d.b))
+    if d.field_diff is None:
+        txt = 'DIAG4 final states A and B: all %d compared fields equal' % len(STATE_FIELDS)
+    else:
+        lab, va, vb = d.field_diff
+        txt = 'DIAG4 first differing field of %s: %s [%s] (%s) A=%s B=%s' % (
+            '>'.join(STATE_FIELDS), lab, 'STRUCTURE' if STATE_FIELDS.index(lab) < STRUCT_FIELD_COUNT else 'SETUP',
+            FIELD_MEANING[lab], va, vb)
+        if d.track_diff:
+            txt += ' | ' + d.track_diff
+    if d.org_diff:
+        txt += ' | ' + d.org_diff + ' (provenance, not compared)'
+    out.append(txt)
+    if d.event_diff is not None:
+        i, ea, eb = d.event_diff
+        out.append('DIAG5 first differing event in the zone: #%d A=%s B=%s' % (i, ea.text(), eb.text()))
+    elif d.event_count_diff:
+        e, who = d.event_extra
+        out.append('DIAG5 events in the zone: count differs: nA %d vs nB %d (first extra on %s: %s)' % (
+            d.zone_na, d.zone_nb, who, e.text()))
+    else:
+        out.append('DIAG5 events in the zone: identical (%d)' % d.zone_na)
+    out.append('DIAG6 ' + nolv_line('A', d.a))
+    out.append('DIAG7 ' + nolv_line('B', d.b))
+    if d.common_diff == 0:
+        out.append('DIAG8 state keys agree on all %d common bars' % d.common_bars)
+    else:
+        out.append('DIAG8 state keys differ on %d of %d common bars, first %s, last %s' % (
+            d.common_diff, d.common_bars, tx(d.common_first_diff), tx(d.common_last_diff)))
+    return out
+
+
+def diag_text(d):
+    return '\n'.join(diag_lines(d))
+
+
+# ---------------------------------------------------- TrackChanges decision ----
+C_BASELINE = 'BASELINE'          # EA only: the baseline was set at this evaluation
+TC_BASELINE = 'BASELINE'
+TC_REPORT = 'REPORT'
+TC_REDERIVE = 'REDERIVE'
+
+
+def track_changes_mode(consume_status, prev_valid):
+    """pure decision of the EA's TrackChanges (mirror of H3TrackChangesMode). A change between two
+    RELIABLE evaluations is a market change only when the consumer accepted the step as exactly the
+    next closed bar with the previous state reproduced (OK). After REDERIVED, GAP or NOTHING_NEW a
+    difference comes from the rebuild (or from missed bars with an unknown date): never reported."""
+    if consume_status == C_BASELINE or not prev_valid:
+        return TC_BASELINE
+    if consume_status == C_OK:
+        return TC_REPORT
+    return TC_REDERIVE
+
+
+def snapshot_of(ev):
+    st = ev.state
+    return (dir_name(st.dir), st.t2dir, st.phase if st.dir != 0 else '-')
+
+
+def track_step(prev_snapshot, ev, consume_status, fixed=True):
+    """model of the EA's TrackChanges for one reliable evaluation. Returns (reported, rederived,
+    new_snapshot). fixed=False is the LEGACY behaviour (every difference between two reliable
+    evaluations was reported as a change), kept only to show the defect in a test."""
+    cur = snapshot_of(ev)
+    mode = track_changes_mode(consume_status, prev_snapshot is not None)
+    if not fixed:
+        mode = TC_REPORT if prev_snapshot is not None else TC_BASELINE
+    reported = []
+    rederived = []
+    if mode != TC_BASELINE:
+        names = ('BIAS', 'T002', 'PHASE')
+        for i in range(3):
+            if cur[i] != prev_snapshot[i]:
+                if i == 2 and cur[0] != prev_snapshot[0]:
+                    continue            # a phase change next to a bias change is not listed separately
+                (reported if mode == TC_REPORT else rederived).append('%s %s -> %s' % (names[i], prev_snapshot[i], cur[i]))
+    return reported, rederived, cur
+
+
+# ------------------------------------------------------------- CSV export ----
+# Mirror of H3CsvName / H3CsvHeader / H3CsvRow (pure text; the EA writes the file).
+class Export(object):
+    def __init__(self, **kw):
+        self.source = 'EA'
+        self.symbol = 'XAUUSD'
+        self.mode = 'LIVE'
+        self.asof = 0
+        self.digits = 2
+        self.period = PERIOD
+        self.left = 2
+        self.right = 2
+        self.lookback = 300
+        self.rebuild = 1000
+        self.r_req = 1000
+        self.r_eff = 1000
+        self.b_depth = 700
+        self.chk = 300
+        self.warm = 300
+        self.hard_cap = 5000
+        self.bars = 0
+        self.first = 0
+        self.last = 0
+        self.flag = ''
+        self.reason = ''
+        self.note = ''
+        for k, v in kw.items():
+            setattr(self, k, v)
+
+
+def csv_safe_symbol(symbol):
+    return ''.join(c if (c.isascii() and (c.isalnum() or c in '._-')) else '_' for c in symbol)
+
+
+def csv_time_text(t):
+    return time.strftime('%Y.%m.%d %H:%M', time.gmtime(t))
+
+
+def csv_name(symbol, last):
+    return 'velo_t003_diag_%s_%s.csv' % (csv_safe_symbol(symbol), ts(last))
+
+
+def csv_header(x):
+    lines = ['# velo_t003_diag v1',
+             '# source=' + x.source,
+             '# symbol=' + x.symbol,
+             '# period=H4',
+             '# period_seconds=%d' % x.period,
+             '# digits=%d' % x.digits,
+             '# mode=' + x.mode,
+             '# asof_input=' + ('0' if x.asof == 0 else csv_time_text(x.asof)),
+             '# first_bar_open=' + csv_time_text(x.first),
+             '# last_closed_bar_open=' + csv_time_text(x.last),
+             '# bars=%d' % x.bars,
+             '# left=%d' % x.left,
+             '# right=%d' % x.right,
+             '# lookback=%d' % x.lookback,
+             '# rebuild_input=%d' % x.rebuild,
+             '# r_req=%d' % x.r_req,
+             '# r_eff=%d' % x.r_eff,
+             '# b_depth=%d' % x.b_depth,
+             '# check_depth=%d' % x.chk,
+             '# warm_up=%d' % x.warm,
+             '# hard_cap=%d' % x.hard_cap,
+             '# result_flag=' + x.flag,
+             '# result_reason=' + x.reason,
+             '# note=' + (x.note if x.note else '-'),
+             'time_epoch,time_server,open,high,low,close,tick_volume,spread,real_volume']
+    return '\n'.join(lines)
+
+
+def csv_sample():
+    """the fixed sample both test scripts use for the text-building checks (generated into the MQL5 test)"""
+    x = Export(symbol='XAUUSD', mode='HISTORICAL', asof=T0 + 100 * PERIOD, bars=3, first=T0, last=T0 + 2 * PERIOD,
+               flag='LIMITED_BY_HISTORY', reason='AB_STATE_DIFF', note='')
+    row = csv_row(T0 + 40 * PERIOD, 4120.5, 4130.25, 4118.0, 4127.75, 2, 1234, 12, 0)
+    return x, row, csv_name('XAUUSD.r', T0 + PERIOD)
+
+
+def csv_row(t, o, h, l, c, digits, tick_volume=0, spread=0, real_volume=0):
+    f = '%%.%df' % digits
+    return '%d,%s,%s,%s,%s,%s,%d,%d,%d' % (t, csv_time_text(t), f % o, f % h, f % l, f % c,
+                                           tick_volume, spread, real_volume)
+
+
+# ================================================================ builders ====
+import math  # noqa: E402
+
+HW = 5.0
+MIRROR = t2.MIRROR
+
+
+class Series(object):
+    """Controlled-data bar builder. A bar is centre +/- HW, close = centre,
+    unless an explicit (high, low, close) row is given. Swing prices are
+    centre +/- HW. Steps of at most 4 never create an FVG (gap between A and
+    C needs more than 2*HW)."""
+
+    def __init__(self, start, hw=HW):
+        self.rows = []
+        self.c = start
+        self.hw = hw
+        self.rows.append((start + hw, start - hw, float(start)))
+
+    def to(self, target, step=4.0):
+        k = int(math.ceil(abs(target - self.c) / step))
+        c0 = self.c
+        for j in range(1, k + 1):
+            c = c0 + (target - c0) * j / float(k)
+            self.rows.append((c + self.hw, c - self.hw, c))
+        self.c = target
+        return self
+
+    def pts(self, lst):
+        for c in lst:
+            self.rows.append((c + self.hw, c - self.hw, float(c)))
+            self.c = c
+        return self
+
+    def bar(self, h, l, c):
+        self.rows.append((float(h), float(l), float(c)))
+        return self
+
+    def n(self):
+        return len(self.rows)
+
+    def bars(self):
+        out = []
+        for i in range(len(self.rows)):
+            r = self.rows[i]
+            out.append(Bar(T0 + i * PERIOD, float(r[0]), float(r[1]), float(r[2])))
+        return out
+
+
+def mirror(bars):
+    return t2.mirror(bars)
+
+
+def set_c(s, c):
+    s.c = c
+    return s
+
+
+def pad(s, k):
+    """k quiet alternating bars around the current centre: no swing, no FVG"""
+    c0 = s.c
+    for i in range(k):
+        s.pts([c0 + (4 if i % 2 == 0 else 0)])
+    s.c = c0
+    return s
+
+
+# ------------------------------------------------------------ scenarios ----
+def bear_leg():
+    """BEAR template: H0 125, L0 95, S 117, down leg with two bearish FVGs, L1 73
+    (pivot at index 23). T002 turns BEARISH when L1 is confirmed -> SEED."""
+    s = Series(90).to(120).to(100).to(112)
+    s.pts([108, 106, 96, 86, 86, 82, 78])
+    return s
+
+
+def bear_rally():
+    return bear_leg().to(108)
+
+
+def sc_wick_family(kind):
+    s = bear_rally()
+    if kind == 'break':
+        s.bar(119, 108, 118)
+    elif kind == 'wick':
+        s.bar(120, 106, 110)
+    elif kind == 'eqclose':
+        s.bar(118, 106, 117)
+    elif kind == 'eqhigh':
+        s.bar(117, 106, 112)
+    elif kind == 'eqboth':
+        s.bar(117, 106, 117)
+    elif kind == 'pre_touched':
+        s.bar(120, 106, 110)
+        s.pts([106, 102, 98, 94, 90, 86, 82, 86, 90, 94, 96])
+    elif kind == 'a_is_wick':
+        s.bar(120, 108, 112)
+        s.bar(111, 101, 106)
+        s.bar(105, 95, 100)
+        s.pts([96, 92, 88, 92, 96])
+        s.bar(106, 94, 100)
+        s.pts([98, 96])
+    elif kind == 'a_before_wick':
+        s.bar(120, 100, 104)
+        s.bar(101, 91, 96)
+        s.bar(101, 89, 94)
+        s.pts([90, 86, 90, 94])
+        s.bar(104, 98, 100)
+        s.pts([98, 96])
+    elif kind == 'invalid_same_bar':
+        s.bar(120, 108, 112)
+        s.bar(111, 101, 106)
+        s.bar(105, 95, 100)
+        s.pts([96, 92, 88, 92, 96])
+        s.bar(112, 104, 110)
+        s.pts([108, 104])
+    elif kind == 'second_wick_hold':
+        s.bar(120, 108, 112)
+        s.bar(111, 101, 106)
+        s.bar(105, 95, 100)
+        s.pts([96, 92])
+        s.bar(119, 95, 100)
+        s.pts([98, 96])
+    elif kind == 'second_wick_reconf':
+        s.bar(120, 108, 112)
+        s.bar(111, 101, 106)
+        s.bar(105, 95, 100)
+        s.pts([96, 92])
+        s.to(108)
+        s.bar(119, 107, 111)
+        s.pts([106, 102])
+    elif kind == 'invalid_before_touch':
+        s.bar(120, 108, 112)
+        s.bar(111, 101, 106)
+        s.bar(105, 95, 100)
+        s.pts([96, 92, 90])
+        s.bar(115, 103, 113)
+        s.pts([110, 108])
+    elif kind == 'invalid_after_reconf':
+        s.bar(120, 108, 112)
+        s.bar(111, 101, 106)
+        s.bar(105, 95, 100)
+        s.pts([96, 92, 88, 92, 96])
+        s.bar(106, 94, 100)
+        s.pts([98, 100])
+        s.bar(112, 100, 110)
+        s.pts([108, 104])
+    elif kind == 'break_in_hold':
+        s.bar(120, 108, 112)
+        s.bar(111, 101, 106)
+        s.bar(105, 95, 100)
+        s.pts([96, 92])
+        s.bar(121, 109, 119)
+        s.pts([115, 112])
+    elif kind == 'break_in_reconf':
+        s.bar(120, 108, 112)
+        s.bar(111, 101, 106)
+        s.bar(105, 95, 100)
+        s.pts([96, 92, 88, 92, 96])
+        s.bar(106, 94, 100)
+        s.pts([98, 100])
+        s.bar(122, 100, 119)
+        s.pts([115, 112])
+    return s.bars()
+
+
+def sc_correction():
+    s = bear_leg().to(98)
+    s.to(86)
+    s.to(94)
+    s.pts([92, 90])
+    return s.bars()
+
+
+def sc_minor_swings():
+    s = Series(90).to(120).to(100).to(112)
+    s.pts([108, 106, 106, 110])          # plateau dip (no swing low), minor high 115
+    s.to(78)                              # L1
+    s.to(88).to(84).to(92)                # corrective bounce / higher low
+    s.pts([90, 88])
+    return s.bars()
+
+
+def sc_no_bound():
+    s = Series(90).to(120).to(100).to(112).to(104)
+    s.pts([106, 108])
+    return s.bars()
+
+
+def sc_consumed_before_known():
+    s = bear_leg()
+    s.bar(119, 88, 118)            # p+1: body close above S before L1 is confirmed
+    s.bar(100, 83, 90)
+    s.pts([88, 86])
+    return s.bars()
+
+
+def sc_seed_bar_closes_beyond():
+    s = bear_leg()
+    s.bar(100, 83, 90)             # p+1
+    s.bar(119, 84, 118)            # p+2 confirms L1 and closes above S itself
+    s.pts([114, 110])
+    return s.bars()
+
+
+def sc_case_a(kind):
+    """NONE until the break: one high only, so T002 stays UNKNOWN"""
+    s = Series(100).to(90).to(112).to(85).to(106)
+    if kind == 'break':
+        s.bar(121, 110, 119)
+    elif kind == 'wick_then_break':
+        s.bar(125, 104, 106)
+        s.pts([102, 98, 94])
+        s.bar(121, 110, 119)
+        s.pts([116, 112])
+    elif kind == 'wick_only':
+        s.bar(125, 104, 106)
+        s.pts([102, 98])
+    elif kind == 'equal_close':
+        s.bar(121, 110, 117)
+    return s.bars()
+
+
+def sc_b2_active(kind):
+    s = Series(90).to(120).to(100).to(112)
+    s.pts([108, 106, 96, 86, 86, 82, 78])
+    s.to(100)
+    s.pts([96, 92, 88, 84, 80, 76, 72, 68, 64])
+    if kind == 'retro':
+        s.bar(112, 62, 100)
+    else:
+        s.bar(112, 62, 107)           # body close beyond the candidate before it is known
+    s.bar(100, 63, 70)
+    s.pts([72, 74])
+    return s.bars()
+
+
+def sc_b2_none(kind):
+    s = Series(100).to(90).to(112).to(85).to(106)
+    s.bar(125, 108, 112)
+    s.bar(111, 101, 106)
+    s.bar(105, 95, 100)
+    s.pts([96, 96])
+    s.pts([100])
+    s.bar(106, 94, 100)
+    s.pts([104, 108, 104, 100])
+    if kind == 'untouched':
+        s.pts([96, 92, 88])
+    elif kind == 'touched':
+        s.pts([96, 92, 88, 92, 96])
+        s.bar(106, 94, 100)
+        s.pts([98])
+    elif kind == 'body_before':
+        pass
+    return s.bars()
+
+
+def sc_case_c(padn=0, front=False):
+    s = Series(110)
+    pad(s, padn)
+    s.to(100).to(112).to(90).to(108)
+    s.bar(122, 110, 119)
+    set_c(s, 119)
+    s.to(126).to(114).to(132).to(140).to(128).to(136).to(130)
+    s.pts([132, 134])
+    return s
+
+
+def sc_case_d(kind):
+    s = Series(85).to(75).to(95).pts([93, 93]).to(105).to(90).to(100).to(80)
+    s.pts([84])
+    if kind == 'break':
+        s.bar(114, 82, 112)
+    elif kind == 'seed':
+        s.bar(104, 82, 103)
+    return s.bars()
+
+
+def sc_no_evidence():
+    return Series(100).to(90).to(112).to(85).to(100).bars()
+
+
+def sc_e(kind):
+    s = sc_case_c()
+    if kind == 'cont':
+        s.bar(150, 134, 148)
+    elif kind == 'int_break':
+        s.bar(133, 118, 121)
+    elif kind == 'flip':
+        s.bar(133, 104, 106)
+        set_c(s, 106)
+        s.pts([110, 114, 118, 122, 126])
+    elif kind == 'no_level_crash':
+        s.bar(133, 104, 106)
+        set_c(s, 106)
+        s.pts([100, 92, 84, 76, 70])
+    elif kind == 'wick_struct':
+        s.bar(135, 107, 120)
+    elif kind == 'sweep_fvg_touch':
+        s.bar(135, 118, 130)
+        s.bar(142, 129, 138)
+        s.bar(148, 139, 143)
+        s.pts([141])
+        s.bar(140, 130, 136)
+        s.pts([138])
+    return s.bars()
+
+
+def sc_hh_below_level():
+    """BEAR bias with S=117; a later higher high H3 (109) exists, a close above it is
+    NOT a flip (only the protecting level flips) but an INTERNAL_BREAK observation"""
+    s = bear_leg().to(98)
+    s.to(90).to(104).to(96)
+    s.bar(114, 100, 112)
+    s.pts([108, 104])
+    return s.bars()
+
+
+def sc_no_level_no_sweep():
+    """break of the HH candidate sets BULL with NO protecting low (plateau below the
+    HH); a sweep-like bar afterwards must raise nothing because S_low is undefined"""
+    s = Series(85).to(75).to(95).pts([93, 93]).to(105).to(90).to(100).to(80)
+    s.pts([84])
+    s.bar(114, 82, 112)
+    set_c(s, 112)
+    s.pts([114])
+    s.bar(122, 70, 80)             # low below the lowest low after the HH, close above it
+    set_c(s, 80)
+    s.pts([78, 76, 74])
+    return s.bars()
+
+
+def sc_bos(k):
+    """k successive breaks (no fixed count): bull run with k up-legs"""
+    s = Series(110).to(100).to(112).to(90).to(108)
+    s.bar(122, 110, 119)
+    set_c(s, 119)
+    top = 126
+    low = 114
+    for j in range(k - 1):
+        s.to(top).to(low).to(top + 6)
+        top += 14
+        low += 14
+    s.to(top).to(top - 10)
+    s.pts([top - 8, top - 6])
+    return s.bars()
+
+
+def sc_thaw_family(kind):
+    """Revision 7 scenarios (SELL). Prefix: bear_leg().to(100).to(88) (level 117, interior high
+    105 at bar 29). Bar 33 sweeps the interior high (high 111 > 105, close 95 <= 105). Every
+    kind below keeps bars 0..32 identical."""
+    s = bear_leg().to(100).to(88)
+    two = kind in ('recon_two_fvg', 'recon_two_fvg_ctl')
+    if kind.startswith('recon_nolevel'):
+        # a touch while no protecting level is defined (body close above the new candidate 111)
+        s.bar(111, 90, 95)             # 33 sweep
+        s.bar(92, 86, 88)              # 34
+        s.bar(87, 80, 83)              # 35: FVG [87,90] (A=33, C=35)
+        s.bar(86, 76, 80)              # 36: does not reach the FVG
+        set_c(s, 80)
+        s.to(60)                       # fall, new lower low (low 55 at the last bar)
+        if kind == 'recon_nolevel':
+            s.bar(115, 56, 113)        # closes above 111: candidate level rejected, FVG invalid
+        else:
+            s.bar(110, 56, 109)        # control: stays below 111, the level 111 is defined
+        s.bar(112 if kind == 'recon_nolevel' else 110, 100, 108)
+        s.bar(107, 98, 100)            # A of a new bearish FVG
+        s.bar(99, 90, 92)
+        s.bar(89, 80, 85)              # C: FVG [89,98]
+        s.bar(95, 84, 90)              # touches the new FVG (level undefined / defined)
+        s.pts([88])
+        return s
+    if two:
+        s.bar(111, 90, 95)             # 33 sweep (A of FVG2 [87,90])
+        s.bar(92, 84, 88)              # 34 (A of FVG1)
+        s.bar(87, 78, 82)              # 35: FVG2 = [87,90]
+        s.bar(83, 76, 80)              # 36: FVG1 = [83,84]
+        s.bar(85, 79, 83.5)            # 37: touches FVG1 only (high 85 < 87): RECONFIRMED
+        set_c(s, 80)
+        upper_close = 84
+    else:
+        s.bar(111, 90, 95)             # 33 sweep
+        s.bar(92, 86, 88)              # 34
+        s.bar(87, 80, 83)              # 35: FVG [87,90]
+        s.bar(91, 79, 82)              # 36: touches it (wide bar): RECONFIRMED(INTERNAL), level 117
+        set_c(s, 82)
+        upper_close = 90
+    s.to(60)                           # new lower low (pivot at the last bar, low 55)
+    s.to(80)                           # rally with closes at or below the FVG's upper edge
+    s.bar(95, 80, 84)                  # interior high 95 (swing high)
+    s.bar(90, 78, 80)
+    s.bar(88, 76, 78)
+    # T: closes above the recorded FVG's upper edge (invalidated) -> thaw bar
+    if two:
+        s.bar(93, 80, 88)              # T: also touches FVG2 (close 88 <= 90): frozen again
+    else:
+        s.bar(93, 82, 92)              # T: close 92 > 90
+    # T+1
+    if kind in ('recon_thaw', 'recon_two_fvg', 'recon_two_fvg_ctl'):
+        s.bar(92, 84, 90)
+    elif kind == 'recon_thaw_wick':
+        s.bar(112, 90, 100)            # high above the level re-derived at T (111)
+    elif kind == 'recon_thaw_break':
+        s.bar(114, 90, 113)            # body close above the level re-derived at T (111)
+    elif kind == 'recon_thaw_cont':
+        s.bar(92, 40, 50)              # close below the latest lower low (55): CONTINUATION
+    elif kind == 'recon_thaw_isweep':
+        s.bar(100, 88, 93)             # high above the interior high 95, close below it
+    elif kind == 'recon_thaw_ibreak':
+        s.bar(100, 88, 98)             # close above the interior high 95, below the level
+    return s
+
+
+def sc_bear_sweep(kind):
+    s = bear_leg().to(100).to(88)
+    if kind == 'sweep_fvg_touch':
+        s.bar(111, 99, 103)
+        s.bar(100, 90, 94)
+        s.bar(95, 85, 90)
+        s.pts([88, 86])
+        s.bar(100, 92, 96)
+        s.pts([94])
+    elif kind == 'restart':
+        s.bar(111, 99, 103)
+        s.pts([100, 96, 92])
+        s.bar(112, 100, 104)
+        s.pts([100])
+    elif kind == 'wick_instead':
+        s.bar(120, 100, 108)
+    elif kind == 'break_instead':
+        s.bar(121, 100, 119)
+    elif kind == 'int_break':
+        s.bar(113, 100, 110)
+    elif kind == 'wait_wick':
+        s.bar(111, 99, 103)
+        s.bar(120, 100, 108)
+    elif kind == 'wait_break':
+        s.bar(111, 99, 103)
+        s.bar(121, 100, 119)
+    elif kind == 'no_level_after_flip':
+        s.bar(121, 100, 119)
+        set_c(s, 119)
+        s.pts([110, 104, 98, 92, 86])
+    elif kind in ('recon_wick', 'recon_break'):
+        # FINDING 2 (c): the same sweep -> FVG -> touch as sweep_fvg_touch, then a wick
+        # (high 120 > 117, close 108) / a body break (close 119 > 117) during RECONFIRMED(INTERNAL)
+        s.bar(111, 99, 103)
+        s.bar(100, 90, 94)
+        s.bar(95, 85, 90)
+        s.pts([88, 86])
+        s.bar(100, 92, 96)
+        s.pts([94])
+        if kind == 'recon_wick':
+            s.bar(120, 100, 108)
+        else:
+            s.bar(121, 100, 119)
+    elif kind == 'recon_touch_swing':
+        # FINDING 2 (a): bar 38 touches the FVG AND confirms a new lower low (pivot at 36,
+        # confirmed by the touching candle). The level known before the touch (117) stays.
+        s.bar(111, 99, 103)
+        s.bar(100, 90, 94)
+        s.bar(95, 85, 90)
+        s.bar(90, 60, 65)
+        s.bar(80, 68, 75)
+        s.bar(100, 80, 96)
+        s.pts([94])
+    elif kind == 'recon_later_swing':
+        # FINDING 2 (a): the touch is on bar 38; a new lower low (pivot 48) is confirmed long
+        # after the reconfirmation and would replace the level (117 -> 100) if unfrozen.
+        s.bar(111, 99, 103)
+        s.bar(100, 90, 94)
+        s.bar(95, 85, 90)
+        s.pts([88, 86])
+        s.bar(100, 92, 96)
+        s.pts([94])
+        s.to(60).to(80)
+    elif kind.startswith('recon_thaw') or kind.startswith('recon_nolevel') or kind == 'recon_two_fvg':
+        s = sc_thaw_family(kind)
+    return s.bars()
+
+
+# ---- revision 10 scenarios (SYNTHETIC, generic units; PROPOSAL / PROTOTYPE, awaiting the client)
+def sc_r10(kind):
+    """SELL series for the revision 10 regressions. Common prefix: bear_leg() (protecting high 117, the
+    lower low LL1 at 73), a rally to 108, a wick bar (high 120 > 117, close 110): HOLD."""
+    if kind in ('hold', 'flip', 'ex2', 'legs'):
+        s = bear_leg().to(108)
+        s.bar(120, 106, 110)
+        s.c = 110
+        if kind == 'ex2':
+            # revision 9 example 2: ONE newer low LL2 whose leg top is the wick top (120), a rally
+            # whose close (119) is beyond the snapshot 117, then a close 123
+            s.to(55).to(80)
+            s.bar(120, 110, 119)
+            s.bar(126, 118, 123)
+            return s.bars()
+        # revision 9 example 1: LL2 (leg top = the wick top, rejected by the ratchet), a rally (swing
+        # high 85), LL3 (leg top 85 is accepted: lower than 117)
+        s.to(55).to(80).to(40).to(70)
+        if kind == 'flip':
+            s.bar(92, 80, 90)            # close 90 > 85 (the CURRENT level), high 92 < 117 (snapshot NOT crossed)
+        if kind == 'legs':
+            s.bar(92, 80, 90)
+            s.to(70).to(60).to(90).to(75).to(98).to(84).to(104).to(92)
+            s.c = 92
+            pad(s, 6)
+        return s.bars()
+    if kind == 'sweep':
+        # SWEEP_WAIT (internal sweep of the interior high 105) while two newer lower legs form
+        s = bear_leg().to(100).to(88)
+        s.bar(111, 99, 103)
+        s.c = 103
+        s.to(70).to(85).to(50).to(75).to(35).to(60)
+        return s.bars()
+    if kind == 'reconf':
+        # structural RECONFIRMED (A = the wick candle), then two newer lower legs
+        bars = sc_wick_family('a_is_wick')
+        s = Series(90)
+        s.rows = [(b.high, b.low, b.close) for b in bars]
+        s.c = bars[-1].close
+        s.to(70).to(85).to(50).to(75).to(35).to(60)
+        return s.bars()
+    if kind == 'retouch':
+        # RECONFIRMED (STRUCT), the recorded FVG is lost (back to HOLD), a SECOND eligible FVG is touched:
+        # RECONFIRMED again in the SAME setup
+        bars = sc_wick_family('invalid_after_reconf')
+        s = Series(90)
+        s.rows = [(b.high, b.low, b.close) for b in bars]
+        s.c = 104.0
+        s.bar(103, 96, 98)
+        s.bar(98, 86, 88)
+        s.bar(88, 80, 82)
+        s.bar(93, 84, 86)
+        return s.bars()
+    raise ValueError(kind)
+
+
+def sc_r22():
+    """R22 (variant A limit, SYNTHETIC): a wick (HOLD), two newer lower legs (the PL advances to 85), then a rebuilt
+    structure whose highs stay below the PL. A window from before the wick has the live WICK setup; a window that
+    starts after the wick has no such setup (variant A: a structure update does not end a setup)."""
+    s = bear_leg().to(108)
+    s.bar(120, 106, 110)
+    s.c = 110
+    s.to(55).to(80).to(40).to(60).to(50).to(68).to(56).to(70).to(60).to(69)
+    s.c = 69
+    pad(s, 50)
+    return s.bars()
+
+
+# ---- revision 14 scenarios (SYNTHETIC, generic units; PROPOSAL / PROTOTYPE, awaiting the client): per-level
+# internal liquidity. Each kind returns the SELL bars; the BUY case is the mirror image.
+LIQ_KINDS = ('multi_break_sweep', 'multi_two_sweeps', 'multi_two_breaks', 'touch_inner', 'touch_level', 'beyond_level',
+             'flip_level', 'hold_sweep', 'recon_sweep', 'ratchet', 'first_usable', 'flip_scope', 'regression', 'close_equal')
+
+
+def liq_demo(rows):
+    """protecting high 105; two unconsumed internal highs below it: 100 (EARLIER pivot) and 90 (later pivot), both
+    after the lower low 55. `rows` are the (high, low, close) rows that follow."""
+    s = bear_leg().to(100).to(88).to(60).to(95).to(70).to(85).to(72)
+    s.pts([71, 70])
+    for r in rows:
+        s.bar(*r)
+    return s
+
+
+def liq_ratchet_prefix():
+    """level 117 (S), lower low 73; high A = 105 (pivot idx 29); a valley whose two EQUAL lows make no swing low;
+    internal high h2 = 103 (idx 36); a sweep bar (high 104 < A, close 98 < h2) that is itself the swing high 104
+    (idx 39); two lower bars confirm it (idx 41)."""
+    s = bear_leg().to(100)
+    for r in [(101, 91, 96), (97, 87, 91), (93, 82, 87), (92, 82, 86), (96, 85, 94), (100, 89, 98), (103, 92, 99),
+              (99, 90, 94), (95, 88, 91)]:
+        s.bar(*r)
+    s.bar(104, 90, 98)
+    s.pts([92, 88])
+    return s
+
+
+def sc_liq(kind):
+    if kind == 'multi_break_sweep':
+        # close breaks the LOWER (later) level 90, the wick sweeps the HIGHER (earlier) level 100
+        s = liq_demo([(103, 88, 95)])
+    elif kind == 'multi_two_sweeps':
+        s = liq_demo([(103, 88, 85)])        # both levels swept (close below both)
+    elif kind == 'multi_two_breaks':
+        s = liq_demo([(103, 88, 102)])       # close above both levels, below the protecting level
+    elif kind == 'close_equal':
+        s = liq_demo([(103, 88, 90)])        # close EQUAL to the level 90: not a close beyond it, so a sweep (not a break) of it
+    elif kind == 'touch_inner':
+        s = liq_demo([(100, 88, 95), (100.5, 88, 96)])      # high == 100 is a touch; 100.5 crosses
+    elif kind == 'touch_level':
+        s = liq_demo([(105, 88, 95)])        # high == protecting level 105: a touch, not a structural wick
+    elif kind == 'beyond_level':
+        s = liq_demo([(106, 88, 95), (101, 86, 90)])        # structural wick; the next bar re-crosses 100 silently
+    elif kind == 'flip_level':
+        s = liq_demo([(107, 88, 106)])       # close beyond the protecting level: FLIP
+    elif kind == 'hold_sweep':
+        s = liq_demo([(106, 88, 95)])
+        set_c(s, 92)
+        s.pts([88, 84, 80, 76, 80, 84, 88, 84, 80, 76])      # internal swing high 93 (idx 75)
+        s.bar(97, 80, 90)                                      # sweeps 93 while HOLD
+        s.pts([86, 82, 80])
+        return s.bars()
+    elif kind == 'recon_sweep':
+        s = liq_demo([(106, 88, 95)])
+        for r in [(90, 78, 80), (86, 70, 74), (87, 72, 80), (80, 66, 70), (78, 65, 68), (84, 70, 80), (80, 68, 72),
+                  (78, 66, 70), (88, 70, 78), (76, 64, 68), (74, 62, 66)]:
+            s.bar(*r)                                          # wick -> FVG [86, 88] -> touch -> RECONFIRMED -> sweep of 84
+        return s.bars()
+    elif kind == 'ratchet':
+        s = liq_ratchet_prefix()
+        set_c(s, 88)
+        s.to(60).to(70)                                        # lower low 55: the level moves 117 -> 105
+        s.bar(103.5, 88, 95)                                   # re-crosses the consumed h2 only
+        s.bar(104.5, 88, 96)                                   # crosses 104 (and the consumed h2)
+        s.pts([80, 79])
+        return s.bars()
+    elif kind == 'first_usable':
+        s = liq_ratchet_prefix()
+        s.bar(104.5, 88, 96)                                   # idx 42 = pivot 39 + 3: the first usable bar of the 104 high
+        s.pts([84, 80, 76])
+        return s.bars()
+    elif kind == 'flip_scope':
+        s = bear_leg().to(100)
+        for r in [(101, 91, 96), (97, 86, 91), (93, 80, 85), (96, 84, 92), (98, 88, 95), (99, 86, 92), (99, 85, 90),
+                  (98, 82, 88), (96, 84, 91), (97, 86, 93)]:
+            s.bar(*r)                                          # bull level candidate 80 (idx 32), swing low X = 82 (idx 37)
+        s.bar(121, 95, 119)                                    # idx 40: close above the protecting high 117: FLIP to BULL
+        s.bar(120, 96, 105)                                    # 41
+        s.bar(112, 81, 90)                                     # 42 crosses X = 82 while the new bias has NO level
+        for r in [(100, 84, 92), (102, 86, 95), (104, 88, 98), (103, 80.5, 90), (105, 86, 96), (106, 88, 98), (108, 90, 100)]:
+            s.bar(*r)                                          # 46 crosses 81 (the low of bar 42) and X again
+        return s.bars()
+    elif kind == 'regression':
+        # mirror of the 25.09 12:00 case in generic units. Bearish structure; the protecting high is A = 105 once the
+        # lower low 55 is confirmed; the internal high h = 103 has its pivot BEFORE that lower low and AFTER A, and the
+        # single-candidate selector (anchored after the latest lower low) could not see it. A candle wicks above h and
+        # closes below it, A untouched: INTERNAL_SWEEP -> SWEEP_WAIT, no FLIP. A bearish FVG with candle A at the
+        # sweep bar, touched -> RECONFIRMED(INTERNAL); its FVG lost -> RECONF_LOST; a second FVG touched -> RECONFIRMED.
+        s = bear_leg().to(100)
+        for r in [(101, 91, 96), (97, 87, 91), (93, 82, 87), (92, 82, 86), (96, 85, 94), (100, 89, 98), (103, 92, 99),
+                  (99, 90, 94), (95, 88, 91)]:
+            s.bar(*r)
+        set_c(s, 91)
+        s.to(60)
+        s.to(94)                                               # the climb to the sweep makes no swing high
+        s.bar(104, 88, 95)                                     # the sweep bar (candle A of the first FVG)
+        for r in [(96, 78, 82), (86, 70, 74), (87, 72, 80), (80, 66, 70), (78, 65, 68), (92, 80, 90), (89, 76, 84),
+                  (80, 62, 64), (70, 58, 60), (73, 62, 66), (68, 56, 58)]:
+            s.bar(*r)
+        return s.bars()
+    else:
+        raise ValueError(kind)
+    s.pts([80, 79, 78])
+    return s.bars()
+
+
+def sc_quiet_tail(n):
+    """a wick above the level (HOLD) followed by n quiet bars that never reach the level again"""
+    s = bear_leg().to(108)
+    s.bar(120, 106, 110)
+    s.c = 110
+    s.to(95)
+    pad(s, n)
+    return s.bars()
+
+
+# ---- P11 scenarios (lookback 20)
+def sc16_converged_break():
+    return sc_case_c(24).bars()
+
+
+def sc16_converged_seed():
+    s = Series(95)
+    pad(s, 24)
+    for t in (85, 100, 90, 105, 95, 110, 100, 115, 105, 120, 110, 125, 115, 130, 120):
+        s.to(t, step=5.0)
+    s.c = 120
+    pad(s, 6)
+    return s.bars()
+
+
+def sc16_ab_diff():
+    s = sc_case_c(8)
+    s.to(132).to(116).to(122).pts([118, 114])
+    s.bar(118, 104, 112)
+    s.pts([114, 116])
+    s.c = 116
+    pad(s, 4)
+    return s.bars()
+
+
+def sc1_wick_decline_rebuild():
+    """SC-1 type series (SYNTHETIC, revision 10 negative control): a bear structure with the protecting
+    high 117, a wick above it (HOLD), a MONOTONE decline to a new low (no counter-swing, so no newer
+    bearish leg ever forms), then a rebuilt HH/HL structure with every close and every high below the
+    old level. Window A (from before the wick) is BEAR/HOLD at 117; a window that starts after the wick
+    sees only the rebuilt structure and seeds BULL. The prototype does NOT change this (no newer leg)."""
+    s = bear_leg().to(108)
+    s.bar(120, 106, 110)
+    s.c = 110
+    s.to(62)
+    for t in (78, 68, 90, 76, 100, 84, 106, 92, 108, 96):
+        s.to(t)
+    s.c = 96
+    pad(s, 36)
+    return s.bars()
+
+
+def sc16_event_only():
+    """older bear seed (outside B) then a new structure and a break above its level:
+    A flips (FLIP), B starts from NONE (BREAK_SET): same final state, different event"""
+    s = Series(100)
+    s.to(130, 5.0).to(110, 5.0).to(125, 5.0).to(100, 5.0)
+    s.to(105, 5.0)
+    s.to(85, 5.0)
+    s.to(112, 5.0)
+    s.to(70, 5.0)
+    s.to(108, 5.0)
+    s.bar(122, 110, 119)
+    s.c = 119
+    pad(s, 12)
+    return s.bars()
+
+
+def sc16_anchor_warmup():
+    s = Series(95)
+    for t in (85, 100, 90, 105, 95, 110, 100, 115, 105, 120, 110, 125, 115, 130, 120):
+        s.to(t, step=5.0)
+    s.c = 120
+    pad(s, 25)
+    return s.bars()
+
+
+def sc16_limit():
+    s = Series(100)
+    for t in (60, 100, 70, 150):
+        s.to(t, step=5.0)
+    s.to(140, step=5.0)
+    s.c = 140
+    pad(s, 60)
+    for t in (148, 130, 142, 115, 125):
+        s.to(t, step=5.0)
+    s.c = 125
+    pad(s, 22)
+    return s.bars()
+
+
+def sc17_first_event_at_3l():
+    """exactly 3*L = 60 bars; the 60th bar is a real break. The state before it
+    is built from 59 bars (< 3*L): LIMITED, so the event must NOT be emitted."""
+    s = Series(100)
+    pad(s, 36)
+    s.to(90).to(112).to(85).to(106)
+    s.bar(121, 110, 119)
+    return s.bars()
+
+
+def sc17_quiet_tail():
+    return sc_case_c(24).bars()
+
+
+def sc_old_frozen(prefix, tail):
+    """HYPOTHESIS H1 evidence (SYNTHETIC): `prefix` quiet bars, a bear structure with a wick above
+    the protecting high (HOLD, frozen), then `tail` bars of a monotone decline that never returns
+    to the level and forms no swing. The frozen HOLD never ends, so its age grows with the tail."""
+    s = Series(90)
+    if prefix:
+        pad(s, prefix)
+    s.to(120).to(100).to(112)
+    s.pts([108, 106, 96, 86, 86, 82, 78])
+    s.to(108)
+    s.bar(120, 106, 110)
+    s.c = 110
+    c = 110.0
+    for _ in range(tail):
+        c -= 1.0
+        s.pts([c])
+    return s.bars()
+
+
+def sc_consumer_series():
+    """converged BULL ACTIVE series (n = 64), the 65th bar is a structural wick"""
+    s = sc_case_c(24)
+    return s
+
+
+# ----------------------------------------------------------- case table ----
+def retime(bars, slots):
+    """same prices, new open times: slots[i] = number of 4h periods after T0 (strictly increasing).
+    Used for weekend and history-gap cases (FINDING 1)."""
+    assert len(slots) == len(bars)
+    return [Bar(T0 + slots[i] * PERIOD, b.high, b.low, b.close) for i, b in enumerate(bars)]
+
+
+def weekend_slots(n, start_pos):
+    """H4 bars Monday..Friday (6 per day = 30 per week) with the weekend missing:
+    trading position p = start_pos + i maps to week (p // 30) * 42 + p % 30 slots after
+    Monday 00:00 (T0 is a Monday). The last bar of a week opens Friday 20:00, the next
+    one Monday 00:00 (12 empty slots in between)."""
+    return [((start_pos + i) // 30) * 42 + (start_pos + i) % 30 for i in range(n)]
+
+
+class Case(object):
+    def __init__(self, name, kind, bars, lookback=20, rebuild=1000, hard_cap=5000, n_use=None):
+        self.name = name
+        self.kind = kind          # 'R' raw replay, 'E' evaluate, 'D' evaluate + diagnostics text
+        self.bars = bars
+        self.lookback = lookback
+        self.rebuild = rebuild
+        self.hard_cap = hard_cap
+        self.n_use = len(bars) if n_use is None else n_use
+
+    def params(self):
+        return Params(lookback=self.lookback, rebuild=self.rebuild, hard_cap=self.hard_cap)
+
+
+def run_case(c):
+    p = c.params()
+    if c.kind == 'R':
+        return replay_text(replay(c.bars, c.n_use, p))
+    if c.kind == 'D':
+        e = evaluate(c.bars, c.n_use, p)
+        return diag_text(diagnose(c.bars, c.n_use, p, e))
+    return eval_text(evaluate(c.bars, c.n_use, p))
+
+
+WICK_KINDS = ('break', 'wick', 'eqclose', 'eqhigh', 'eqboth', 'pre_touched', 'a_is_wick',
+              'a_before_wick', 'invalid_same_bar', 'second_wick_hold', 'second_wick_reconf',
+              'invalid_before_touch', 'invalid_after_reconf', 'break_in_hold', 'break_in_reconf')
+SWEEP_KINDS = ('sweep_fvg_touch', 'restart', 'wick_instead', 'break_instead', 'int_break',
+               'wait_wick', 'wait_break', 'no_level_after_flip',
+               'recon_wick', 'recon_break', 'recon_touch_swing', 'recon_later_swing',
+               'recon_thaw', 'recon_thaw_wick', 'recon_thaw_break', 'recon_thaw_cont',
+               'recon_thaw_isweep', 'recon_thaw_ibreak', 'recon_two_fvg',
+               'recon_nolevel', 'recon_nolevel_ctl')
+E_KINDS = ('cont', 'int_break', 'flip', 'no_level_crash', 'wick_struct', 'sweep_fvg_touch')
+
+_CASES = None
+
+
+def build_cases():
+    global _CASES
+    if _CASES is not None:
+        return _CASES
+    cs = []
+
+    def add(name, bars, kind='R', **kw):
+        cs.append(Case(name, kind, bars, **kw))
+
+    for k in WICK_KINDS:
+        add('w_' + k, sc_wick_family(k))
+        add('m_w_' + k, mirror(sc_wick_family(k)))
+    add('t2_correction', sc_correction())
+    add('m_t2_correction', mirror(sc_correction()))
+    add('t7_minor_swings', sc_minor_swings())
+    add('t7_no_bound', sc_no_bound())
+    add('t7_consumed_before_known', sc_consumed_before_known())
+    add('t10_seed_bar_closes_beyond', sc_seed_bar_closes_beyond())
+    for k in ('break', 'wick_then_break', 'wick_only', 'equal_close'):
+        add('a_' + k, sc_case_a(k))
+        add('m_a_' + k, mirror(sc_case_a(k)))
+    add('b2_active_retro', sc_b2_active('retro'))
+    add('m_b2_active_retro', mirror(sc_b2_active('retro')))
+    add('b2_active_rejected', sc_b2_active('rejected'))
+    add('m_b2_active_rejected', mirror(sc_b2_active('rejected')))
+    for k in ('untouched', 'touched'):
+        add('b2_none_' + k, sc_b2_none(k))
+        add('m_b2_none_' + k, mirror(sc_b2_none(k)))
+    add('c_history', sc_case_c().bars())
+    add('m_c_history', mirror(sc_case_c().bars()))
+    for st in (12, 16):
+        add('c_suffix_%d' % st, sc_case_c().bars()[st:])
+    add('d_break_vs_seed', sc_case_d('break'))
+    add('d_seed_control', sc_case_d('seed'))
+    add('d_no_evidence', sc_no_evidence())
+    for k in E_KINDS:
+        add('e_' + k, sc_e(k))
+    add('e_hh_below_level', sc_hh_below_level())
+    add('d_no_level_no_sweep', sc_no_level_no_sweep())
+    for k in (1, 2, 3):
+        add('bos_%d' % k, sc_bos(k))
+    for k in SWEEP_KINDS:
+        add('s_' + k, sc_bear_sweep(k))
+        add('m_s_' + k, mirror(sc_bear_sweep(k)))
+    # revision 10 (PROPOSAL / PROTOTYPE, awaiting the client): structure updates while a setup waits
+    for k in ('hold', 'flip', 'ex2', 'legs', 'sweep', 'reconf', 'retouch'):
+        add('r10_' + k, sc_r10(k))
+        add('m_r10_' + k, mirror(sc_r10(k)))
+    add('r6_quiet_150', sc_quiet_tail(150))
+    # revision 14 (PROPOSAL / PROTOTYPE, awaiting the client): per-level internal liquidity
+    for k in LIQ_KINDS:
+        add('l14_' + k, sc_liq(k))
+        add('m_l14_' + k, mirror(sc_liq(k)))
+    # P11 / evaluate cases (lookback 20)
+    b = sc16_converged_break()
+    add('p16a_converged_break', b, 'E', rebuild=len(b))
+    b = sc16_converged_seed()
+    add('p16a_converged_seed', b, 'E', rebuild=len(b))
+    b = sc16_ab_diff()
+    add('p16b_ab_difference', b, 'E', rebuild=len(b))
+    b = sc_r22()
+    add('r22_variant_a_limit', b, 'E', lookback=30, rebuild=len(b))
+    add('m_r22_variant_a_limit', mirror(b), 'E', lookback=30, rebuild=len(b))
+    b = sc1_wick_decline_rebuild()
+    add('sc1_limited', b, 'E', lookback=40, rebuild=len(b))
+    add('m_sc1_limited', mirror(b), 'E', lookback=40, rebuild=len(b))
+    add('d_diag_sc1_limited', b, 'D', lookback=40, rebuild=len(b))
+    b = sc16_anchor_warmup()
+    add('p16c_anchor_warmup', b, 'E', rebuild=len(b))
+    b = sc16_event_only()
+    add('p16e_event_only_diff', b, 'E', rebuild=len(b))
+    # FINDING 1: anchor by existing bars (same prices as p16a_converged_break, other open times)
+    b = sc16_converged_break()
+    add('f1_weekend_gap', retime(b, weekend_slots(len(b), 4)), 'E', rebuild=len(b))
+    add('f1_history_gap', retime(b, [i + (3 if i >= 26 else 0) for i in range(len(b))]), 'E', rebuild=len(b))
+    b = sc16_limit()
+    add('p16d_limit_r60', b, 'E', rebuild=60)
+    add('p16d_limit_r140', b, 'E', rebuild=140)
+    b = sc17_first_event_at_3l()
+    add('p17_first_event_n60', b, 'E', rebuild=60)
+    add('p17_reduced_depth', sc16_converged_break()[:50], 'E', rebuild=60)
+    add('p17_reduced_depth_ok', sc16_converged_break(), 'E', rebuild=200)
+    add('p17_failed_copy', sc16_converged_break(), 'E', rebuild=60, n_use=0)
+    add('p17_hard_cap', sc16_converged_break(), 'E', rebuild=1000, hard_cap=61)
+    # DIAGNOSTICS cases (kind D): the expected text is the diagnostic report of the evaluation
+    for nm, src, kw in (('d_diag_p16b_ab_difference', 'p16b_ab_difference', {}),
+                        ('d_diag_p16e_event_only', 'p16e_event_only_diff', {}),
+                        ('d_diag_p16c_anchor_warmup', 'p16c_anchor_warmup', {}),
+                        ('d_diag_p16a_converged', 'p16a_converged_break', {}),
+                        ('d_diag_p16d_r140_old_bias', 'p16d_limit_r140', {}),
+                        ('d_diag_p16d_r60_reliable', 'p16d_limit_r60', {}),
+                        ('d_diag_count_differs', 'w_wick', {'lookback': 10, 'rebuild': 30}),
+                        ('d_diag_no_level_after_flip', 's_no_level_after_flip', {'lookback': 10, 'rebuild': 30, 'n_use': 35}),
+                        ('d_diag_short_history', 'p17_reduced_depth', {}),
+                        ('d_diag_failed_copy', 'p17_failed_copy', {})):
+        base = None
+        for x in cs:
+            if x.name == src:
+                base = x
+        assert base is not None, src
+        add(nm, base.bars, 'D', lookback=kw.get('lookback', base.lookback), rebuild=kw.get('rebuild', base.rebuild),
+            hard_cap=base.hard_cap, n_use=kw.get('n_use', base.n_use))
+    # HYPOTHESIS H1 (SYNTHETIC): a frozen HOLD that never ends makes the required depth grow with its age
+    b = sc_old_frozen(100, 190)
+    add('d_diag_frozen_old_limited', b, 'D', lookback=40, rebuild=223)
+    add('d_diag_frozen_old_converged', b, 'D', lookback=40, rebuild=323)
+    _CASES = cs
+    return cs
+
+
+def case_by_name(name):
+    for c in build_cases():
+        if c.name == name:
+            return c
+    raise KeyError(name)
+
+
+# ================================================================== tests ====
+FAILS = []
+PASSES = []
+DEFERRED = []
+
+
+def check(cond, label):
+    if cond:
+        PASSES.append(label)
+        print('  PASS ' + label)
+    else:
+        FAILS.append(label)
+        print('  FAIL ' + label)
+
+
+def deferred(label):
+    DEFERRED.append(label)
+    print('  DEFERRED (not implemented in this round): ' + label)
+
+
+_REPS = {}
+
+
+def rep_of(name):
+    if name not in _REPS:
+        c = case_by_name(name)
+        _REPS[name] = replay(c.bars, c.n_use, c.params())
+    return _REPS[name]
+
+
+def types_of(rep):
+    return [e.type for e in rep.events]
+
+
+def events_of(rep, etype):
+    return [e for e in rep.events if e.type == etype]
+
+
+def last_time(name):
+    c = case_by_name(name)
+    return c.bars[c.n_use - 1].time
+
+
+SWAP_MAP = {'BULLISH': 'BEARISH', 'BEARISH': 'BULLISH', 'BULL': 'BEAR', 'BEAR': 'BULL',
+            'SH': 'SL', 'SL': 'SH', 'IH': 'IL', 'IL': 'IH', 'HH': 'LL', 'LL': 'HH'}
+
+
+def swap_sides(text):
+    """exchange the roles of BUY and SELL in a transcript (prices dropped)"""
+    import re
+    text = re.sub(r'@\d+\.\d\d', '', text)
+    text = re.sub(r'\[\d+\.\d\d-\d+\.\d\d\]', '', text)
+    text = re.sub(r'(F\d{12})([UD])', lambda m: m.group(1) + ('D' if m.group(2) == 'U' else 'U'), text)
+    return re.sub(r'BULLISH|BEARISH|BULL|BEAR|(?:SH|SL|IH|IL|HH|LL)(?=\d{12})',
+                  lambda m: SWAP_MAP[m.group(0)], text)
+
+
+def strip_prices(text):
+    import re
+    text = re.sub(r'\[\d+\.\d\d-\d+\.\d\d\]', '', text)
+    return re.sub(r'@\d+\.\d\d', '', text)
+
+
+def test_01_body_vs_wick():
+    print('--- 1. body break versus wick (both directions, equality is not a break)')
+    for pref, d0, d1 in (('', 'BEAR', 'BULL'), ('m_', 'BULL', 'BEAR')):
+        tag = 'SELL' if pref == '' else 'BUY'
+        r = rep_of(pref + 'w_break')
+        check(types_of(r)[-1] == EV_FLIP and r.state.dir_name_ok if False else types_of(r)[-1] == EV_FLIP,
+              '%s: close beyond the level is a FLIP' % tag)
+        check(dir_name(r.state.dir) == d1 and r.state.phase == 'ACTIVE' and not r.state.has_level,
+              '%s: bias reversed, new bias has no level yet' % tag)
+        r = rep_of(pref + 'w_wick')
+        check(types_of(r)[-1] == EV_WICK and EV_FLIP not in types_of(r) and dir_name(r.state.dir) == d0
+              and r.state.phase == 'HOLD', '%s: high beyond, close not beyond is a wick: HOLD, bias unchanged' % tag)
+        r = rep_of(pref + 'w_eqclose')
+        check(types_of(r)[-1] == EV_WICK and EV_FLIP not in types_of(r),
+              '%s: close exactly on the level is not a break (wick only)' % tag)
+        r = rep_of(pref + 'w_eqhigh')
+        check(types_of(r) == [EV_SEED] and r.state.phase == 'ACTIVE',
+              '%s: high exactly on the level is not a wick (no event)' % tag)
+        r = rep_of(pref + 'w_eqboth')
+        check(types_of(r) == [EV_SEED] and r.state.phase == 'ACTIVE',
+              '%s: high and close exactly on the level: nothing happens' % tag)
+
+
+def test_02_correction():
+    print('--- 2. correction that does not change the bias')
+    for pref, d0 in (('', 'BEAR'), ('m_', 'BULL')):
+        r = rep_of(pref + 't2_correction')
+        check(r.state.t2dir == 'MIXED' and dir_name(r.state.dir) == d0 and r.state.phase == 'ACTIVE'
+              and EV_FLIP not in types_of(r) and EV_WICK not in types_of(r),
+              '%s: T002 MIXED while the bias stays (no break of the protecting level)' % ('SELL' if pref == '' else 'BUY'))
+
+
+def test_03_wick_blocks():
+    print('--- 3. a wick blocks new entries (HOLD, block time = close of the wick bar)')
+    c = case_by_name('w_wick')
+    wick_bar = c.bars[-1]
+    r = rep_of('w_wick')
+    st = r.state
+    check(st.phase == 'HOLD' and hold_block(st) and not sweep_block(st), 'HOLD raises the hold block (S3), not the sweep block')
+    check(st.wk_src == wick_bar.time and st.wk_known == wick_bar.time + PERIOD and st.wk_det == wick_bar.time + PERIOD
+          and not st.wk_retro, 'source_wick_time = wick bar open, known = detected_at = its close, not retroactive')
+    check(st.wait_start == st.wk_det and st.setup_id.startswith('WICK@'), 'HOLD starts at detected_at; the setup has its own setup_id (revision 10: the level is NOT frozen)')
+    ev = events_of(r, EV_WICK)[0]
+    check(ev.bar_time == wick_bar.time, 'the WICK event is dated by the wick bar')
+    prefix = replay(c.bars, c.n_use - 1, c.params())
+    check(prefix.state.phase == 'ACTIVE', 'one bar earlier there is no HOLD (known only at the close)')
+
+
+def fvg_touch_bars(bars, fvg_a_time, from_time, bull):
+    """bars (open times) that intersect the FVG zone starting at from_time"""
+    f = None
+    for x in t2.find_fvgs(bars, len(bars), PERIOD):
+        if x.time_a == fvg_a_time:
+            f = x
+    out = []
+    if f is None:
+        return out
+    for i in range(f.index_a + 3, len(bars)):
+        if bars[i].time >= from_time and bars[i].low <= f.upper and bars[i].high >= f.lower:
+            out.append(bars[i].time)
+    return out
+
+
+def test_04_prewick():
+    print('--- 4. a pre-wick FVG is not eligible even when touched again')
+    for pref in ('', 'm_'):
+        tag = 'SELL' if pref == '' else 'BUY'
+        r = rep_of(pref + 'w_pre_touched')
+        c = case_by_name(pref + 'w_pre_touched')
+        old = [f for f in t2.find_fvgs(c.bars, len(c.bars), PERIOD) if f.bullish == (pref == 'm_')]
+        touched_after = [fvg_touch_bars(c.bars, f.time_a, r.state.wk_det, f.bullish) for f in old]
+        check(any(len(x) > 0 for x in touched_after), '%s: the old FVG zones are really touched after the wick (not vacuous)' % tag)
+        check(r.state.phase == 'HOLD' and len(r.tracks) == 0 and EV_RECONFIRMED not in types_of(r) and r.state.pre != '',
+              '%s: no reconfirmation by pre-wick FVGs; they are listed as PRE_WICK' % tag)
+        r = rep_of(pref + 'w_a_before_wick')
+        c = case_by_name(pref + 'w_a_before_wick')
+        wick_time = r.state.wk_src
+        fv = [f for f in t2.find_fvgs(c.bars, len(c.bars), PERIOD) if f.bullish == (pref == 'm_') and f.time_a == wick_time - PERIOD]
+        check(len(fv) == 1, '%s: there is an FVG whose candle A is the bar just before the wick (C after the wick)' % tag)
+        tb = fvg_touch_bars(c.bars, wick_time - PERIOD, r.state.wk_det, fv[0].bullish) if fv else []
+        check(len(tb) > 0 and len(r.tracks) == 0 and EV_RECONFIRMED not in types_of(r),
+              '%s: A before the wick is rejected although touched again' % tag)
+
+
+def test_05_new_fvg():
+    print('--- 5. new FVG after the wick: A = wick candle accepted, touch counted at the close')
+    for pref in ('', 'm_'):
+        tag = 'SELL' if pref == '' else 'BUY'
+        r = rep_of(pref + 'w_a_is_wick')
+        c = case_by_name(pref + 'w_a_is_wick')
+        evs = events_of(r, EV_RECONFIRMED)
+        fid = 'F%s%s' % (ts(r.state.wk_src), 'U' if pref == 'm_' else 'D')
+        check(len(evs) == 1 and evs[0].ref == fid, '%s: the FVG whose candle A is the wick candle is eligible and reconfirms' % tag)
+        tb = fvg_touch_bars(c.bars, r.state.wk_src, r.state.wk_det, pref == 'm_')
+        check(len(tb) >= 1 and evs[0].bar_time == tb[0], '%s: reconfirmation dated by the first touching bar (counted at its close)' % tag)
+        idx = [i for i in range(len(c.bars)) if c.bars[i].time == evs[0].bar_time][0]
+        before = replay(c.bars, idx, c.params())
+        after = replay(c.bars, idx + 1, c.params())
+        check(before.state.phase == 'HOLD' and after.state.phase == 'RECONFIRMED',
+              '%s: the touch is known only once the touching candle has closed' % tag)
+        check(r.state.phase == 'RECONFIRMED' and r.state.rec_id == fid and r.state.recon_reason == 'STRUCT',
+              '%s: RECONFIRMED_H4 records the FVG id (M15 phase not part of T003)' % tag)
+        r = rep_of(pref + 'w_invalid_same_bar')
+        check(EV_RECONFIRMED not in types_of(r) and 'INVALID' in tracks_text(r.tracks) and r.state.phase == 'HOLD',
+              '%s: a bar touching the zone but closing beyond the far edge is INVALID, not a touch' % tag)
+
+
+def test_06_repeated():
+    print('--- 6. repeated events')
+    for pref in ('', 'm_'):
+        tag = 'SELL' if pref == '' else 'BUY'
+        d0 = 'BEAR' if pref == '' else 'BULL'
+        d1 = 'BULL' if pref == '' else 'BEAR'
+        r = rep_of(pref + 'w_second_wick_hold')
+        w = events_of(r, EV_WICK)
+        check(len(w) == 2 and ' restart=1' not in w[0].detail and w[1].detail.endswith('restart=1')
+              and r.state.wk_src == w[1].bar_time and len(r.tracks) == 0 and r.state.pre.count('F') >= 3,
+              '%s: a second wick restarts HOLD from the latest wick; the earlier eligible FVG becomes PRE_WICK' % tag)
+        r = rep_of(pref + 'w_second_wick_reconf')
+        t = types_of(r)
+        check(t.count(EV_RECONFIRMED) == 1 and t[-1] == EV_WICK and r.state.phase == 'HOLD' and r.state.rec_id == '',
+              '%s: a wick during RECONFIRMED returns to HOLD' % tag)
+        r = rep_of(pref + 'w_invalid_before_touch')
+        check(EV_RECONFIRMED not in types_of(r) and 'INVALID' in tracks_text(r.tracks) and r.state.phase == 'HOLD',
+              '%s: invalidation before the touch drops the FVG, HOLD continues' % tag)
+        r = rep_of(pref + 'w_invalid_after_reconf')
+        lost = events_of(r, EV_RECONF_LOST)
+        check(len(lost) == 1 and lost[0].detail.endswith('to=HOLD') and r.state.phase == 'HOLD' and r.state.rec_id == '',
+              '%s: invalidation after RECONFIRMED returns to HOLD' % tag)
+        r = rep_of(pref + 'w_break_in_hold')
+        # revision 10: the flip also ENDS the setup (SETUP_ENDED INVALIDATED_BY_FLIP, after the FLIP)
+        check(types_of(r)[-2:] == [EV_FLIP, EV_SETUP_ENDED] and dir_name(r.state.dir) == d1 and r.state.phase == 'ACTIVE' and not r.state.has_wick
+              and len(r.tracks) == 0 and r.state.setup_id == '' and r.events[-1].detail.startswith('reason=INVALIDATED_BY_FLIP'),
+              '%s: body break during HOLD flips the bias, ends the setup (INVALIDATED_BY_FLIP) and discards the waiting' % tag)
+        r = rep_of(pref + 'w_break_in_reconf')
+        check(types_of(r)[-3:] == [EV_RECONFIRMED, EV_FLIP, EV_SETUP_ENDED] and dir_name(r.state.dir) == d1 and r.state.rec_id == ''
+              and len(r.tracks) == 0 and r.state.setup_id == '',
+              '%s: body break during RECONFIRMED flips, ends the setup and discards the reconfirmation' % tag)
+
+
+def test_07_level_selection():
+    print('--- 7. level selection (P2)')
+    r = rep_of('t7_minor_swings')
+    sh_pivot = T0 + 16 * PERIOD
+    check(r.state.has_level and r.state.lv_pivot == sh_pivot and r.state.lv_price == 117.0 and r.state.lv_id.startswith('SH' + ts(sh_pivot)),
+          'the leg top (117) is the level; the minor high (115), the higher high before the leg (125) and the corrective bounce are not')
+    check(rep_of('t7_no_bound').state.dir == 0 and not rep_of('t7_no_bound').state.has_level,
+          'undefined when a bound is missing (no lower low): nothing is invented')
+    r = rep_of('t7_consumed_before_known')
+    base = rep_of('w_break')
+    check(EV_SEED in types_of(base) and EV_SEED not in types_of(r) and r.state.dir == 0 and r.state.none_reason == 'NO_EVIDENCE',
+          'a candidate already body-broken before it became known is undefined (no seed), unlike the same structure without that close')
+    r = rep_of('t10_seed_bar_closes_beyond')
+    check(types_of(r) == [EV_SEED] and r.state.dir == BEAR and not r.state.has_level,
+          'AMBIGUITY 10: the seeding bar closing beyond its own level seeds a bias without a level (retroactive scan rejects the level)')
+    r = rep_of('a_break')
+    c = case_by_name('a_break')
+    br = events_of(r, EV_BREAK_SET)[0]
+    check(br.bar_time == c.bars[-1].time and br.ref.startswith('SH'),
+          'the evaluated bar crossing the candidate is a BODY BREAK event on the level, not a reason to discard it')
+    # direct unit tests of derive_level
+    def sw(spec):
+        out = []
+        for i, (hi, price) in enumerate(spec):
+            t = T0 + (i * 6) * PERIOD
+            out.append(t2.Swing('S%s%s' % (ts(t), 'H' if hi else 'L'), hi, i * 6, t, t + 3 * PERIOD, price))
+        return out
+    lv, ex = derive_level(sw([(False, 95), (True, 117), (False, 73)]), 3, BEAR)
+    check(lv is not None and lv.price == 117, 'unit: L0, S, L1 (lower) -> level S')
+    lv, ex = derive_level(sw([(False, 95), (True, 117), (False, 95)]), 3, BEAR)
+    check(lv is None, 'unit: an equal low is not a lower low (strict) -> undefined')
+    lv, ex = derive_level(sw([(False, 95), (True, 117), (True, 117), (False, 73)]), 4, BEAR)
+    check(lv is not None and lv.pivot_time == T0 + 6 * PERIOD, 'unit: equal highs -> the earliest one is the level (AMBIGUITY 11)')
+    lv, ex = derive_level(sw([(False, 95), (True, 117), (False, 73), (True, 100), (False, 80)]), 5, BEAR)
+    # revision 14: derive_level no longer returns an 'interior candidate' (the single-candidate selector was
+    # replaced by the per-level layer, tests 29a-29k); the part of this check that stays valid is that the
+    # corrective high 100 after the LL does not change the level.
+    check(lv is not None and lv.price == 117 and ex is not None and ex.price == 73,
+          'unit: latest LL stays L1; the corrective high 100 after it does not change the level (it is internal liquidity, tests 29)')
+    lv, ex = derive_level(sw([(False, 95), (True, 117)]), 2, BEAR)
+    check(lv is None and ex is None, 'unit: a single low -> no lower low -> no level and no LL candidate')
+    lv, ex = derive_level(sw([(True, 100), (False, 80), (True, 110)]), 3, BULL)
+    check(lv is not None and lv.price == 80, 'unit: bullish mirror (HH, lowest low between)')
+
+
+def test_08_no_lookahead():
+    print('--- 8. historical analysis: no look-ahead')
+    names = ['a_wick_then_break', 'b2_active_retro', 'b2_none_touched', 'w_a_is_wick', 'c_history', 'e_sweep_fvg_touch',
+             's_sweep_fvg_touch', 'w_invalid_after_reconf', 'm_w_break_in_reconf', 'r10_flip', 'r10_retouch', 'r10_sweep']
+    total = 0
+    ok_garbage = True
+    ok_prefix = True
+    ok_keys = True
+    for name in names:
+        c = case_by_name(name)
+        n = len(c.bars)
+        full = replay(c.bars, n, c.params())
+        for T_off in range(6, n * 2 + 1):
+            # as-of time in half-bar steps
+            asof = c.bars[0].time + (T_off * PERIOD) // 2
+            cnt = t2.closed_count_asof(c.bars, n, asof, PERIOD)
+            if cnt < 6:
+                continue
+            garbage = list(c.bars[:cnt])
+            for i in range(cnt, n):
+                b = c.bars[i]
+                garbage.append(Bar(b.time, 9000.0 + i, 8000.0 - i, 8500.0 + (i % 7)))
+            cnt_g = t2.closed_count_asof(garbage, n, asof, PERIOD)
+            a = replay(c.bars, cnt, c.params())
+            g = replay(garbage, cnt_g, c.params())
+            if cnt_g != cnt or replay_text(a) != replay_text(g):
+                ok_garbage = False
+            # prefix equals the full replay restricted to what was knowable at T
+            fe = [e.text() for e in full.events if e.bar_time + PERIOD <= asof]
+            pe = [e.text() for e in a.events]
+            if fe != pe:
+                ok_prefix = False
+            if full.keys[cnt - 1] != state_key(a.state, a.tracks):
+                ok_keys = False
+            total += 1
+    check(total > 200 and ok_garbage, 'as-of results identical when later bars are replaced by garbage (%d as-of times, %d cases)' % (total, len(names)))
+    check(ok_prefix, 'events of a prefix replay equal the full replay restricted to what was knowable at T')
+    check(ok_keys, 'the machine state at T of the full replay equals the state of the prefix replay')
+
+
+def test_10_buy_mirror():
+    print('--- 10. BUY mirror (one symmetric implementation) and a grab -> FVG -> touch sequence')
+    pairs = []
+    for c in build_cases():
+        if c.kind == 'R' and not c.name.startswith('m_') and ('m_' + c.name) in [x.name for x in build_cases()]:
+            pairs.append(c.name)
+    bad = []
+    for nm in pairs:
+        a = strip_prices(replay_text(rep_of(nm)))
+        b = strip_prices(replay_text(rep_of('m_' + nm)))
+        if swap_sides(a) != b:
+            bad.append(nm)
+    check(len(pairs) >= 25 and not bad, 'BUY results are the exact mirror of SELL results on %d mirrored controlled series %s' % (len(pairs), bad))
+    r = rep_of('e_sweep_fvg_touch')
+    t = types_of(r)
+    sw = events_of(r, EV_INT_SWEEP)[0]
+    rc = events_of(r, EV_RECONFIRMED)[0]
+    fid_ok = rc.ref.endswith('U') and ts(sw.bar_time) <= rc.ref[1:13]
+    check(EV_FLIP not in t and EV_WICK not in t and dir_name(r.state.dir) == 'BULL' and t.index(EV_INT_SWEEP) < t.index(EV_RECONFIRMED),
+          'BUY grab: INTERNAL_SWEEP without a change of bias, then the new FVG and its touch (native bullish data)')
+    check(fid_ok and rc.detail.endswith('reason=INTERNAL') and r.state.phase == 'RECONFIRMED' and r.state.recon_reason == 'INTERNAL',
+          'the FVG formed after the grab (A at or after the sweep bar) is touched -> RECONFIRMED_H4 reason INTERNAL; M15 not modelled')
+
+
+def test_11_acceptance_ab():
+    print('--- 11. acceptance A (real break) and B (wick)')
+    for pref, d1 in (('', 'BULL'), ('m_', 'BEAR')):
+        tag = 'SELL-side level' if pref == '' else 'BUY-side level'
+        r = rep_of(pref + 'a_break')
+        c = case_by_name(pref + 'a_break')
+        br = events_of(r, EV_BREAK_SET)
+        check(len(br) == 1 and br[0].bar_time == c.bars[-1].time and r.state.origin == 'BREAK' and dir_name(r.state.dir) == d1
+              and 'known=' in br[0].detail, 'A (%s): BODY BREAK at t sets the bias in the break direction, level and known time reported' % tag)
+        # same when t is the last bar of the as-of set and when later bars are garbage
+        garbage = list(c.bars)
+        for i in range(8):
+            garbage.append(Bar(c.bars[-1].time + (i + 1) * PERIOD, 9000.0 + i, 8000.0 - i, 8300.0 + i))
+        asof = c.bars[-1].time + PERIOD
+        cnt = t2.closed_count_asof(garbage, len(garbage), asof, PERIOD)
+        g = replay(garbage, cnt, c.params())
+        check(cnt == len(c.bars) and replay_text(g) == replay_text(r), 'A (%s): identical when bars after t are replaced by garbage' % tag)
+        r = rep_of(pref + 'a_wick_only')
+        check(types_of(r) == [EV_NONE_WICK] and r.state.dir == 0 and r.state.phase == 'ACTIVE',
+              'B (%s): from NONE a wick changes no bias; it is stored on the candidate (NONE_WICK)' % tag)
+        r = rep_of(pref + 'a_wick_then_break')
+        t = types_of(r)
+        check(t == [EV_NONE_WICK, EV_BREAK_SET] and events_of(r, EV_NONE_WICK)[0].ref == events_of(r, EV_BREAK_SET)[0].ref,
+              'B (%s): a later body close beyond the same wicked candidate is still a BODY BREAK' % tag)
+        r = rep_of(pref + 'a_equal_close')
+        check(EV_BREAK_SET not in types_of(r), 'A (%s): a close exactly on the level is not a break' % tag)
+    r = rep_of('w_wick')
+    check((not r.state.frozen) and r.state.lv_id == events_of(r, EV_WICK)[0].ref and r.state.lv_price == 117.0
+          and r.state.snap_id == r.state.lv_id and r.state.snap_price == 117.0,
+          'B (ACTIVE): the consumed candidate stays the protecting level (no newer leg) and is the setup snapshot (revision 10: not frozen; the ratchet keeps it)')
+
+
+def test_12_retro():
+    print('--- 12. retroactive wick (B2)')
+    for pref in ('', 'm_'):
+        tag = 'SELL' if pref == '' else 'BUY'
+        r = rep_of(pref + 'b2_active_retro')
+        c = case_by_name(pref + 'b2_active_retro')
+        w = events_of(r, EV_WICK)
+        st = r.state
+        wbar = c.bars[39]
+        check(len(w) == 1 and st.wk_src == wbar.time and st.wk_known == wbar.time + PERIOD and st.wk_det == wbar.time + 2 * PERIOD and st.wk_retro,
+              '%s: source_wick_time, source_wick_known_time and detected_at are kept apart; retroactive = true' % tag)
+        check(w[0].bar_time == wbar.time + PERIOD and st.phase == 'HOLD' and st.wait_start == st.wk_det,
+              '%s: HOLD starts at detected_at (the discovery close), never at source_wick_time' % tag)
+        r = rep_of(pref + 'b2_active_rejected')
+        # REWRITTEN in revision 10: before, the rejected candidate left the bias WITHOUT a level; with the
+        # ratchet (11.9 iv) a candidate crossed by a close is rejected and the CURRENT level stays in force.
+        check(EV_WICK not in types_of(r) and r.state.has_level and r.state.lv_pivot == T0 + 16 * PERIOD
+              and r.state.phase == 'ACTIVE' and r.state.setup_id == '',
+              '%s: a body close beyond the candidate before discovery rejects it (no HOLD; the previous level stays in force, revision 10)' % tag)
+        for kind in ('untouched', 'touched'):
+            r = rep_of(pref + 'b2_none_' + kind)
+            c = case_by_name(pref + 'b2_none_' + kind)
+            t = types_of(r)
+            nw = events_of(r, EV_NONE_WICK)[0]
+            seed = events_of(r, EV_SEED)[0]
+            w = events_of(r, EV_WICK)[0]
+            st = r.state
+            check(t[0] == EV_NONE_WICK and nw.bar_time == st.wk_src and seed.bar_time == w.bar_time and st.wk_det == seed.bar_time + PERIOD
+                  and st.wk_retro and st.wk_det > st.wk_known and st.wk_det == st.bias_start,
+                  '%s/%s: NONE stores the wick without HOLD; the later seed starts HOLD at the seed time (retroactive)' % (tag, kind))
+            fid = 'F%s%s' % (ts(st.wk_src), 'U' if pref == 'm_' else 'D')
+            check(any(tr.id == fid for tr in r.tracks), '%s/%s: an FVG formed between the wick and the discovery qualifies by its timing (A = wick bar)' % (tag, kind))
+            before = [x for x in fvg_touch_bars(c.bars, st.wk_src, st.wk_known, pref == 'm_') if x < st.wk_det]
+            check(len(before) >= 1, '%s/%s: the zone is really touched before the discovery (not vacuous)' % (tag, kind))
+            if kind == 'untouched':
+                check(EV_RECONFIRMED not in t and r.state.phase == 'HOLD', '%s: touches before detected_at (and on the seed bar) do not count' % tag)
+            else:
+                rc = events_of(r, EV_RECONFIRMED)
+                check(len(rc) == 1 and rc[0].bar_time >= st.wk_det, '%s: a touch on a bar opening at or after detected_at counts' % tag)
+
+
+def test_13_one_flip_trigger():
+    print('--- 13. one flip trigger, NONE-only candidates')
+    r = rep_of('e_cont')
+    check(types_of(r)[-1] == EV_CONTINUATION and EV_FLIP not in types_of(r) and dir_name(r.state.dir) == 'BULL',
+          'a close beyond the latest HH is a CONTINUATION event, never a flip')
+    r = rep_of('e_int_break')
+    check(types_of(r)[-1] == EV_INT_BREAK and EV_FLIP not in types_of(r) and dir_name(r.state.dir) == 'BULL' and r.state.phase == 'ACTIVE',
+          'a close below an interior low (not the protecting level) is an INTERNAL_BREAK observation, never a flip')
+    r = rep_of('e_flip')
+    fl = events_of(r, EV_FLIP)
+    check(len(fl) == 1 and fl[0].ref.startswith('SL') and 'dir=BEAR' in fl[0].detail and EV_WICK not in types_of(r),
+          'only a close beyond the current protecting level flips (here the protecting low 109)')
+    r = rep_of('e_wick_struct')
+    check(types_of(r)[-1] == EV_WICK and r.state.phase == 'HOLD' and EV_FLIP not in types_of(r), 'a wick through the protecting level is HOLD, not a flip')
+    r = rep_of('e_hh_below_level')
+    check(EV_FLIP not in types_of(r) and EV_INT_BREAK in types_of(r) and dir_name(r.state.dir) == 'BEAR',
+          'a close above a higher high that lies below the protecting level does not flip (candidates are NONE-only)')
+    bad = []
+    for c in build_cases():
+        if c.kind != 'R':
+            continue
+        r = rep_of(c.name)
+        starts = [i for i, e in enumerate(r.events) if e.type in (EV_BREAK_SET, EV_SEED)]
+        first_bias = starts[0] if starts else len(r.events)
+        pre = [e.type for e in r.events[:first_bias] if e.market]
+        if len(starts) > 1 or pre:
+            bad.append(c.name)
+    check(not bad, 'BREAK_SET/SEED happen at most once, first, only from NONE; no flip/wick before a bias exists %s' % bad)
+    r = rep_of('e_no_level_crash')
+    flips = events_of(r, EV_FLIP)
+    check(len(flips) == 1 and r.state.dir == BEAR and not r.state.has_level and r.state.t2dir in ('BEARISH', 'MIXED'),
+          'a bias without a level cannot flip (price keeps moving, no second FLIP)')
+    r = rep_of('d_no_level_no_sweep')
+    check(r.state.dir == BULL and not r.state.has_level and r.state.t2dir == 'BEARISH' and EV_FLIP not in types_of(r),
+          'bias BULL without level while T002 says BEARISH and price falls under old lows: no flip, the disagreement is visible')
+
+
+def test_14_history_and_precedence():
+    print('--- 14. bias rebuilt from break history (C) and precedence (D)')
+    r = rep_of('c_history')
+    check(dir_name(r.state.dir) == 'BULL' and r.state.lv_price == 109.0 and r.state.t2dir == 'MIXED' and r.state.phase == 'ACTIVE'
+          and r.state.origin == 'BREAK' and types_of(r) == [EV_BREAK_SET, EV_CONTINUATION],
+          'C: two successive breaks, then a correction (T002 MIXED): BIAS_BULL with the protecting low of the last up-leg')
+    for nm in ('c_suffix_12', 'c_suffix_16'):
+        s = rep_of(nm)
+        check(dir_name(s.state.dir) == 'BULL' and s.state.lv_id == r.state.lv_id and s.state.lv_price == 109.0 and s.state.t2dir == 'MIXED',
+              'C: same bias and same protecting low when the window starts later (%s; origin %s)' % (nm, s.state.origin))
+    c = case_by_name('c_history')
+    garbage = list(c.bars)
+    for i in range(6):
+        garbage.append(Bar(c.bars[-1].time + (i + 1) * PERIOD, 9100.0 + i, 8100.0 - i, 8700.0))
+    asof = c.bars[-1].time + PERIOD
+    cnt = t2.closed_count_asof(garbage, len(garbage), asof, PERIOD)
+    check(replay_text(replay(garbage, cnt, c.params())) == replay_text(r), 'C: same result when bars after the evaluation time are garbage')
+    r = rep_of('d_break_vs_seed')
+    ctl = rep_of('d_seed_control')
+    check(types_of(ctl) == [EV_SEED] and dir_name(ctl.state.dir) == 'BEAR',
+          'D: control: the same structure without the break gives a T002 seed in the opposite direction (not vacuous)')
+    check(types_of(r) == [EV_BREAK_SET] and dir_name(r.state.dir) == 'BULL' and 't002=BEARISH' in r.events[0].detail,
+          'D: the break outranks the seed; T002 BEARISH is shown as the disagreement')
+    r = rep_of('d_no_evidence')
+    check(r.state.dir == 0 and r.state.none_reason == 'NO_EVIDENCE' and r.events == [], 'D: no levels and no seed: NONE (NO_EVIDENCE)')
+    res = [p10_resolve(1, 1, BEAR), p10_resolve(1, 1, 0), p10_resolve(1, 0, BEAR), p10_resolve(0, 1, BULL), p10_resolve(0, 0, BEAR), p10_resolve(0, 0, 0)]
+    check(res == [('CONFLICT', 0), ('CONFLICT', 0), ('BREAK', BULL), ('BREAK', BEAR), ('SEED', BEAR), ('NONE', 0)],
+          'D: CONFLICT is never overwritten by the seed on that bar; the seed applies again on the next bar (pure resolver)')
+    # CONFLICT is unreachable with consumed candidates excluded: bounded random search
+    seed = 12345
+    found = 0
+    for k in range(120):
+        rows = []
+        c0 = 100.0
+        for i in range(70):
+            seed = (seed * 1103515245 + 12345) % 2147483648
+            step = ((seed >> 8) % 21) - 10
+            c0 = c0 + step * 0.9
+            seed = (seed * 1103515245 + 12345) % 2147483648
+            hw = 2.0 + ((seed >> 8) % 5)
+            rows.append(Bar(T0 + i * PERIOD, c0 + hw, c0 - hw, c0 + (((seed >> 12) % 5) - 2) * 0.5))
+        found += len(events_of(replay(rows, 70, Params(lookback=20)), EV_CONFLICT))
+    check(found == 0, 'D: CONFLICT never occurs in 120 random series (argued unreachable when consumed candidates are excluded; evidence, not proof)')
+    r = rep_of('d_no_level_no_sweep')
+    c = case_by_name('d_no_level_no_sweep')
+    check(types_of(r) == [EV_BREAK_SET] and not r.state.has_level, 'P14: without a defined protecting level nothing is raised (no sweep, no internal break)')
+    sw, amb = t2.find_swings(c.bars, len(c.bars), 2, 2, PERIOD)
+    lows_after = [s_.price for s_ in sw if not s_.is_high and s_.pivot_time > T0 + 13 * PERIOD]
+    sweep_bar = c.bars[29]
+    check(len(lows_after) > 0 and sweep_bar.low < min(lows_after) and sweep_bar.close >= min(lows_after),
+          'P14: the bar would have been an interior sweep geometrically (not vacuous)')
+
+
+def test_15_determinism():
+    print('--- 15. determinism and restart (no stored state)')
+    ok = True
+    for c in build_cases():
+        a = run_case(c)
+        b = run_case(Case(c.name, c.kind, list(c.bars), c.lookback, c.rebuild, c.hard_cap, c.n_use))
+        if a != b:
+            ok = False
+    check(ok, 'the same bars always give the same state, events and flag (%d cases evaluated twice from fresh copies)' % len(build_cases()))
+    c = case_by_name('p16a_converged_break')
+    p = c.params()
+    first = eval_text(evaluate(c.bars, len(c.bars), p))
+    evaluate(c.bars[:50], 50, p)
+    evaluate(c.bars[:61], 61, p)
+    second = eval_text(evaluate(c.bars, len(c.bars), p))
+    check(first == second, 'a restart (other evaluations in between) rebuilds the same state: nothing is kept between calls')
+
+
+def quiet_older(m, first_time, centre):
+    """m quiet alternating bars ending right before first_time (older times)"""
+    rows = []
+    for i in range(m):
+        cc = centre + (4 if i % 2 == 0 else 0)
+        rows.append(Bar(first_time - (m - i) * PERIOD, cc + HW, cc - HW, float(cc)))
+    return rows
+
+
+def test_16_depth_check():
+    print('--- 16. depth-sensitivity check (P11)')
+    c = case_by_name('p16a_converged_break')
+    e = evaluate(c.bars, len(c.bars), c.params())
+    check(e.reliable and e.flag == FLAG_CONVERGED and 'converged at depth 64 vs 44' in e.reason and reported_direction(e) == 'BULL',
+          'a: A and B agree: CONVERGED, text says "converged at depth 64 vs 44"')
+    check(e.r_eff == 64 and e.b_depth == 44 and e.warm == 20 and e.chk == 20 and e.r_req == 64,
+          'a: the depths used are reported (request, effective, B depth, warm-up, check depth)')
+    c2 = case_by_name('p16a_converged_seed')
+    e2 = evaluate(c2.bars, len(c2.bars), c2.params())
+    check(e2.reliable and e2.flag == FLAG_SEEDED and e2.state.origin == 'SEED', 'a: origin SEED_SWINGS gives SEEDED (weaker)')
+    same = True
+    for cc, nm in ((c, 'break'), (c2, 'seed')):
+        base = evaluate(cc.bars, len(cc.bars), Params(lookback=20, rebuild=1000))
+        for m in (0, 7, 19, 33):
+            older = quiet_older(m, cc.bars[0].time, 100)
+            allb = older + cc.bars
+            x = evaluate(allb, len(allb), Params(lookback=20, rebuild=1000))
+            if not (x.reliable and x.key == base.key and events_text(x.events, 0) == events_text(base.events, 0)):
+                same = False
+    check(same, 'a: extra older (quiet) bars added in a property test leave the final state and events identical')
+    # REWRITTEN in revision 10 (the old check 'b' relied on the frozen HOLD of revisions 6-7): the series
+    # p16b_ab_difference is an older bias (A: started by a BREAK) next to a window that starts later and
+    # SEEDS the same direction. With the structure no longer frozen both replays reach the SAME protecting
+    # level, setup and pending candidates; only the origin NAME differs (provenance, 11.8). It is now the
+    # POSITIVE provenance control R19, compared at REPLAY level from the bar after B's own start event
+    # (through evaluate() the start event of a window with a short lookback falls inside B's trusted zone
+    # and is an AB_EVENT_DIFF artefact of the synthetic lookback 20; with the real warm-up it is inside
+    # the warm-up). The comparison function is the one evaluate() uses.
+    c = case_by_name('p16b_ab_difference')
+    a_only = replay(c.bars, len(c.bars), c.params())
+    b_only = replay(c.bars[20:], len(c.bars) - 20, c.params())
+    seed_b = [x for x in b_only.events if x.type == EV_SEED][0]
+    why, org = ab_compare(a_only, b_only, seed_b.bar_time + PERIOD, 10 ** 12, 0)
+    check(why == '' and org == 'ORG_DIFF A=BREAK B=SEED',
+          'R19: origin differs only by NAME (A BREAK, B SEED), same level, setup, candidates and events afterwards: no AB_* reason, ORG_DIFF reported')
+    check(state_key(a_only.state, a_only.tracks) == state_key(b_only.state, b_only.tracks) and a_only.state.origin != b_only.state.origin
+          and dir_name(a_only.state.dir) == dir_name(b_only.state.dir),
+          'R19: the compared keys of A and B are equal although the origin name differs (A %s %s %s, B %s %s %s)' % (
+              dir_name(a_only.state.dir), a_only.state.phase, a_only.state.origin,
+              dir_name(b_only.state.dir), b_only.state.phase, b_only.state.origin))
+    # the SC-1 type negative control (must stay LIMITED)
+    c = case_by_name('sc1_limited')
+    e = evaluate(c.bars, len(c.bars), c.params())
+    a_only = replay(c.bars, len(c.bars), c.params())
+    b_only = replay(c.bars[len(c.bars) - e.b_depth:], e.b_depth, c.params())
+    check(not e.reliable and e.flag == FLAG_LIMITED and reported_direction(e) == 'UNKNOWN' and 'AB_STRUCTURE_DIFF' in e.reason
+          and 'AB_SETUP_DIFF' in e.reason and e.events == [],
+          'b (SC-1 negative control): wick above the level, decline, rebuilt HH/HL, all closes below: LIMITED_BY_HISTORY with AB_STRUCTURE_DIFF (not made to converge), direction UNKNOWN, no market event')
+    check(dir_name(a_only.state.dir) == 'BEAR' and a_only.state.phase == 'HOLD' and dir_name(b_only.state.dir) == 'BULL',
+          'b: the replays really disagree (A %s %s %s, B %s %s %s)' % (
+              dir_name(a_only.state.dir), a_only.state.phase, a_only.state.origin,
+              dir_name(b_only.state.dir), b_only.state.phase, b_only.state.origin))
+    check('ST=' not in eval_text(e) and 'EV=' not in eval_text(e) and 'DIAG=' in eval_text(e), 'b: the report asserts no state and no event, only a diagnostic')
+    c = case_by_name('p16c_anchor_warmup')
+    e = evaluate(c.bars, len(c.bars), c.params())
+    a_only = replay(c.bars, len(c.bars), c.params())
+    b_only = replay(c.bars[len(c.bars) - (e.r_eff - e.chk):], e.r_eff - e.chk, c.params())
+    check(not e.reliable and e.reason == 'ANCHOR_IN_WARMUP' and state_key(a_only.state, a_only.tracks) == state_key(b_only.state, b_only.tracks),
+          'c: the anchor lies in the warm-up: LIMITED although A and B agree')
+    c = case_by_name('p16e_event_only_diff')
+    e = evaluate(c.bars, len(c.bars), c.params())
+    a_only = replay(c.bars, len(c.bars), c.params())
+    b_only = replay(c.bars[len(c.bars) - (e.r_eff - e.chk):], e.r_eff - e.chk, c.params())
+    fa = [x.type for x in a_only.events if x.bar_time >= e.trusted_from]
+    fb = [x.type for x in b_only.events if x.bar_time >= e.trusted_from]
+    check(not e.reliable and e.reason == 'AB_EVENT_DIFF' and state_key(a_only.state, a_only.tracks) == state_key(b_only.state, b_only.tracks)
+          and EV_FLIP in fa and EV_BREAK_SET in fb and EV_FLIP not in fb,
+          'e: same final state but A flips (older bias) where B starts from NONE (BREAK_SET): LIMITED on the event difference alone')
+    c60 = case_by_name('p16d_limit_r60')
+    c140 = case_by_name('p16d_limit_r140')
+    e60 = evaluate(c60.bars, len(c60.bars), c60.params())
+    e140 = evaluate(c140.bars, len(c140.bars), c140.params())
+    check(e60.reliable and e60.flag == FLAG_SEEDED and e60.reason == 'converged at depth 60 vs 40' and reported_direction(e60) == 'BEAR',
+          'd: documented limitation: at depth 60 the state is reliable ("converged at depth 60 vs 40")')
+    check(e140.key != e60.key and dir_name(e140.state.dir) == 'BULL',
+          'd: more history (depth 140) gives a different state: the older difference is undetectable at depth 60 (LIMIT recorded, not detected)')
+    print('  LIMIT (documented, undetectable at depth 60): R=60 -> %s | R=140 -> %s' % (e60.key[:60], e140.key[:60]))
+    texts = [eval_text(evaluate(x.bars, x.n_use, x.params())) for x in build_cases() if x.kind == 'E']
+    check(all('unchanged' not in t_ and 'additional history' not in t_ and 'more history' not in t_ for t_ in texts),
+          'no report text claims the state is unchanged by more/additional history')
+    check(all(('converged at depth' in t_) or ('FLAG=LIMITED_BY_HISTORY' in t_) for t_ in texts), 'every flag text is "converged at depth X vs Y" or LIMITED_BY_HISTORY')
+
+
+def test_16u_units():
+    print('--- 16 (units). A/B comparison and previous-state rule as pure functions')
+    # REWRITTEN in revision 10: ab_reasons now takes the STRUCTURE keys, the SETUP keys and the event
+    # signatures separately (11.7) and reports AB_STRUCTURE_DIFF / AB_SETUP_DIFF / AB_EVENT_DIFF
+    check(ab_reasons('S', 'S', 'U', 'U', 'E1', 'E1', BULL, 100, 50) == '', 'agreement on structure, setup, events and anchor: reliable')
+    check(ab_reasons('S', 'S', 'U', 'U', 'E1', 'E2', BULL, 100, 50) == 'AB_EVENT_DIFF', 'same state, an event differs inside B\'s trusted region: LIMITED (event reason only)')
+    check(ab_reasons('S1', 'S2', 'U', 'U', 'E', 'E', BULL, 100, 50) == 'AB_STRUCTURE_DIFF', 'a different STRUCTURE: LIMITED (structure reason only; the setup comparison is not hidden)')
+    check(ab_reasons('S', 'S', 'U1', 'U2', 'E', 'E', BULL, 100, 50) == 'AB_SETUP_DIFF', 'a different SETUP: LIMITED (setup reason only)')
+    check(ab_reasons('S1', 'S2', 'U1', 'U2', 'E', 'E', BULL, 100, 50) == 'AB_STRUCTURE_DIFF+AB_SETUP_DIFF', 'both differ: both reasons are reported')
+    check(ab_reasons('S', 'S', 'U', 'U', 'E', 'E', BULL, 40, 50) == 'ANCHOR_IN_WARMUP', 'the anchor before A\'s warm-up end: LIMITED (anchor reason only)')
+    check(ab_reasons('S', 'S', 'U', 'U', 'E', 'E', 0, 0, 50) == '', 'NONE has no anchor: the anchor rule does not apply')
+    check(ab_reasons('S1', 'S2', 'U1', 'U2', 'E1', 'E2', BEAR, 10, 50) == 'AB_STRUCTURE_DIFF+AB_SETUP_DIFF+AB_EVENT_DIFF+ANCHOR_IN_WARMUP', 'reasons are combined in a fixed order')
+    # events that differ only BEFORE B's trusted region are not compared (AMBIGUITY 9)
+    ea = [Event(EV_WICK, 1000, 'L', 'x'), Event(EV_FLIP, 5000, 'L', 'y')]
+    eb = [Event(EV_FLIP, 5000, 'L', 'y')]
+    check(events_sig_text(ea, 4000) == events_sig_text(eb, 4000) and events_sig_text(ea, 0) != events_sig_text(eb, 0),
+          'events older than B\'s trusted region are ignored by the comparison')
+    check(consumer_prev_ok(True, True, 'K', 'K') and not consumer_prev_ok(True, False, 'K', 'K') and not consumer_prev_ok(False, True, 'K', 'K')
+          and not consumer_prev_ok(True, True, 'K', 'J'),
+          'the state before the bar counts only if RELIABLE and reproduced by the current window')
+    st = St()
+    st.src_time = 1000
+    f = t2.Fvg()
+    f.bullish = True
+    f.time_a = 1000
+    ok1 = fvg_eligible(f, st, True)
+    f.time_a = 999
+    ok2 = fvg_eligible(f, st, True)
+    f.time_a = 1000
+    ok3 = fvg_eligible(f, st, False)
+    check(ok1 and not ok2 and not ok3, 'eligibility: A at the source time qualifies, A one bar earlier or the wrong type does not')
+
+
+def test_17_depth_and_window():
+    print('--- 17. depth and window behaviour')
+    e = evaluate(case_by_name('p17_reduced_depth').bars, 50, case_by_name('p17_reduced_depth').params())
+    check(e.flag == FLAG_LIMITED and e.reason == 'SHORT_HISTORY' and 'reduced depth 50 of 60' in e.note and reported_direction(e) == 'UNKNOWN' and e.events == [],
+          'depth below 3*L: "reduced depth 50 of 60", LIMITED, UNKNOWN, no event')
+    cc = case_by_name('p17_reduced_depth_ok')
+    e = evaluate(cc.bars, len(cc.bars), cc.params())
+    check(e.reliable and 'reduced depth 64 of 200' in e.note, 'depth below R but at least 3*L: evaluated, "reduced depth 64 of 200" logged')
+    cc = case_by_name('p17_failed_copy')
+    e = evaluate(cc.bars, 0, cc.params())
+    check(e.state is None and e.events == [] and e.reason == 'NO_BARS' and consume_new(e, 0, PERIOD)[0] == C_NOT_RELIABLE,
+          'a failed/empty copy: no state, no event')
+    cc = case_by_name('p17_hard_cap')
+    e = evaluate(cc.bars, len(cc.bars), cc.params())
+    check(e.r_eff == 61 and 'clamped to HARD_CAP 61' in e.note, 'a request above HARD_CAP is clamped and logged')
+    check(Params().rebuild == 1000 and Params().hard_cap == 5000 and Params().lookback == 300 and warm_up(Params()) == 300 and check_depth(Params()) == 300,
+          'defaults: R 1000, HARD_CAP 5000, L 300, warm-up = check depth = L')
+    # sliding over a quiet tail keeps the final state of a converged window
+    base = sc17_quiet_tail()
+    s2 = Series(0)
+    s2.rows = []
+    allb = list(base)
+    for i in range(12):
+        t = allb[-1].time + PERIOD
+        cc_ = 134 + (4 if i % 2 == 0 else 0)
+        allb.append(Bar(t, cc_ + HW, cc_ - HW, float(cc_)))
+    p = Params(lookback=20, rebuild=64)
+    stable = True
+    quiet_nothing = True
+    for n in range(64, 70):
+        ev = evaluate_latest(allb, n, p)
+        if not (ev.reliable and ev.prev_ok and ev.cause == ''):
+            stable = False
+        st_, evs = consume_new(ev, allb[n - 2].time, PERIOD)
+        if st_ != C_OK or evs != []:
+            quiet_nothing = False
+    check(stable and quiet_nothing, 'sliding by one bar keeps the final state of a converged window (no re-derivation, no event)')
+    late = [evaluate_latest(allb, n, p) for n in range(70, len(allb) + 1)]
+    check(late[0].cause == 'REDERIVATION:LIMITED_ENTER' and not late[0].reliable and all(not x.reliable for x in late)
+          and all(consume_new(x, allb[0].time, PERIOD)[1] == [] for x in late),
+          'a state that depends on bars leaving the window becomes LIMITED (a RE-DERIVATION), never an event')
+    # first reliable evaluation: the event of that bar must not be emitted
+    cc = case_by_name('p17_first_event_n60')
+    p = cc.params()
+    ev = evaluate_latest(cc.bars, 60, p)
+    status, evs = consume_new(ev, cc.bars[58].time, PERIOD)
+    check(ev.reliable and EV_BREAK_SET in [x.type for x in ev.events] and ev.cause == 'REDERIVATION:LIMITED_EXIT'
+          and status == C_REDERIVED and evs == [], 'the state before the bar is LIMITED (59 < 3L): the BREAK_SET of the 60th bar is a RE-DERIVATION, not an event')
+    ev = evaluate_latest(cc.bars + [Bar(cc.bars[-1].time + PERIOD, 125.0, 115.0, 120.0)], 61, p)
+    check(ev.reliable and ev.prev_ok and ev.cause == '' and consume_new(ev, cc.bars[-1].time, PERIOD) == (C_OK, []),
+          'one bar later both states are reliable: no event for a quiet bar')
+    # the window slides past a structure: re-derivation, never an event
+    s = sc16_limit()
+    ext = list(s)
+    for i in range(80):
+        t = ext[-1].time + PERIOD
+        cc_ = 125 + (4 if i % 2 == 0 else 0)
+        ext.append(Bar(t, cc_ + HW, cc_ - HW, float(cc_)))
+    p = Params(lookback=20, rebuild=60)
+    seeds = 0
+    slid = 0
+    leak = 0
+    for n in range(100, len(ext) + 1):
+        ev = evaluate_latest(ext, n, p)
+        st_, evs = consume_new(ev, ext[n - 2].time, PERIOD)
+        if st_ == C_OK:
+            seeds += len([x for x in evs if x.type == EV_SEED])
+        if ev.cause.startswith('REDERIVATION'):
+            slid += 1
+            if evs:
+                leak += 1
+    check(seeds == 1, 'the SEED of the structure is emitted exactly once while the window moves over it')
+    check(slid >= 1 and leak == 0, 'when the structure leaves the window the change is a RE-DERIVATION (%d times) and no event leaks through it' % slid)
+    # invariant over every n of several series: events only when both states are reliable and A/B agree
+    viol = 0
+    for nm in ('p16a_converged_break', 'p16a_converged_seed', 'p16b_ab_difference', 'p16c_anchor_warmup'):
+        bb = case_by_name(nm).bars
+        for n in range(61, len(bb) + 1):
+            ev = evaluate_latest(bb, n, Params(lookback=20, rebuild=60))
+            st_, evs = consume_new(ev, bb[n - 2].time, PERIOD)
+            if evs and not (ev.reliable and ev.prev_ok):
+                viol += 1
+    check(viol == 0, 'events are consumed only when the state before and after the bar are RELIABLE and A/B agree')
+
+
+def test_19_internal_liquidity():
+    print('--- 19. internal liquidity (P14)')
+    for pref in ('', 'm_'):
+        tag = 'SELL' if pref == '' else 'BUY'
+        d0 = 'BEAR' if pref == '' else 'BULL'
+        r = rep_of(pref + 's_sweep_fvg_touch')
+        t = types_of(r)
+        sw = events_of(r, EV_INT_SWEEP)[0]
+        check(t == [EV_SEED, EV_INT_SWEEP, EV_RECONFIRMED] and dir_name(r.state.dir) == d0 and r.state.recon_reason == 'INTERNAL',
+              '%s: interior sweep with the protecting level not crossed: INTERNAL_SWEEP, SWEEP_WAIT, bias unchanged, FVG after the sweep, RECONFIRMED (INTERNAL)' % tag)
+        cb = case_by_name(pref + 's_sweep_fvg_touch')
+        sidx = [i for i in range(len(cb.bars)) if cb.bars[i].time == sw.bar_time][0]
+        mid = replay(cb.bars, sidx + 1, cb.params())
+        check(mid.state.phase == 'SWEEP_WAIT' and sweep_block(mid.state) and not hold_block(mid.state),
+              '%s: SWEEP_WAIT exposes the entries-block as a separate TECHNICAL-PROPOSAL flag (not the S3 hold flag)' % tag)
+        r = rep_of(pref + 's_wick_instead')
+        check(EV_INT_SWEEP not in types_of(r) and types_of(r)[-1] == EV_WICK and r.state.phase == 'HOLD',
+              '%s: a wick through the protecting level is the structural wick (HOLD), not a sweep' % tag)
+        r = rep_of(pref + 's_break_instead')
+        check(EV_INT_SWEEP not in types_of(r) and types_of(r)[-1] == EV_FLIP, '%s: a body break is a flip, not a sweep' % tag)
+        r = rep_of(pref + 's_int_break')
+        check(types_of(r) == [EV_SEED, EV_INT_BREAK] and r.state.phase == 'ACTIVE' and dir_name(r.state.dir) == d0,
+              '%s: a body close beyond an interior level is only an INTERNAL_BREAK observation' % tag)
+        r = rep_of(pref + 's_restart')
+        sws = events_of(r, EV_INT_SWEEP)
+        # revision 14: the detail is a SUPERSET (restart= kept, setup= and top= added), so the field is read by name
+        check(len(sws) == 2 and dval(sws[1].detail, 'restart') == '1' and dval(sws[1].detail, 'setup') == '1'
+              and dval(sws[1].detail, 'top') == '1' and dval(sws[0].detail, 'restart') == '0'
+              and r.state.sweep_time == sws[1].bar_time,
+              '%s: a further internal sweep restarts the wait from the latest sweep (restart=1, setup=1, top=1)' % tag)
+        r = rep_of(pref + 's_wait_wick')
+        # revision 10: the structural wick replaces the sweep setup (SETUP_ENDED REPLACED before the WICK)
+        check(types_of(r) == [EV_SEED, EV_INT_SWEEP, EV_SETUP_ENDED, EV_WICK] and r.state.phase == 'HOLD' and r.state.sweep_time == 0
+              and events_of(r, EV_SETUP_ENDED)[0].detail.startswith('reason=REPLACED') and r.state.setup_type == 'WICK',
+              '%s: in SWEEP_WAIT the structural wick supersedes the wait (the sweep setup is REPLACED by a WICK setup)' % tag)
+        r = rep_of(pref + 's_wait_break')
+        check(types_of(r) == [EV_SEED, EV_INT_SWEEP, EV_FLIP, EV_SETUP_ENDED] and events_of(r, EV_SETUP_ENDED)[0].detail.startswith('reason=INVALIDATED_BY_FLIP'),
+              '%s: in SWEEP_WAIT a body break flips and ends the sweep setup (structural logic supersedes)' % tag)
+        r = rep_of(pref + 's_no_level_after_flip')
+        cb = case_by_name(pref + 's_no_level_after_flip')
+        fidx = [i for i in range(len(cb.bars)) if cb.bars[i].time == events_of(r, EV_FLIP)[0].bar_time][0]
+        just = replay(cb.bars, fidx + 1, cb.params())
+        check(not just.state.has_level and just.state.phase == 'ACTIVE',
+              '%s: right after a flip the new bias has no protecting level' % tag)
+    bad = []
+    for c in build_cases():
+        if c.kind != 'R':
+            continue
+        r = rep_of(c.name)
+        first = {}
+        for e in r.events:
+            if e.type in (EV_INT_SWEEP, EV_INT_BREAK):
+                idx = [i for i in range(len(c.bars)) if c.bars[i].time == e.bar_time][0]
+                if r.keys[idx - 1].split(';LV=')[1].split(';')[0] == '-':
+                    bad.append(c.name)
+    check(not bad, 'every INTERNAL_SWEEP / INTERNAL_BREAK was raised with a defined protecting level %s' % bad)
+
+
+def lv_of_key(key):
+    return key.split(';LV=')[1].split(';')[0]
+
+
+def lv_id_of_key(key):
+    return lv_of_key(key).split('@')[0]
+
+
+def derive_id_at(c, upto, d):
+    """id of the protecting level a derivation from the closed prefix bars[0..upto] would give"""
+    sw, _ = t2.find_swings(c.bars, c.n_use, 2, 2, PERIOD)
+    lvl, ex = derive_level(sw, known_count(sw, 2, upto), d)
+    return lvl.id if lvl is not None else '-'
+
+
+def bar_idx(c, t):
+    return [i for i in range(c.n_use) if c.bars[i].time == t][0]
+
+
+def test_22_freeze_internal():
+    """REWRITTEN in revision 10 (PROPOSAL / PROTOTYPE, awaiting the client). The revision 6-7 tests of
+    this group asserted that the protecting level is FROZEN during RECONFIRMED(INTERNAL) and that it is
+    thawed and re-derived at the end of the thaw bar. Revision 10 removes the freeze: the STRUCTURE
+    (bias, protecting level, pending candidates) updates on every closed bar in every phase and the
+    setup context is separate. The same scenarios are kept; for each former assertion the changed
+    expectation is shown. What still holds is kept as it was: a new level is used only from the FOLLOWING
+    bar (a derivation up to T is used from T+1), no event is lost on T+1, a wick restarts / a body break
+    flips, and the other eligible FVG can be touched on the same bar as the loss."""
+    print('--- 22. (REWRITTEN, revision 10) RECONFIRMED(INTERNAL): the structure is NOT frozen; RECONF_LOST keeps the setup')
+    for pref in ('', 'm_'):
+        tag = 'SELL' if pref == '' else 'BUY'
+        d0 = BEAR if pref == '' else BULL
+        # (a) was: a swing confirmed long after the reconfirmation leaves the level frozen. NOW: the level
+        # advances (ratchet) while RECONFIRMED(INTERNAL) lasts; the setup (id, FVG record) is unchanged.
+        name = pref + 's_recon_later_swing'
+        c = case_by_name(name)
+        r = rep_of(name)
+        ri = bar_idx(c, events_of(r, EV_RECONFIRMED)[0].bar_time)
+        lv_touch = lv_id_of_key(r.keys[ri - 1])
+        setup_touch = r.keys[ri].split(';SU=')[1].split(';')[0]
+        check(r.state.phase == 'RECONFIRMED' and r.state.recon_reason == 'INTERNAL' and not r.state.frozen
+              and lv_id_of_key(r.keys[-1]) not in (lv_touch, '-') and lv_id_of_key(r.keys[-1]) == derive_id_at(c, c.n_use - 1, d0),
+              '%s (a): CHANGED - the level advances to the newer leg during RECONFIRMED(INTERNAL) (it is no longer frozen)' % tag)
+        check(r.keys[-1].split(';SU=')[1].split(';')[0] == setup_touch and r.state.rec_id == events_of(r, EV_RECONFIRMED)[0].ref,
+              '%s (a): the setup (setup_id, recorded FVG) is unchanged by the structure update' % tag)
+        check(any(e.type == EV_CONTINUATION and e.bar_time > c.bars[ri].time for e in r.events),
+              '%s (a): CHANGED - observation events (CONTINUATION) are raised also while RECONFIRMED' % tag)
+        # (a2) was: the touching candle confirms a swing and the event's level stays frozen. NOW: the touch
+        # bar is judged with the level known BEFORE it; the new level exists at the END of the bar and is used
+        # from the FOLLOWING bar (correction 2).
+        name = pref + 's_recon_touch_swing'
+        c = case_by_name(name)
+        r = rep_of(name)
+        ri = bar_idx(c, events_of(r, EV_RECONFIRMED)[0].bar_time)
+        before = lv_id_of_key(r.keys[ri - 1])
+        after = lv_id_of_key(r.keys[ri])
+        check(before != '-' and after == derive_id_at(c, ri, d0) and after not in (before, '-'),
+              '%s (a2): CHANGED - the touching candle confirms a new swing: the level known before the bar (%s) judged the bar; the new level exists at the end of the bar and is used from the next' % (tag, 'old'))
+        check(derive_id_at(c, ri - 1, d0) == before,
+              '%s (a2): control: a derivation up to the bar before the touch gives the level the touch bar was judged against' % tag)
+        # (b) was: the recorded FVG is invalidated: thaw and re-derivation. NOW: RECONF_LOST returns the setup to waiting
+        name = pref + 's_recon_thaw'
+        c = case_by_name(name)
+        r = rep_of(name)
+        lost = events_of(r, EV_RECONF_LOST)
+        ti = bar_idx(c, lost[0].bar_time)
+        su_before = r.keys[ti - 1].split(';SU=')[1].split(';')[0]
+        su_after = r.keys[ti].split(';SU=')[1].split(';')[0]
+        check(len(lost) == 1 and lost[0].detail.endswith('to=SWEEP_WAIT') and 'PH=SWEEP_WAIT' in r.keys[ti] and 'PH=RECONFIRMED' in r.keys[ti - 1],
+              '%s (b): the invalidated FVG sends RECONFIRMED(INTERNAL) back to SWEEP_WAIT' % tag)
+        check(su_before == su_after and su_after != '-' and EV_SETUP_ENDED not in types_of(r) and r.state.sweep_time != 0
+              and r.state.rec_id == '' and r.state.setup_id == su_after and r.state.wait_start == c.bars[bar_idx(c, r.state.sweep_time) + 1].time,
+              '%s (b): RECONF_LOST KEEPS setup_id, the sweep record and wait_start, clears rec_id and is NOT a SETUP_ENDED' % tag)
+        check(lv_id_of_key(r.keys[-1]) == derive_id_at(c, c.n_use - 1, d0) and not r.state.frozen and sweep_block(r.state),
+              '%s (b): CHANGED - nothing thaws (the level was never frozen): it is the ratcheted level; the wait continues and the entries-block flag (technical proposal) is raised again' % tag)
+        # (b2) KEPT: the following bar is judged against the CURRENT level (the one at the end of T)
+        lvT = lv_id_of_key(r.keys[ti])
+        r = rep_of(pref + 's_recon_thaw_wick')
+        w = events_of(r, EV_WICK)
+        check(len(w) == 1 and w[0].ref == lvT and w[0].detail.endswith('restart=0') and r.state.phase == 'HOLD'
+              and events_of(r, EV_SETUP_ENDED)[-1].detail.startswith('reason=REPLACED') and r.state.setup_type == 'WICK',
+              '%s (b2): a wick on T+1 is judged against the current level (the end of T); the sweep setup is REPLACED by a WICK setup' % tag)
+        r = rep_of(pref + 's_recon_thaw_break')
+        fl = events_of(r, EV_FLIP)
+        check(len(fl) == 1 and fl[0].ref == lvT and dir_name(r.state.dir) == dir_name(-d0)
+              and events_of(r, EV_SETUP_ENDED)[-1].detail.startswith('reason=INVALIDATED_BY_FLIP'),
+              '%s (b2): a body close on T+1 beyond the current level flips the bias and ends the setup' % tag)
+        # (b3) KEPT: no event lost on T+1 after RECONF_LOST
+        for kname, etype, label in (('cont', EV_CONTINUATION, 'CONTINUATION'), ('isweep', EV_INT_SWEEP, 'INTERNAL_SWEEP'),
+                                    ('ibreak', EV_INT_BREAK, 'INTERNAL_BREAK')):
+            name = pref + 's_recon_thaw_' + kname
+            c = case_by_name(name)
+            r = rep_of(name)
+            late = [e for e in r.events if e.type == etype and e.bar_time == c.bars[c.n_use - 1].time]
+            ti = bar_idx(c, events_of(r, EV_RECONF_LOST)[0].bar_time)
+            check(len(late) == 1 and ti == c.n_use - 2 and r.state.dir == d0,
+                  '%s (b3): %s is still raised on T+1 after RECONF_LOST (no event lost)' % (tag, label))
+        # (c) KEPT in substance: wick / body break during RECONFIRMED(INTERNAL); CHANGED: the setup is REPLACED / ENDED
+        name = pref + 's_recon_wick'
+        c = case_by_name(name)
+        r = rep_of(name)
+        w = events_of(r, EV_WICK)
+        prev_key = r.keys[c.n_use - 2]
+        check(len(w) == 1 and w[0].detail.endswith('restart=1') and r.state.phase == 'HOLD' and r.state.setup_type == 'WICK'
+              and 'PH=RECONFIRMED' in prev_key and 'RSN=INTERNAL' in prev_key
+              and w[0].ref == lv_id_of_key(prev_key) and r.state.sweep_time == 0 and not r.state.rec_id
+              and events_of(r, EV_SETUP_ENDED)[-1].detail.startswith('reason=REPLACED'),
+              '%s (c): a wick through the current level during RECONFIRMED(INTERNAL) starts HOLD (restart): the sweep setup is REPLACED by a WICK setup' % tag)
+        name = pref + 's_recon_break'
+        c = case_by_name(name)
+        r = rep_of(name)
+        fl = events_of(r, EV_FLIP)
+        prev_key = r.keys[c.n_use - 2]
+        check(len(fl) == 1 and fl[0].ref == lv_id_of_key(prev_key) and 'PH=RECONFIRMED' in prev_key and 'RSN=INTERNAL' in prev_key
+              and EV_RECONF_LOST not in types_of(r) and dir_name(r.state.dir) == dir_name(-d0)
+              and events_of(r, EV_SETUP_ENDED)[-1].detail.startswith('reason=INVALIDATED_BY_FLIP'),
+              '%s (c): a body close beyond the current level during RECONFIRMED(INTERNAL) flips the bias and ends the setup (priority before reconfirmation)' % tag)
+        # (d) KEPT: invalidation of the recorded FVG and a touch of ANOTHER FVG on the same bar
+        name = pref + 's_recon_two_fvg'
+        c = case_by_name(name)
+        r = rep_of(name)
+        lost = events_of(r, EV_RECONF_LOST)
+        rec = events_of(r, EV_RECONFIRMED)
+        ti = bar_idx(c, lost[0].bar_time)
+        su_before = r.keys[ti - 1].split(';SU=')[1].split(';')[0]
+        check(len(lost) == 1 and len(rec) == 2 and rec[1].bar_time == lost[0].bar_time and rec[1].ref != lost[0].ref
+              and r.state.phase == 'RECONFIRMED' and r.state.recon_reason == 'INTERNAL' and r.state.rec_id == rec[1].ref
+              and r.state.setup_id == su_before and EV_SETUP_ENDED not in types_of(r),
+              '%s (d): the recorded FVG is lost and another one is touched on the same bar: RECONFIRMED(INTERNAL) again, SAME setup_id, other recorded FVG' % tag)
+        # (e) REWRITTEN: was 'a touch while no protecting level is defined is not recorded'. A candidate
+        # crossed by a close is now REJECTED and the previous level stays, so the state 'setup without a
+        # level' cannot arise; the same touch IS recorded. The defensive guard stays in the code.
+        name = pref + 's_recon_nolevel'
+        c = case_by_name(name)
+        r = rep_of(name)
+        rec = events_of(r, EV_RECONFIRMED)
+        check(len(rec) == 1 and rec[0].bar_time == c.bars[c.n_use - 2].time and r.state.has_level and r.state.phase == 'RECONFIRMED',
+              '%s (e): CHANGED - the touch of s_recon_nolevel IS recorded: the crossed candidate is rejected and the previous level stays in force (no level-less setup)' % tag)
+        name = pref + 's_recon_nolevel_ctl'
+        c = case_by_name(name)
+        r = rep_of(name)
+        rec = events_of(r, EV_RECONFIRMED)
+        check(len(rec) == 1 and rec[0].bar_time == c.bars[c.n_use - 2].time and r.state.has_level and not r.state.frozen,
+              '%s (e): control: the same touch with the candidate not crossed is recorded as RECONFIRMED(INTERNAL); nothing is frozen' % tag)
+        bad = []
+        for cc in build_cases():
+            if cc.kind != 'R':
+                continue
+            rr = rep_of(cc.name)
+            if rr.state.dir != 0 and rr.state.phase != 'ACTIVE' and not rr.state.has_level:
+                bad.append(cc.name)
+            for k in rr.keys:
+                if ';PH=ACTIVE;' not in k and ';PH=-;' not in k and ';LV=-;' in k:
+                    bad.append(cc.name + '@key')
+                    break
+        check(not bad, 'invariant (every case, every bar): a setup (HOLD, SWEEP_WAIT, RECONFIRMED) never exists without a protecting level %s' % bad[:3])
+        # a structural RECONFIRMED lost to FVG invalidation returns to HOLD (setup kept)
+        r = rep_of(pref + 'w_invalid_after_reconf')
+        check(r.state.phase == 'HOLD' and (not r.state.frozen) and EV_RECONF_LOST in types_of(r) and EV_SETUP_ENDED not in types_of(r)
+              and r.state.setup_id.startswith('WICK@'),
+              '%s: a structural RECONFIRMED lost to FVG invalidation returns to HOLD with the same setup (RECONF_LOST is not SETUP_ENDED)' % tag)
+
+
+def test_23_anchor_by_bars():
+    print('--- 23. FINDING 1: anchor located by EXISTING bars (weekend, history gap, window start)')
+    base = case_by_name('p16a_converged_break')
+    e0 = evaluate(base.bars, base.n_use, base.params())
+    refs0 = anchor_refs(e0.state)
+    r0 = min(refs0)
+    check(e0.reliable and e0.anchor == r0 - 2 * PERIOD,
+          'contiguous series: the anchor equals the old arithmetic result (2 existing bars before the earliest reference)')
+    for nm, label in (('f1_weekend_gap', 'weekend gap'), ('f1_history_gap', 'history gap (3 missing bars)')):
+        c = case_by_name(nm)
+        e = evaluate(c.bars, c.n_use, c.params())
+        times = [b.time for b in c.bars]
+        rmin = min(anchor_refs(e.state))
+        i = bar_index_by_time(c.bars, c.n_use, rmin)
+        old = rmin - 2 * PERIOD
+        check(e.reliable and e.anchor == c.bars[i - 2].time and e.anchor in times and e.anchor_missing == '',
+              '%s: the anchor is the open time of the 2nd EXISTING bar before the reference' % label)
+        check(old not in times and e.anchor != old,
+              '%s: control: the old arithmetic result (reference minus 2 periods) is not a bar of the series' % label)
+        check([x.type for x in e.events] == [x.type for x in e0.events] and e.flag == e0.flag and dir_name(e.state.dir) == dir_name(e0.state.dir),
+              '%s: same structure and events as the contiguous series (only the absolute times differ)' % label)
+    # window start: a reference with exactly Left bars before it, one bar fewer, and the very first bar
+    p = Params(left=2)
+    bars = [Bar(T0 + i * PERIOD, 110.0, 100.0, 105.0) for i in range(10)]
+    st = St()
+    st.dir = BULL
+    st.origin_ref = bars[2].time
+    a, miss = anchor_time(st, p, bars, 10)
+    check(a == bars[0].time and miss == '', 'window start: a reference with exactly Left bars before it anchors at the first bar')
+    st.origin_ref = bars[1].time
+    a, miss = anchor_time(st, p, bars, 10)
+    check(a == 0 and miss.startswith('ANCHOR_NEEDS_2_BARS_BEFORE'), 'window start: one bar fewer than Left: missing history reported, no time fabricated (anchor 0)')
+    st.origin_ref = bars[0].time
+    a, miss = anchor_time(st, p, bars, 10)
+    check(a == 0 and miss.startswith('ANCHOR_NEEDS_2_BARS_BEFORE'), 'window start: a reference at the very first bar: missing history')
+    # a reference that is not a bar of the series (missing bar): reported, not substituted
+    st.origin_ref = bars[5].time + 3600
+    a, miss = anchor_time(st, p, bars, 10)
+    check(a == 0 and miss.startswith('ANCHOR_REF_NOT_IN_SERIES'), 'a reference that is not in the series: missing history reported, no time fabricated')
+    hole = bars[:4] + bars[5:]
+    st.origin_ref = bars[4].time
+    a, miss = anchor_time(st, p, hole, 9)
+    check(a == 0 and miss.startswith('ANCHOR_REF_NOT_IN_SERIES'), 'history gap on the reference bar itself: the reference is missing, reported')
+    # one missing bar before the reference: Left EXISTING bars are used, the hole is skipped
+    st.origin_ref = bars[6].time
+    a, miss = anchor_time(st, p, hole, 9)
+    check(a == bars[3].time and miss == '', 'a hole before the reference: the Left existing bars are used (the missing slot is skipped)')
+    # several references: the earliest anchor wins, one missing reference makes the whole anchor missing
+    st.origin_ref = bars[8].time
+    st.has_level = True
+    st.lv_pivot = bars[6].time
+    st.lv_ext = bars[7].time
+    st.lv_prev = bars[3].time
+    a, miss = anchor_time(st, p, bars, 10)
+    check(a == bars[1].time and miss == '', 'several references: the earliest anchor wins')
+    st.lv_prev = bars[1].time
+    a, miss = anchor_time(st, p, bars, 10)
+    check(a == 0 and miss != '', 'several references: one reference without Left bars before it makes the anchor missing (never partial)')
+    # which references count
+    # REWRITTEN in revision 10: there is no frozen branch any more. The references are the origin, the
+    # level's pivots, the source wick of a structural setup and the sweep of an internal one.
+    r = rep_of('s_recon_later_swing')
+    refs = anchor_refs(r.state)
+    check(r.state.sweep_time in refs and r.state.lv_pivot in refs and r.state.origin_ref in refs and r.state.wk_src not in refs,
+          'RECONFIRMED(INTERNAL): the references are the origin, the (live) level pivots and the sweep')
+    r = rep_of('w_wick')
+    refs = anchor_refs(r.state)
+    check(r.state.wk_src in refs and r.state.lv_pivot in refs and r.state.origin_ref in refs and 0 not in refs,
+          'HOLD: the references are the origin, the level pivots and the source wick')
+    r = rep_of('s_recon_thaw')
+    refs = anchor_refs(r.state)
+    check(r.state.origin_ref in refs and r.state.sweep_time in refs and r.state.lv_pivot in refs,
+          'SWEEP_WAIT: the references are the origin, the level pivots and the sweep')
+    # the reliability rule
+    check(ab_reasons('S', 'S', 'U', 'U', 'E', 'E', BULL, 0, 50, 'ANCHOR_NEEDS_2_BARS_BEFORE x') == 'ANCHOR_HISTORY_MISSING',
+          'missing anchor history: LIMITED_BY_HISTORY with its own reason (not reported as a warm-up case)')
+    check(ab_reasons('S1', 'S2', 'U', 'U', 'E', 'E', BULL, 0, 50, 'm') == 'AB_STRUCTURE_DIFF+ANCHOR_HISTORY_MISSING',
+          'missing anchor history combines with the other reasons in the fixed order')
+    check(ab_reasons('S', 'S', 'U', 'U', 'E', 'E', 0, 0, 50, 'm') == '', 'NONE has no anchor: missing-history text cannot make it LIMITED')
+    c = case_by_name('p16c_anchor_warmup')
+    e = evaluate(c.bars, c.n_use, c.params())
+    check(not e.reliable and e.reason == 'ANCHOR_IN_WARMUP' and e.anchor == c.bars[0].time and e.anchor_missing == '',
+          'reference close to the start of the series (Left bars exist): the anchor is the first bar and the case is LIMITED by the warm-up rule')
+
+
+def test_21_no_fixed_count():
+    print('--- 21. no fixed BOS count')
+    levels = []
+    for k in (1, 2, 3):
+        r = rep_of('bos_%d' % k)
+        t = types_of(r)
+        check(dir_name(r.state.dir) == 'BULL' and r.state.phase == 'ACTIVE' and r.state.origin == 'BREAK' and t[0] == EV_BREAK_SET
+              and t.count(EV_CONTINUATION) == k - 1 and EV_FLIP not in t, '%d successive break(s): same bias rule (BREAK_SET + %d CONTINUATION), no flip' % (k, k - 1))
+        levels.append(r.state.lv_price if r.state.has_level else 0)
+    check(levels[0] < levels[1] < levels[2], 'the protecting low follows the last up-leg whatever the number of breaks')
+
+
+def test_ids_and_windows():
+    print('--- technical requirement (a): identities use absolute times, stable under window shifts')
+    import re
+    id_pat = re.compile(r'^(SH|SL)\d{12}_\d{12}_\d{12}$|^(HH|LL)\d{12}_\d{12}$|^(IH|IL)\d{12}$|^F\d{12}[UD]$')
+    ev_pat = re.compile(r'^[A-Z_]+@\d{12}#[A-Za-z0-9_+]+$')
+    setup_pat = re.compile(r'^(WICK|SWEEP)@\d{12}#(SH|SL)\d{12}_\d{12}_\d{12}$')
+    bad = 0
+    for c in build_cases():
+        if c.kind != 'R':
+            continue
+        r = rep_of(c.name)
+        for e in r.events:
+            if e.type == EV_SETUP_ENDED or e.type == EV_SNAP_CROSSED:
+                # revision 10: the subject of these events is the setup_id (type@source#snapshot level id)
+                if not setup_pat.match(e.ref) or not e.id().startswith('%s@%s#' % (e.type, ts(e.bar_time))):
+                    bad += 1
+                continue
+            if not ev_pat.match(e.id()):
+                bad += 1
+            for part in e.ref.split('+'):
+                if not id_pat.match(part):
+                    bad += 1
+        for tr in r.tracks:
+            if not id_pat.match(tr.id):
+                bad += 1
+        if r.state.has_level and not id_pat.match(r.state.lv_id):
+            bad += 1
+        if r.state.setup_id != '' and not setup_pat.match(r.state.setup_id):
+            bad += 1
+    check(bad == 0, 'all level, FVG, setup and event IDs consist only of type letters and 12-digit absolute time stamps')
+    common_total = 0
+    stable = True
+    for name, shifts in (('w_a_is_wick', (1, 2, 3, 5)), ('b2_none_touched', (1, 2, 4)), ('e_sweep_fvg_touch', (1, 3, 6)),
+                         ('c_history', (1, 2, 3)), ('b2_active_retro', (1, 2, 3, 5)), ('m_w_a_is_wick', (1, 2, 3))):
+        c = case_by_name(name)
+        full = replay(c.bars, len(c.bars), c.params())
+        # revision 14: several events of one type can share a bar (one per internal level), so a (type, bar) maps to a SET of ids
+        fmap = {}
+        for e in full.events:
+            fmap.setdefault((e.type, e.bar_time), set()).add(e.id())
+        for sft in shifts:
+            sh = replay(c.bars[sft:], len(c.bars) - sft, c.params())
+            for e in sh.events:
+                k = (e.type, e.bar_time)
+                if k in fmap:
+                    common_total += 1
+                    if e.id() not in fmap[k]:
+                        stable = False
+            if sh.state.has_level and full.state.has_level and sh.state.lv_price == full.state.lv_price and sh.state.lv_id != full.state.lv_id:
+                stable = False
+            ft = dict((tr.id, 1) for tr in full.tracks)
+            for tr in sh.tracks:
+                if tr.id not in ft and full.state.phase == sh.state.phase:
+                    stable = False
+    check(common_total >= 10 and stable, 'the same event/level/FVG keeps the same ID when the window start moves (%d common events compared)' % common_total)
+
+
+def test_consumer():
+    print('--- technical requirement (b): history of events versus new events for the consumer')
+    p = Params(lookback=20, rebuild=1000)
+    c = case_by_name('p16a_converged_break')
+    base = c.bars
+    last = Bar(base[-1].time + PERIOD, 135.0, 104.0, 112.0)          # structural wick through the protecting low (109)
+    e0 = evaluate_latest(base, len(base), p)
+    cur = baseline_cursor(e0)
+    check(e0.reliable and len(e0.events) >= 2 and cur == base[-1].time, 'the replay carries the full event log (history) with absolute bar times')
+    st_, evs = consume_new(e0, cur, PERIOD)
+    check(st_ == C_NOTHING_NEW and evs == [], 'init/restart: the cursor is set to the last closed bar, no historical event is re-emitted')
+    st_, evs = consume_new(e0, 0, PERIOD)
+    check(st_ == C_GAP and evs == [], 'an uninitialised cursor emits nothing (it must be baselined first)')
+    e0b = evaluate_latest(base, len(base), p)
+    check(consume_new(e0b, cur, PERIOD)[0] == C_NOTHING_NEW, 're-evaluation at the same bar emits nothing')
+    nb = base + [last]
+    e1 = evaluate_latest(nb, len(nb), p)
+    st_, evs = consume_new(e1, cur, PERIOD)
+    check(st_ == C_OK and [x.type for x in evs] == [EV_WICK] and evs[0].bar_time == last.time, 'the next closed bar emits its event (WICK) once')
+    cur = baseline_cursor(e1)
+    st_, evs = consume_new(evaluate_latest(nb, len(nb), p), cur, PERIOD)
+    check(st_ == C_NOTHING_NEW and evs == [], 'and not a second time')
+    # a restart on the same bars: baseline again, nothing is re-emitted although the log holds the WICK
+    e2 = evaluate_latest(nb, len(nb), p)
+    check(any(x.type == EV_WICK for x in e2.events) and consume_new(e2, baseline_cursor(e2), PERIOD)[1] == [],
+          'a restart sets the baseline again: the WICK stays in the history and is not a new signal')
+    gap = nb + [Bar(nb[-1].time + PERIOD, 115.0, 105.0, 110.0), Bar(nb[-1].time + 2 * PERIOD, 116.0, 106.0, 111.0)]
+    e3 = evaluate_latest(gap, len(gap), p)
+    st_, evs = consume_new(e3, baseline_cursor(e1), PERIOD)
+    check(st_ == C_GAP and evs == [], 'a cursor older than the previous bar (missed bars) emits nothing and must be re-baselined')
+    # a limited evaluation emits nothing
+    lim = case_by_name('p16b_ab_difference')
+    el = evaluate_latest(lim.bars, len(lim.bars), lim.params())
+    check(consume_new(el, lim.bars[-2].time, PERIOD) == (C_NOT_RELIABLE, []), 'a LIMITED_BY_HISTORY evaluation emits no event')
+
+
+def test_24_diagnostics():
+    print('--- 24. diagnostics: ordered state fields, first differing field/event, windows, anchors, level undefined')
+    cases = build_cases()
+    # a. the ordered field list IS the state key
+    ok = True
+    n_r = 0
+    flips_ok = True
+    for c in cases:
+        if c.kind != 'R':
+            continue
+        rep = replay(c.bars, c.n_use, c.params())
+        n_r += 1
+        if ';'.join('%s=%s' % kv for kv in state_fields(rep.state, rep.tracks)) != state_key(rep.state, rep.tracks):
+            ok = False
+        if rep.flips_after_run != 0 or rep.n_flips != sum(1 for e in rep.events if e.type == EV_FLIP):
+            flips_ok = False
+    check(ok and n_r > 60 and [l for l, _ in state_fields(St(), [])] == list(STATE_FIELDS),
+          'the ordered state fields joined as label=value equal the state key (%d replays) and follow the documented order' % n_r)
+    check(flips_ok, 'no FLIP is ever dated after a "bias without a level" run began (a flip needs a level), flips counted from the events (%d replays)' % n_r)
+    anch_ok = True
+    n_anch = 0
+    for x in cases:
+        if x.kind not in ('E', 'D'):
+            continue
+        e_ = evaluate(x.bars, x.n_use, x.params())
+        if e_.state is None:
+            continue
+        d_ = diagnose(x.bars, x.n_use, x.params(), e_)
+        n_anch += 1
+        if d_.a.anchor != e_.anchor or d_.a.anchor_missing != e_.anchor_missing:
+            anch_ok = False
+    check(anch_ok and n_anch > 15, 'the anchor reported by the diagnostics (with the reference that binds it) equals the anchor of the evaluation (%d evaluations)' % n_anch)
+    # b. first differing field = first in the explicit order
+    base = [(l, 'x') for l in STATE_FIELDS]
+
+    def with_(**kv):
+        return [(l, kv.get(l, 'x')) for l in STATE_FIELDS]
+    check(first_diff_field(base, with_(PH='y', LV='y')) == ('LV', 'x', 'y'), 'two fields differ (PH, LV): the earlier one in the explicit order (STRUCTURE before SETUP) is named')
+    check(first_diff_field(base, with_(EL='y', LV='y')) == ('LV', 'x', 'y'), 'two fields differ (LV, EL): LV is named, EL is not')
+    check(first_diff_field(base, with_(BIAS='y', EL='y')) == ('BIAS', 'x', 'y') and first_diff_field(base, list(base)) is None,
+          'BIAS comes first; identical lists give none')
+    ta = [Track(0, 'F1'), Track(1, 'F2')]
+    tb = [Track(0, 'F1'), Track(1, 'F2')]
+    tb[1].invalid = True
+    check(track_diff_text(ta, tb) == 'track #1 A=F2:FRESH B=F2:INVALID (counts 2 vs 2)' and
+          track_diff_text(ta, ta[:1]) == 'track #1 A=F2:FRESH B=- (counts 2 vs 1)' and track_diff_text(ta, ta) == '',
+          'eligible-FVG tracks: the first differing track, or a count difference, is named; equal lists give nothing')
+
+    def dg(name):
+        c = case_by_name(name)
+        p = c.params()
+        ev = evaluate(c.bars, c.n_use, p)
+        return c, ev, diagnose(c.bars, c.n_use, p, ev)
+    # c. REWRITTEN in revision 10: replay A and B differ in the ORIGIN NAME and in the first event of the zone (p16b).
+    # With the structure not frozen every compared field is equal; the origin is provenance (ORG_DIFF).
+    c, ev, d = dg('p16b_ab_difference')
+    n = len(c.bars)
+    check((not d.reliable) and d.reason == 'AB_EVENT_DIFF+ANCHOR_IN_WARMUP' and d.field_diff is None and d.org_diff == 'ORG_DIFF A=BREAK B=SEED',
+          'p16b: all 12 compared fields are equal, the origin NAME differs (ORG_DIFF A=BREAK B=SEED, provenance); both biases are BULL/HOLD with the same level')
+    i, ea, eb = d.event_diff
+    # REWRITTEN in revision 14: the per-level internal liquidity raises an INTERNAL_SWEEP at 202601130400 (the level
+    # IL202601121200, ignored by the single-candidate selector) before the sweep that used to be first (202601130800);
+    # A still differs from B by exactly the same cause (B starts later and can only SEED).
+    check(i == 0 and ea.type == EV_INT_SWEEP and eb.type == EV_SEED and ts(ea.bar_time) == '202601130400' and ts(eb.bar_time) == '202601120400',
+          'p16b: the first differing event of the zone is #0, A INTERNAL_SWEEP at 202601130400 versus B SEED at 202601120400 (absolute times)')
+    check(d.a.start == c.bars[0].time and d.a.bars == ev.r_eff and d.b.start == c.bars[n - ev.b_depth].time and d.b.bars == ev.b_depth and
+          d.a.warm_end == c.bars[ev.warm].time and d.b.warm_end == c.bars[n - ev.b_depth + ev.warm].time and
+          d.zone_start == ev.trusted_from == d.b.warm_end,
+          'p16b: window starts, bar counts, warm-up end times and the comparison-zone start are the absolute times of the bars used')
+    check(d.a.origin == 'BREAK' and d.b.origin == 'SEED' and (not d.a.frozen) and d.a.anchor_name == 'origin' and
+          d.a.anchor < d.a.warm_end and d.a.origin_ref < d.b.start <= d.b.origin_ref,
+          'p16b: A\'s bias was set by a break dated before B starts (A origin ref before B\'s first bar), B can only seed later; the anchor (via the origin; the frozen branch no longer exists) lies in the warm-up')
+    check(d.common_diff > 0 and d.common_first_diff >= d.b.start and 'DIAG4 final states A and B: all 12 compared fields equal | ORG_DIFF A=BREAK B=SEED (provenance, not compared)' in diag_lines(d)[3],
+          'p16b: the state keys differ on some common bars (before B seeds) and the report names ORG_DIFF')
+    # d. same final state, only an event differs (p16e): level undefined since the flip, flips counted
+    c, ev, d = dg('p16e_event_only_diff')
+    i, ea, eb = d.event_diff
+    check(d.reason == 'AB_EVENT_DIFF' and d.field_diff is None and ea.type == EV_FLIP and eb.type == EV_BREAK_SET and ea.bar_time == eb.bar_time,
+          'p16e: all 11 final fields equal, the first differing event is A FLIP versus B BREAK_SET on the same bar')
+    check(d.a.nolv_now and d.b.nolv_now and d.a.nolv_cause == 'FLIP' and d.b.nolv_cause == 'BREAK_SET' and d.a.nolv_since == d.b.nolv_since and
+          d.a.flips == 1 and d.b.flips == 0 and d.a.flips_after_run == 0 and d.b.flips_after_run == 0 and d.a.nolv_why.startswith('NO_CANDIDATE'),
+          'p16e: the protecting level stayed UNDEFINED since the flip bar (A: FLIP, B: BREAK_SET), 0 flips since, and the reason is named (no candidate)')
+    # e. anchor in the warm-up only (p16c)
+    c, ev, d = dg('p16c_anchor_warmup')
+    check(d.reason == 'ANCHOR_IN_WARMUP' and d.field_diff is None and d.event_diff is None and not d.event_count_diff and
+          d.a.anchor_name == 'origin' and d.a.anchor < d.a.warm_end and d.b.anchor >= d.b.start,
+          'p16c: only the anchor reason: A\'s anchor (via origin) lies before A\'s warm-up end, the final states and the events agree')
+    # f. the triple reason of the real observation, on a synthetic series (p16d_limit_r140)
+    c, ev, d = dg('p16d_limit_r140')
+    check(d.reason == 'AB_STRUCTURE_DIFF+AB_SETUP_DIFF+AB_EVENT_DIFF+ANCHOR_IN_WARMUP' and d.field_diff[0] == 'BIAS' and d.field_diff[1:] == ('BULL', 'BEAR') and
+          d.a.anchor_ref < d.b.start and d.a.anchor < d.a.warm_end and d.event_diff[1].type == EV_SEED and d.event_diff[2].type == EV_SEED,
+          'p16d r140 (SYNTHETIC): the structure, setup and event reasons plus the anchor, as in the owner\'s observation: A keeps an old BULL bias (no newer bullish leg, anchor older than B\'s window), B seeds BEAR later')
+    # g. count difference in the zone
+    c, ev, d = dg('w_wick') if False else (None, None, None)
+    cd = case_by_name('d_diag_count_differs')
+    ev = evaluate(cd.bars, cd.n_use, cd.params())
+    d = diagnose(cd.bars, cd.n_use, cd.params(), ev)
+    check(d.event_diff is None and d.event_count_diff and d.zone_na != d.zone_nb and ('count differs: nA %d vs nB %d' % (d.zone_na, d.zone_nb)) in diag_lines(d)[4],
+          'count difference in the comparison zone is reported as "count differs: nA vs nB" with the first extra event')
+    # h. reliable and unavailable cases
+    c, ev, d = dg('p16a_converged_break')
+    check(d.reliable and d.field_diff is None and d.event_diff is None and not d.event_count_diff and d.common_diff == 0 and
+          diag_lines(d)[0].startswith('DIAG1 RELIABLE reasons=-'),
+          'p16a (reliable): fields equal, events identical, keys agree on every common bar')
+    d1 = diagnose(case_by_name('p17_reduced_depth').bars, 50, case_by_name('p17_reduced_depth').params(),
+                  evaluate(case_by_name('p17_reduced_depth').bars, 50, case_by_name('p17_reduced_depth').params()))
+    c0 = case_by_name('p17_failed_copy')
+    d2 = diagnose(c0.bars, 0, c0.params(), evaluate(c0.bars, 0, c0.params()))
+    check((not d1.valid) and (not d2.valid) and len(diag_lines(d1)) == 1 and len(diag_lines(d2)) == 1 and
+          diag_lines(d1)[0] == 'DIAG1 no replay ran: SHORT_HISTORY (bars available 50)' and
+          diag_lines(d2)[0] == 'DIAG1 no replay ran: NO_BARS (bars available 0)',
+          'SHORT_HISTORY and a failed copy: no replay ran, the report says so in one line')
+    # i. level undefined after a flip (replay level): the prefix that ends right after the flip bar
+    c = case_by_name('s_no_level_after_flip')
+    ft = [e.bar_time for e in replay(c.bars, c.n_use, c.params()).events if e.type == EV_FLIP]
+    fi = [i for i, b in enumerate(c.bars) if ft and b.time == ft[0]][0]
+    rep = replay(c.bars, fi + 2, c.params())          # the flip bar and one more bar
+    st = rep.state
+    check(st.dir != 0 and not st.has_level and rep.nolv_cause == 'FLIP' and rep.nolv_run_start == ft[0] and rep.flips_after_run == 0 and
+          rep.nolv_run_bars == 2 and rep.n_flips == 1 and rep.nolv_runs >= 1,
+          's_no_level_after_flip: right after the FLIP the replay has a bias without a level since the flip bar (run of 2 bars), no flip since')
+    rep2 = replay(c.bars, c.n_use, c.params())
+    check(rep2.state.has_level and rep2.nolv_run_start == 0 and rep2.nolv_runs >= 1 and rep2.nolv_total >= 2,
+          's_no_level_after_flip: when a level is defined again the run is closed (counted in runs and total, not "now")')
+    # j. behaviour neutral, deterministic, no lookahead
+    same = True
+    for x in cases:
+        if x.kind == 'E':
+            t1 = eval_text(evaluate(x.bars, x.n_use, x.params()))
+            diagnose(x.bars, x.n_use, x.params(), evaluate(x.bars, x.n_use, x.params()))
+            if eval_text(evaluate(x.bars, x.n_use, x.params())) != t1:
+                same = False
+    check(same, 'calling the diagnostics does not change any evaluation (all E cases)')
+    c = case_by_name('p16b_ab_difference')
+    nn = len(c.bars) - 6
+    garbage = [Bar(b.time, 9999.0, -9999.0, 5000.0) for b in c.bars[nn:]]
+    pp = c.params()
+    pp.rebuild = nn
+    e1 = evaluate(c.bars, nn, pp)
+    e2 = evaluate(c.bars[:nn] + garbage, nn, pp)
+    check(diag_text(diagnose(c.bars, nn, pp, e1)) == diag_text(diagnose(c.bars[:nn] + garbage, nn, pp, e2)) and
+          diag_text(diagnose(c.bars, nn, pp, e1)) == diag_text(diagnose(list(c.bars), nn, pp, e1)),
+          'the diagnostics read only bars[0..n_avail-1] (later bars replaced by garbage give the same report) and are deterministic')
+    # k. every diagnostic time is absolute (12 digits), none is a window index
+    txt = '\n'.join(diag_text(diagnose(x.bars, x.n_use, x.params(), evaluate(x.bars, x.n_use, x.params()))) for x in cases if x.kind == 'D')
+    import re
+    check(len(re.findall(r'\b\d{12}\b', txt)) > 50 and not re.search(r'idx|index|window index', txt),
+          'the diagnostic texts carry absolute times (YYYYMMDDHHMM) and no window index')
+
+
+def test_27_hypothesis_frozen_age():
+    """REWRITTEN in revision 10. The revision 6-7 hypothesis H1 said that a FROZEN HOLD has no end. The
+    structure is no longer frozen, but the same series (a wick, then a MONOTONE decline: no newer leg ever
+    forms) still gives a BEAR/HOLD at the old level in A and NONE in B once the tail is longer than B: the
+    ratchet moves the level only when a newer leg forms (SC-1 type, the documented limit of 11.7)."""
+    print('--- 27. (REWRITTEN, revision 10) SYNTHETIC: a wick followed by a monotone decline: no newer leg, so the depth it needs still grows with its age (documented limit)')
+    rows = []
+    for R, tail in ((223, 90), (223, 190), (323, 190), (323, 290), (423, 290), (423, 390)):
+        b = sc_old_frozen(100, tail)
+        p = Params(lookback=40, rebuild=R)
+        ev = evaluate(b, len(b), p)
+        d = diagnose(b, len(b), p, ev)
+        rows.append((R, tail, len(b), ev.reliable, ev.reason, dir_phase(d.a), dir_phase(d.b), d))
+        print('  R=%d tail=%d n=%d -> %s | A %s | B %s' % (R, tail, len(b), ev.reason, dir_phase(d.a), dir_phase(d.b)))
+    check([r[3] for r in rows] == [True, False, True, False, True, False],
+          'for every fixed depth R the evaluation is reliable while the HOLD fits in B (tail 90/190/290) and LIMITED once the tail grows by 100 bars (SYNTHETIC; no newer leg: the prototype does not improve this)')
+    lim = [r for r in rows if not r[3]]
+    check(all(r[4] == 'AB_STRUCTURE_DIFF+AB_SETUP_DIFF+ANCHOR_IN_WARMUP' and r[5] == 'BEAR/HOLD' and r[6] == 'NONE' for r in lim) and
+          all(r[7].a.anchor_ref < r[7].b.start for r in lim),
+          'the LIMITED rows show exactly the cause: A holds a BEAR/HOLD whose reference bars lie before B\'s first bar, B sees no structure and is NONE')
+    ok = [r for r in rows if r[3]]
+    check(all(r[5] == 'BEAR/HOLD' and r[6] == 'BEAR/HOLD' for r in ok),
+          'with a deeper R the same HOLD is inside B and both replays agree: the cure by depth only works until the HOLD is older than R minus the check depth')
+
+
+def sim_ea_flow(bars, p, ns, fixed=True):
+    """model of the EA flow per evaluation: evaluate_latest, consumer (cursor kept over unreliable
+    steps, as the EA does), TrackChanges decision. Returns [(n, status, reported, rederived)]"""
+    cursor = 0
+    snap = None
+    log = []
+    for n in ns:
+        ev = evaluate_latest(bars[:n], n, p)
+        if not ev.reliable:
+            snap = None
+            log.append((n, 'NOT_RELIABLE', [], []))
+            continue
+        if cursor == 0:
+            cursor = baseline_cursor(ev)
+            status = C_BASELINE
+        else:
+            status, _ = consume_new(ev, cursor, p.period)
+            if status in (C_OK, C_REDERIVED, C_GAP):
+                cursor = ev.last_time
+        rep, red, snap = track_step(snap, ev, status, fixed)
+        log.append((n, status, rep, red))
+    return log
+
+
+def test_25_trackchanges():
+    print('--- 25. TrackChanges after GAP / RE-DERIVATION: a rebuild difference is never a market change')
+    check(track_changes_mode(C_OK, True) == TC_REPORT and track_changes_mode(C_REDERIVED, True) == TC_REDERIVE and
+          track_changes_mode(C_GAP, True) == TC_REDERIVE and track_changes_mode(C_NOTHING_NEW, True) == TC_REDERIVE and
+          track_changes_mode(C_OK, False) == TC_BASELINE and track_changes_mode(C_BASELINE, True) == TC_BASELINE and
+          track_changes_mode(C_GAP, False) == TC_BASELINE,
+          'decision table: only OK with a previous snapshot reports; REDERIVED, GAP and NOTHING_NEW re-derive silently; no snapshot or a baseline stores it')
+    p = Params(lookback=20, rebuild=1000)
+    base = case_by_name('p16a_converged_break').bars
+    wick = Bar(base[-1].time + PERIOD, 135.0, 104.0, 112.0)
+    quiet = [Bar(base[-1].time + 2 * PERIOD, 115.0, 105.0, 110.0), Bar(base[-1].time + 3 * PERIOD, 116.0, 106.0, 111.0)]
+    allb = base + [wick] + quiet
+    n0 = len(base)
+    log = sim_ea_flow(allb, p, [n0, n0 + 1, n0 + 2, n0 + 3])
+    check([x[1] for x in log] == [C_BASELINE, C_OK, C_OK, C_OK],
+          'consecutive polling: baseline, then three OK steps (exactly the next closed bar each time)')
+    check(log[1][2] == ['PHASE ACTIVE -> HOLD'] and log[2][2] == [] and log[3][2] == ['T002 MIXED -> BEARISH'] and all(not x[3] for x in log),
+          'consecutive polling: each change is reported once, at the bar that caused it (PHASE at the wick bar, T002 two bars later), none re-derived')
+    gap_new = sim_ea_flow(allb, p, [n0, n0 + 3], fixed=True)
+    gap_old = sim_ea_flow(allb, p, [n0, n0 + 3], fixed=False)
+    check(gap_new[1][1] == C_GAP and gap_new[1][2] == [] and sorted(gap_new[1][3]) == ['PHASE ACTIVE -> HOLD', 'T002 MIXED -> BEARISH'],
+          'FIXED: bars were missed (GAP): the differences are NOT reported as market changes, they are logged as a re-derivation')
+    check(sorted(gap_old[1][2]) == ['PHASE ACTIVE -> HOLD', 'T002 MIXED -> BEARISH'],
+          'LEGACY (documents the defect): the same GAP step reported both as changes of the latest bar although the wick was two bars before it')
+    e = evaluate_latest(base, n0, p)
+    prev = ('BEAR', 'BEARISH', 'ACTIVE')
+    r1 = track_step(prev, e, C_REDERIVED, True)
+    r2 = track_step(prev, e, C_NOTHING_NEW, True)
+    r3 = track_step(prev, e, C_OK, True)
+    r4 = track_step(prev, e, C_REDERIVED, False)
+    check(r1[0] == [] and len(r1[1]) >= 1 and r2[0] == [] and len(r2[1]) >= 1 and len(r3[0]) >= 1 and len(r4[0]) >= 1,
+          'a bias/T002 difference after REDERIVED or NOTHING_NEW is only a re-derivation (fixed); the legacy behaviour reported it; after OK it is reported')
+    lim = case_by_name('p16b_ab_difference')
+    log2 = sim_ea_flow(lim.bars, lim.params(), [len(lim.bars) - 1, len(lim.bars)])
+    check(all(x[2] == [] and x[3] == [] for x in log2), 'a LIMITED evaluation reports no change and drops the snapshot')
+
+
+def test_26_csv_export():
+    print('--- 26. candle export (text building) and the offline replay of the CSV')
+    import tempfile
+    check(csv_name('XAUUSD', T0) == 'velo_t003_diag_XAUUSD_202601050000.csv' and csv_name('XAUUSD.r', T0 + PERIOD) == 'velo_t003_diag_XAUUSD.r_202601050400.csv' and
+          csv_name('XAU/USD #1', T0) == 'velo_t003_diag_XAU_USD__1_202601050000.csv',
+          'file name velo_t003_diag_<symbol>_<last closed bar>.csv; characters outside [A-Za-z0-9._-] become _')
+    tt = T0 + 40 * PERIOD
+    check(csv_time_text(tt) == '2026.01.11 16:00' and csv_row(tt, 4120.5, 4130.25, 4118.0, 4127.75, 2, 1234, 12, 0) ==
+          '%d,2026.01.11 16:00,4120.50,4130.25,4118.00,4127.75,1234,12,0' % tt,
+          'a row: epoch, readable server time, open high low close with the symbol digits, tick volume, spread, real volume')
+    x = Export(symbol='XAUUSD', mode='HISTORICAL', asof=T0 + 100 * PERIOD, bars=3, first=T0, last=T0 + 2 * PERIOD, flag='LIMITED_BY_HISTORY',
+               reason='AB_STATE_DIFF', note='')
+    hl = csv_header(x).split('\n')
+    check(hl[0] == '# velo_t003_diag v1' and '# asof_input=2026.01.21 16:00' in hl and '# mode=HISTORICAL' in hl and '# note=-' in hl and
+          hl[-1] == 'time_epoch,time_server,open,high,low,close,tick_volume,spread,real_volume' and '# result_reason=AB_STATE_DIFF' in hl and
+          '# lookback=300' in hl and '# warm_up=300' in hl and '# check_depth=300' in hl,
+          'header: symbol, mode, as-of, lookback, rebuild, depths, warm-up, check depth, result, then the column line')
+    # roundtrip on a SYNTHETIC case: write, read, replay -> same evaluation and diagnostics
+    import t003_replay_csv as rc
+    c = case_by_name('p16d_limit_r140')
+    p = c.params()
+    bars = [Bar(b.time, float('%.2f' % b.high), float('%.2f' % b.low), float('%.2f' % b.close)) for b in c.bars]
+    n = len(bars)
+    ev = evaluate(bars, n, p)
+    d = diagnose(bars, n, p, ev)
+    xx = Export(source='SYNTHETIC test data (t003_reference_test case p16d_limit_r140), not market data', symbol='SYNTH', mode='LIVE', asof=0,
+                digits=2, left=p.left, right=p.right, lookback=p.lookback, rebuild=p.rebuild, r_req=ev.r_req, r_eff=ev.r_eff, b_depth=ev.b_depth,
+                chk=ev.chk, warm=ev.warm, hard_cap=p.hard_cap, bars=n, first=bars[0].time, last=bars[-1].time, flag=ev.flag, reason=ev.reason, note=ev.note)
+    lines = [csv_header(xx)] + [csv_row(b.time, b.close, b.high, b.low, b.close, 2, 1, 0, 0) for b in bars]
+    d_ = tempfile.mkdtemp()
+    path = os.path.join(d_, csv_name('SYNTH', bars[-1].time))
+    with open(path, 'w') as fh:
+        fh.write('\n'.join(lines) + '\n')
+    h, p2, bars2, ev2, d2, repro = rc.run_csv(path)
+    check(len(bars2) == n and all(a.time == b.time and a.high == b.high and a.low == b.low and a.close == b.close for a, b in zip(bars, bars2)),
+          'roundtrip (SYNTHETIC): the CSV gives back the same %d closed bars (time, high, low, close)' % n)
+    check(eval_text(ev2) == eval_text(ev) and diag_text(d2) == diag_text(d) and repro is True and
+          (p2.left, p2.right, p2.lookback, p2.rebuild, p2.hard_cap) == (p.left, p.right, p.lookback, p.rebuild, p.hard_cap),
+          'roundtrip (SYNTHETIC): the replay of the file gives the same evaluation, the same diagnostics and REPRODUCED (flag and reason equal to the header)')
+    # a header whose result differs is NOT reproduced; as-of / overrides are not compared
+    with open(path) as fh:
+        txt_ = fh.read()
+    bad = os.path.join(d_, 'bad.csv')
+    with open(bad, 'w') as fh:
+        fh.write(txt_.replace('# result_flag=LIMITED_BY_HISTORY', '# result_flag=CONVERGED'))
+    check(rc.run_csv(bad)[5] is False and rc.run_csv(path, {'rebuild': 100})[5] is None and rc.run_csv(path, None, bars[-6].time + PERIOD)[5] is None,
+          'a header result that differs is NOT REPRODUCED; with an overridden depth or an as-of time no comparison is claimed')
+    cut = rc.run_csv(path, None, bars[-6].time + PERIOD)
+    check(len(cut[2]) == n - 5 and cut[2][-1].time == bars[-6].time, '--asof keeps only the bars closed by that time (here the last 5 bars are dropped)')
+    errs = 0
+    ls = txt_.split('\n')
+    first_row = [i for i, l in enumerate(ls) if l and l[0].isdigit()][0]
+    bad_time = list(ls)
+    bad_time[first_row] = bad_time[first_row].replace('2026.', '2025.', 1)
+    bad_count = [l.replace('# bars=%d' % n, '# bars=%d' % (n + 1)) for l in ls]
+    no_rows = ls[:first_row]
+    for mut in (bad_time, bad_count, no_rows):
+        pth = os.path.join(d_, 'm%d.csv' % errs)
+        with open(pth, 'w') as fh:
+            fh.write('\n'.join(mut) + '\n')
+        try:
+            rc.run_csv(pth)
+        except rc.CsvError:
+            errs += 1
+    check(errs == 3, 'a time text that does not match the epoch, a wrong bar count and a file with no bars are refused (CsvError), never replayed')
+    dup = txt_.split('\n')
+    rows_at = [i for i, l in enumerate(dup) if l and l[0].isdigit()]
+    dup[rows_at[3]] = dup[rows_at[2]]
+    pth = os.path.join(d_, 'dup.csv')
+    with open(pth, 'w') as fh:
+        fh.write('\n'.join(dup))
+    try:
+        rc.run_csv(pth)
+        refused = False
+    except rc.CsvError:
+        refused = True
+    check(refused, 'bars that are not strictly chronological (a duplicated row) are refused')
+
+
+
+# ======================================================= revision 10 tests ====
+def rand_bars(seed, n, start=1000.0, vol=7.0):
+    """deterministic random-walk H4 bars (property tests only; no real data)"""
+    import random
+    rnd = random.Random(seed)
+    out = []
+    c = start
+    for i in range(n):
+        o = c
+        c = o + rnd.uniform(-vol, vol)
+        hi = max(o, c) + rnd.uniform(0, vol * 0.8)
+        lo = min(o, c) - rnd.uniform(0, vol * 0.8)
+        out.append(Bar(T0 + i * PERIOD, round(hi, 2), round(lo, 2), round(c, 2)))
+    return out
+
+
+def fields_dict(st, tracks):
+    return dict(state_fields(st, tracks))
+
+
+def ab_without(rep_a, rep_b, drop):
+    """MUTATION helper: the compared keys of A and B with the labels in `drop` removed. Equal keys mean
+    the (mutated) comparison would call the windows reliable."""
+    fa = [kv for kv in state_fields(rep_a.state, rep_a.tracks) if kv[0] not in drop]
+    fb = [kv for kv in state_fields(rep_b.state, rep_b.tracks) if kv[0] not in drop]
+    return fa == fb
+
+
+def test_28_revision10():
+    print('--- 28. revision 10 (PROPOSAL / PROTOTYPE, awaiting the client): structure/setup separation, ratchet, current level, RECONF_LOST, setup_id')
+    for pref in ('', 'm_'):
+        tag = 'SELL' if pref == '' else 'BUY'
+        d0 = 'BEAR' if pref == '' else 'BULL'
+        d1 = 'BULL' if pref == '' else 'BEAR'
+        # ---- R1 / R2: the structure updates while a setup waits; the wick top never raises the level
+        name = pref + 'r10_hold'
+        c = case_by_name(name)
+        r = rep_of(name)
+        lvs = []
+        for k in r.keys:
+            v = lv_id_of_key(k)
+            if v != '-' and (not lvs or lvs[-1] != v):
+                lvs.append(v)
+        check(len(lvs) == 2 and lvs[0] != lvs[1] and r.state.phase == 'HOLD' and r.state.setup_type == 'WICK'
+              and r.state.snap_id == lvs[0] and lv_id_of_key(r.keys[-1]) == lvs[1],
+              '%s R1: in HOLD the protecting level advances to the newer leg (2 levels in the life of the setup) while the setup stays; the snapshot is the first level' % tag)
+        wi = bar_idx(c, events_of(r, EV_WICK)[0].bar_time)
+        ex0 = r.keys[wi].split(';EX=')[1].split('@')[0]
+        j = [i for i in range(wi, len(r.keys)) if r.keys[i].split(';EX=')[1].split('@')[0] != ex0][0]
+        check(lv_id_of_key(r.keys[j]) == lvs[0] and lv_id_of_key(r.keys[-1]) == lvs[1] and j < len(r.keys) - 1,
+              '%s R2: a newer low (LL2) is confirmed (bar %d) while the level stays: its leg top is the wick top, rejected because it is not more advanced than the level' % (tag, j))
+        sw = ts(events_of(r, EV_WICK)[0].bar_time)
+        check(all(('SU=WICK@%s#' % sw) in k for k in r.keys[bar_idx(c, events_of(r, EV_WICK)[0].bar_time):]),
+              '%s R1: setup_id is the same on every bar from the wick to the end of the case' % tag)
+        # ratchet: the level price never retreats against the trend inside a bias
+        sg = 1 if d0 == 'BEAR' else -1
+        prices = [h[5] for h in r.hist if h[4]]
+        check(all(sg * prices[i + 1] <= sg * prices[i] for i in range(len(prices) - 1)),
+              '%s R2: the protecting level price is monotone in the trend direction (the ratchet)' % tag)
+        # ---- R3 / R13: FLIP by the CURRENT level before the snapshot is crossed (revision 9 example 1)
+        name = pref + 'r10_flip'
+        c = case_by_name(name)
+        r = rep_of(name)
+        fl = events_of(r, EV_FLIP)
+        snap_px = r.hist[bar_idx(c, events_of(r, EV_WICK)[0].bar_time)][3]
+        fi = bar_idx(c, fl[0].bar_time)
+        check(len(fl) == 1 and fl[0].ref == lv_id_of_key(r.keys[fi - 1]) and fl[0].ref != r.keys[fi - 1].split(';SU=')[1].split('#')[1].split(';')[0]
+              and dir_name(r.state.dir) == d1 and events_of(r, EV_SETUP_ENDED)[-1].detail.startswith('reason=INVALIDATED_BY_FLIP'),
+              '%s R13: the FLIP comes from the NEW (current) level before the snapshot level; the setup ends INVALIDATED_BY_FLIP' % tag)
+        beyond = [i for i in range(fi + 1) if sg * (c.bars[i].close - snap_px) > 0 and i > bar_idx(c, events_of(r, EV_WICK)[0].bar_time)]
+        check(not beyond and EV_SNAP_CROSSED not in types_of(r),
+              '%s R13: no close was beyond the snapshot level (it was not crossed) and no SNAPSHOT_CROSSED was reported' % tag)
+        # ---- example 2: snapshot crossed without the current level is reachable ONLY without the ratchet
+        name = pref + 'r10_ex2'
+        c = case_by_name(name)
+        r = rep_of(name)
+        r0 = replay(c.bars, c.n_use, Params(lookback=c.lookback, rebuild=c.rebuild, hard_cap=c.hard_cap, ratchet=False))
+        check(EV_SNAP_CROSSED not in types_of(r) and len(events_of(r, EV_FLIP)) == 1,
+              '%s R14: WITH the ratchet the close beyond the snapshot is a FLIP at that bar and no SNAPSHOT_CROSSED exists' % tag)
+        check(EV_SNAP_CROSSED in types_of(r0) and events_of(r0, EV_FLIP)[0].bar_time == events_of(r, EV_FLIP)[0].bar_time + PERIOD,
+              '%s R14: WITHOUT the ratchet (R0, model-only control) the snapshot is crossed with no flip for one bar (SNAPSHOT_CROSSED, diagnostic only), the flip comes one bar later' % tag)
+        check(r0.events[[e.type for e in r0.events].index(EV_SNAP_CROSSED)].market is False
+              and r0.state.dir == r.state.dir and 'SNAPSHOT_CROSSED' not in events_sig_text(r0.events, 0),
+              '%s R14: SNAPSHOT_CROSSED is not a market event, ends no setup by itself and is not compared by A/B' % tag)
+        # ---- R5 / sweep_wait and reconfirmed structural updates
+        for nm_, ph_ in (('r10_sweep', 'SWEEP_WAIT'), ('r10_reconf', 'RECONFIRMED')):
+            c = case_by_name(pref + nm_)
+            r = rep_of(pref + nm_)
+            lvs = []
+            for k in r.keys:
+                v = lv_id_of_key(k)
+                if v != '-' and (not lvs or lvs[-1] != v):
+                    lvs.append(v)
+            su = [k.split(';SU=')[1].split(';')[0] for k in r.keys if ';SU=' in k and ';SU=-;' not in k]
+            check(r.state.phase == ph_ and len(lvs) >= 2 and lvs[-1] != lvs[0] and len(set(su)) == 1 and EV_SETUP_ENDED not in types_of(r),
+                  '%s R1: in %s the level advances to newer legs (%d levels) and the setup (setup_id) is untouched' % (tag, ph_, len(lvs)))
+        # ---- R15 / R16: RECONF_LOST keeps the setup (STRUCT -> HOLD); a second touch gives RECONFIRMED in the same setup
+        name = pref + 'r10_retouch'
+        c = case_by_name(name)
+        r = rep_of(name)
+        rec = events_of(r, EV_RECONFIRMED)
+        lost = events_of(r, EV_RECONF_LOST)
+        li = bar_idx(c, lost[0].bar_time)
+        su_b = r.keys[li - 1].split(';SU=')[1].split(';')[0]
+        su_a = r.keys[li].split(';SU=')[1].split(';')[0]
+        check(len(rec) == 2 and len(lost) == 1 and rec[0].ref != rec[1].ref and su_b == su_a == r.state.setup_id and EV_SETUP_ENDED not in types_of(r)
+              and r.state.phase == 'RECONFIRMED' and r.state.rec_id == rec[1].ref,
+              '%s R15: STRUCT - RECONFIRMED, RECONF_LOST (back to HOLD), a second FVG is touched: RECONFIRMED again, SAME setup_id, another recorded FVG, no SETUP_ENDED' % tag)
+        post = r.keys[li]
+        check('PH=HOLD' in post and 'REC=-' in post and 'RSN=-' in post and ('WAIT=' + ts(r.state.wait_start)) in post and ('SRC=' + ts(r.state.src_time)) in post,
+              '%s R15: after RECONF_LOST rec_id and the reason are cleared; wait_start and the source time are kept' % tag)
+        check(any(tr.id == rec[0].ref and tr.invalid for tr in r.tracks) and any(tr.id == rec[1].ref and tr.recorded for tr in r.tracks),
+              '%s R15: the lost FVG stays INVALID, the other track is the recorded one (other valid tracks kept through the loss)' % tag)
+        # ---- R16: a new wick / sweep replaces the setup (new setup_id, REPLACED); a retired id never reappears
+        for nm_ in ('w_second_wick_hold', 'w_second_wick_reconf', 's_restart', 's_wait_wick'):
+            r = rep_of(pref + nm_)
+            ended = [e for e in r.events if e.type == EV_SETUP_ENDED]
+            ids_seen = []
+            for k in r.keys:
+                v = k.split(';SU=')[1].split(';')[0]
+                if v != '-' and (not ids_seen or ids_seen[-1] != v):
+                    ids_seen.append(v)
+            check(len(ended) >= 1 and all(e.detail.startswith('reason=REPLACED') for e in ended) and len(ids_seen) == len(set(ids_seen)) and len(ids_seen) >= 2
+                  and all(ended[i].ref == ids_seen[i] for i in range(len(ended))) and r.state.setup_id == ids_seen[-1],
+                  '%s R16 (%s): a new wick/sweep ends the live setup with REPLACED and starts a NEW setup_id; a retired id never reappears' % (tag, nm_))
+    # ---- SC-1 and the "improvement" scenarios, honest results
+    legs = case_by_name('r10_legs')
+    finals = set()
+    n_ = len(legs.bars)
+    for st_ in range(0, 56, 4):
+        rr = replay(legs.bars[st_:], n_ - st_, legs.params())
+        finals.add((dir_name(rr.state.dir), rr.state.phase, rr.state.lv_id, pf(rr.state.lv_price)))
+    check(len(finals) == 1 and list(finals)[0][0] == 'BULL',
+          'R8 LEGS (SYNTHETIC): wick, two newer legs, recovery above the newer level: replays from 14 window starts (before and after the wick) all end in the same BULL state with the same level (the old model froze the first level)')
+    sc1 = case_by_name('sc1_limited')
+    e = evaluate(sc1.bars, len(sc1.bars), sc1.params())
+    print('  LIMIT (documented, NOT a pass of the prototype): SC-1 type series (no newer leg) -> %s | %s' % (e.flag, e.reason))
+    check(e.flag == FLAG_LIMITED and 'AB_STRUCTURE_DIFF' in e.reason,
+          'R22 / SC-1: no newer leg ever forms: the prototype changes nothing, windows on different sides of the wick stay LIMITED_BY_HISTORY (a documented limit, kept flagged)')
+    # ---- R22: variant A limit - the STRUCTURE agrees, the SETUP differs (a documented limit, not a pass)
+    for pref in ('', 'm_'):
+        c22 = case_by_name(pref + 'r22_variant_a_limit')
+        e22 = evaluate(c22.bars, len(c22.bars), c22.params())
+        a22 = replay(c22.bars, len(c22.bars), c22.params())
+        b22 = replay(c22.bars[len(c22.bars) - e22.b_depth:], e22.b_depth, c22.params())
+        if pref == '':
+            print('  LIMIT (documented, NOT a pass of the prototype): variant A, a window after the wick has no setup -> %s | %s' % (e22.flag, e22.reason))
+        check(e22.flag == FLAG_LIMITED and 'AB_SETUP_DIFF' in e22.reason and 'AB_STRUCTURE_DIFF' not in e22.reason
+              and struct_key(a22.state) == struct_key(b22.state) and a22.state.setup_type == 'WICK' and b22.state.setup_type != 'WICK',
+              '%sR22: variant A limit - same BIAS and PL in both windows, but A holds the old WICK setup and B has none (AB_SETUP_DIFF, no AB_STRUCTURE_DIFF): LIMITED, a documented limit' % ('BUY ' if pref else 'SELL '))
+    # ---- R17 / R18: A/B by function and the mutation control
+    a_rep = replay(sc1.bars, len(sc1.bars), sc1.params())
+    b_rep = replay(sc1.bars[len(sc1.bars) - e.b_depth:], e.b_depth, sc1.params())
+    all_terms = set(STATE_FIELDS)
+    check(not ab_without(a_rep, b_rep, set()) and ab_without(a_rep, b_rep, all_terms),
+          'R18 mutation: the SC-1 comparison flags the difference, and with EVERY compared term removed it would call the windows equal (so the SC-1 test really guards the comparison)')
+    struct_only = {'BIAS', 'LV', 'EX', 'LI', 'BS'}
+    setup_only = {'SU', 'PH', 'SRC', 'WAIT', 'REC', 'RSN', 'EL'}
+    check(not ab_without(a_rep, b_rep, setup_only) and not ab_without(a_rep, b_rep, struct_only),
+          'R17: SC-1 differs in BOTH layers (STRUCTURE and SETUP), each layer alone is enough to flag it')
+    base_rep = rep_of('s_recon_two_fvg')
+    base_st = base_rep.state
+    base_tr = base_rep.tracks
+
+    def clone(st):
+        import copy
+        return copy.deepcopy(st)
+
+    def one_diff(fn):
+        """a state/tracks copy changed by fn; returns the reasons the comparison gives"""
+        import copy
+        st2 = clone(base_st)
+        tr2 = copy.deepcopy(base_tr)
+        fn(st2, tr2)
+        return ab_reasons(struct_key(base_st), struct_key(st2), setup_key(base_st, base_tr), setup_key(st2, tr2), '-', '-', BEAR, 10 ** 12, 0)
+    check(one_diff(lambda a, b: setattr(a, 'wait_start', a.wait_start + PERIOD)) == 'AB_SETUP_DIFF',
+          'R17/R20: a different wait_start (decides which touches count after RECONF_LOST) is flagged: AB_SETUP_DIFF')
+    check(one_diff(lambda a, b: setattr(a, 'src_time', a.src_time + PERIOD)) == 'AB_SETUP_DIFF',
+          'R17: a different wick / sweep source time is flagged: AB_SETUP_DIFF')
+    live = lambda b: [x for x in b if not x.invalid][0]
+    check(one_diff(lambda a, b: setattr(live(b), 'lower', live(b).lower - 1.0)) == 'AB_SETUP_DIFF',
+          'R17: a different FVG bound is flagged: AB_SETUP_DIFF')
+    check(one_diff(lambda a, b: setattr(live(b), 'conf', live(b).conf + PERIOD)) == 'AB_SETUP_DIFF',
+          'R17: a different FVG confirm time is flagged: AB_SETUP_DIFF')
+    check(one_diff(lambda a, b: setattr(b[0], 'invalid', not b[0].invalid)) == 'AB_SETUP_DIFF' or
+          one_diff(lambda a, b: setattr(b[-1], 'recorded', not b[-1].recorded)) == 'AB_SETUP_DIFF',
+          'R17: a different candidate (track) state is flagged: AB_SETUP_DIFF')
+    check(one_diff(lambda a, b: setattr(a, 'setup_id', 'WICK@000000000000#X')) == 'AB_SETUP_DIFF',
+          'R17: a different setup_id is flagged: AB_SETUP_DIFF')
+    check(one_diff(lambda a, b: setattr(a, 'ex_consumed', not a.ex_consumed)) == 'AB_STRUCTURE_DIFF',
+          'R21: a different consumed flag of the pending continuation (HH/LL) candidate is flagged: AB_STRUCTURE_DIFF alone')
+    # REWRITTEN in revision 14 (the single interior candidate with a consumed flag no longer exists): the LI element is
+    # the SET of unconsumed in-scope internal levels; a different set is a structure difference (R21b-R21d below).
+    check(one_diff(lambda a, b: setattr(a, 'li_key', a.li_key + ',IH000000000000' if a.li_key != '-' else 'IH000000000000')) == 'AB_STRUCTURE_DIFF',
+          'R21: a different set of unconsumed internal levels (LI) is flagged: AB_STRUCTURE_DIFF alone')
+    check(one_diff(lambda a, b: setattr(a, 'lv_known', a.lv_known + PERIOD)) == 'AB_STRUCTURE_DIFF'
+          and one_diff(lambda a, b: setattr(a, 'lv_price', a.lv_price + 1.0)) == 'AB_STRUCTURE_DIFF',
+          'R17: a different level known time or price is flagged: AB_STRUCTURE_DIFF alone')
+    check(one_diff(lambda a, b: setattr(a, 'dir', -a.dir)) == 'AB_STRUCTURE_DIFF',
+          'R17: a different bias is flagged: AB_STRUCTURE_DIFF')
+
+    def prov(a, b):
+        a.origin = 'BREAK' if a.origin == 'SEED' else 'SEED'
+        a.origin_ref += PERIOD
+        a.wk_retro = not a.wk_retro
+        a.none_reason = 'CONFLICT'
+        a.snap_price += 1.0
+        a.bias_start += PERIOD          # the bias already has a level: provenance
+        a.t2dir = 'MIXED'
+        a.pre = 'X'
+    check(one_diff(prov) == '', 'R19: provenance-only differences (origin name, origin_ref, retro, none_reason, snapshot price, bias_start after a level exists, T002 text) give NO AB reason: reliable')
+    st_a = St()
+    st_a.dir = BEAR
+    st_a.bias_start = T0
+    st_b = clone(st_a)
+    st_b.bias_start = T0 + PERIOD
+    check(struct_key(st_a) != struct_key(st_b), 'R20: unit - a bias without a level compares bias_start')
+    st_a.has_level = True
+    st_b.has_level = True
+    check(struct_key(st_a) == struct_key(st_b), 'R20: unit - once a level exists bias_start is provenance (not compared)')
+
+
+def test_28b_properties():
+    print('--- 28b. property tests on random SYNTHETIC paths (deterministic seeds, no real data)')
+    p = Params(lookback=20)
+    n_paths = 40
+    mono_ok = True
+    snap_ok = True
+    setup_level_ok = True
+    reasons_ok = True
+    ids_ok = True
+    n_setups = 0
+    n_flips_in_setup = 0
+    for seed in range(n_paths):
+        b = rand_bars(seed, 260)
+        r = replay(b, len(b), p)
+        prev_dir = 0
+        prev_price = None
+        retired = set()
+        live = ''
+        for t in range(len(b)):
+            dir_, ph, sid, snap_px, hl, lp, bs, nev = r.hist[t]
+            if dir_ != 0 and hl:
+                if dir_ == prev_dir and prev_price is not None:
+                    sg = 1 if dir_ == BEAR else -1
+                    if sg * lp > sg * prev_price + 1e-9:
+                        mono_ok = False
+                prev_price = lp
+            else:
+                prev_price = None
+            prev_dir = dir_
+            if dir_ != 0 and ph != 'ACTIVE' and not hl:
+                setup_level_ok = False
+            if sid != '' and sid != live:
+                if sid in retired:
+                    ids_ok = False
+                if live != '':
+                    retired.add(live)
+                live = sid
+                n_setups += 1
+            if sid == '' and live != '':
+                retired.add(live)
+                live = ''
+            if sid != '':
+                # a close beyond the snapshot during a setup: a FLIP at this bar or the setup was ended
+                sg = 1 if dir_ == BEAR else -1
+                if sg * (b[t].close - snap_px) > 0:
+                    snap_ok = False
+        for e in r.events:
+            if e.type == EV_SNAP_CROSSED:
+                snap_ok = False
+            if e.type == EV_SETUP_ENDED and not (e.detail.startswith('reason=INVALIDATED_BY_FLIP') or e.detail.startswith('reason=REPLACED')):
+                reasons_ok = False
+            if e.type == EV_FLIP:
+                n_flips_in_setup += 1
+    check(mono_ok, 'R2 (property, %d paths): inside a bias the protecting level never retreats against the trend' % n_paths)
+    check(snap_ok, 'R14 (property, %d paths): no close is ever beyond the snapshot while its setup lives (it would be a FLIP first) and SNAPSHOT_CROSSED never occurs with the ratchet' % n_paths)
+    check(setup_level_ok and n_setups > 20, 'invariant (property): a setup never exists without a protecting level (%d setups seen)' % n_setups)
+    check(reasons_ok and ids_ok, 'R6/R16 (property): SETUP_ENDED has only the reasons INVALIDATED_BY_FLIP and REPLACED (no SUPERSEDED_BY_STRUCTURE, no M15_OUTCOME); a retired setup_id never comes back')
+    # R6: no arbitrary expiry
+    for n in (150, 600):
+        b = sc_quiet_tail(n)
+        r = replay(b, len(b), Params(lookback=20))
+        check(r.state.phase == 'HOLD' and r.state.setup_id.startswith('WICK@') and EV_SETUP_ENDED not in types_of(r),
+              'R6: a setup is never ended by age: after %d quiet bars it is still HOLD (no expiry of any kind)' % n)
+    # bias_start after a level exists: a changes-no-future property
+    tested = 0
+    diverged = 0
+    for seed in range(100, 160):
+        b = rand_bars(seed, 330)
+        for k in (25, 55):
+            T = 250
+            ra = replay(b[:T], T, p)
+            rb = replay(b[k:T], T - k, p)
+            if ra.state.dir == 0 or state_key(ra.state, ra.tracks) != state_key(rb.state, rb.tracks):
+                continue
+            tested += 1
+            fa = replay(b[:T + 60], T + 60, p)
+            fb = replay(b[k:T + 60], T + 60 - k, p)
+            for j in range(T, T + 60):
+                if fa.keys[j] != fb.keys[j - k]:
+                    diverged += 1
+                    break
+    print('  property: %d window pairs agreed at T, %d diverged within the next 60 bars' % (tested, diverged))
+    check(tested >= 10 and diverged == 0,
+          'R20 (property): whenever two windows agree on the compared key at T (bias_start compared only while no level), their keys stay equal for the next 60 random bars (%d pairs tested; the claim "bias_start after a level exists changes no future behaviour" is SUPPORTED on these paths, not proven)' % tested)
+
+
+def test_28c_weekend_right():
+    print('--- 28c. confirm_time and known-bar usage across weekends and gaps with RightBars 1, 2, 3')
+    base = sc16_converged_break()
+    n = len(base)
+    for right in (1, 2, 3):
+        for label, slots in (('weekend', weekend_slots(n, 4)), ('gap', [i + (3 if i >= 26 else 0) for i in range(n)]),
+                             ('contiguous', list(range(n)))):
+            bars = retime(base, slots)
+            sw, _ = t2.find_swings(bars, n, 2, right, PERIOD)
+            ok = len(sw) > 3
+            for sx in sw:
+                # the confirmation is the close of the REAL bar index+right, not pivot + (right+1) periods
+                if sx.confirm_time != bars[sx.index + right].time + PERIOD:
+                    ok = False
+            check(ok, 'right=%d %s: every swing confirm_time = open time of the real bar index+RightBars plus one period (%d swings)' % (right, label, len(sw)))
+            # known-bar usage: a swing is usable by bar t iff its confirm_time <= open(t) (known at t-1 by index)
+            ok2 = True
+            for t in range(1, n):
+                by_index = known_count(sw, right, t - 1)
+                by_time = sum(1 for sx in sw if sx.confirm_time <= bars[t].time)
+                if by_index != by_time:
+                    ok2 = False
+            check(ok2, 'right=%d %s: for every bar t the swings known before it (by index) are exactly those with confirm_time <= open(t)' % (right, label))
+        # control with a gap placed right after a pivot: the naive arithmetic is wrong by the whole gap
+        sw0, _ = t2.find_swings(retime(base, list(range(n))), n, 2, right, PERIOD)
+        pi = [sx.index for sx in sw0 if sx.index >= 6][0]
+        gapped = retime(base, [i + (12 if i > pi else 0) for i in range(n)])
+        sw, _ = t2.find_swings(gapped, n, 2, right, PERIOD)
+        hit = [sx for sx in sw if sx.index == pi][0]
+        check(hit.confirm_time == gapped[pi + right].time + PERIOD and hit.confirm_time != hit.pivot_time + (right + 1) * PERIOD
+              and hit.confirm_time - (hit.pivot_time + (right + 1) * PERIOD) == 12 * PERIOD,
+              'right=%d gap right after a pivot (control): confirm_time is the real bar plus one period; pivot_time + %d periods would be wrong by the whole 12-period gap' % (right, right + 1))
+    # the logic does not depend on the time gaps: same event types / phases when only the open times change
+    for right in (1, 3):
+        for nm in ('c_history', 's_sweep_fvg_touch', 'w_a_is_wick', 'r10_hold'):
+            c = case_by_name(nm)
+            pp = Params(lookback=c.lookback, right=right)
+            r1 = replay(c.bars, c.n_use, pp)
+            r2 = replay(retime(c.bars, weekend_slots(c.n_use, 4)), c.n_use, pp)
+            same = [(e.type, (e.bar_time - c.bars[0].time) // PERIOD if False else 0) for e in r1.events] == [(e.type, 0) for e in r2.events]
+            check(same and r1.state.phase == r2.state.phase and dir_name(r1.state.dir) == dir_name(r2.state.dir),
+                  'right=%d %s: event sequence, phase and bias are the same on a weekend-retimed copy (only the times change)' % (right, nm))
+
+
+def test_28d_context():
+    print('--- 28d. read-only setup context for the next module (no M15_OUTCOME mechanism)')
+    r = rep_of('r10_retouch')
+    ctx = setup_context(r.state, r.tracks)
+    before = replay_text(r)
+    ctx2 = setup_context(r.state, r.tracks)
+    check(ctx.valid and ctx.ready and ctx.direction == 'BEAR' and ctx.reason == 'STRUCT' and ctx.stype == 'WICK' and ctx.setup_id == r.state.setup_id
+          and ctx.fvg_id == r.state.rec_id and ctx.fvg_lower < ctx.fvg_upper and ctx.live_id == r.state.lv_id and ctx.snap_id != '' and ctx.valid_from >= ctx.wait_start,
+          'RECONFIRMED setup: the context carries setup_id, direction, reason, snapshot, live level, FVG id and bounds, valid-from and ready')
+    check(replay_text(r) == before and setup_context_text(ctx) == setup_context_text(ctx2), 'the context is read-only: reading it changes nothing')
+    r = rep_of('r10_hold')
+    ctx = setup_context(r.state, r.tracks)
+    check(ctx.valid and not ctx.ready and ctx.fvg_id == '' and ctx.live_id != ctx.snap_id and ctx.reason == 'STRUCT',
+          'HOLD: not ready, no FVG; the live level (advanced) differs from the snapshot (reference only)')
+    r = rep_of('r10_sweep')
+    ctx = setup_context(r.state, r.tracks)
+    check(ctx.valid and not ctx.ready and ctx.reason == 'INTERNAL' and ctx.stype == 'SWEEP', 'SWEEP_WAIT: reason INTERNAL, not ready')
+    r = rep_of('c_history')
+    ctx = setup_context(r.state, r.tracks)
+    check((not ctx.valid) and setup_context_text(ctx) == 'CTX=-' and not ctx.ready, 'no setup (phase ACTIVE): the context is empty and not ready')
+    check(all(e.type != 'M15_OUTCOME' and 'M15_OUTCOME' not in e.detail for cc in build_cases() if cc.kind == 'R' for e in rep_of(cc.name).events),
+          'M15_OUTCOME is NOT implemented as a market event of the stateless replay (no mechanism is defined)')
+
+
+# ----------------------------------------------------------------- revision 14 tests ----
+def li_of_key(key):
+    return key.split(';LI=')[1].split(';')[0]
+
+
+def liq_brute_key(bars, sw, p, t, dir_, lv_pivot, lv_price, history=True):
+    """INDEPENDENT reference of the LI key at the end of bar t (no cache, no helper of the model): the swings of the
+    side opposite to the bias, confirmed by the close of t, pivot later than the protecting level's pivot, strictly
+    inside it, and (history=True) NOT crossed (adverse extreme strictly beyond) by any closed bar from pivot + right + 1
+    to t. history=False gives the GEOMETRIC scope only (consumption ignored)."""
+    s = -dir_
+    ids = []
+    for x in sw:
+        if x.index + p.right > t or x.is_high != (s > 0) or x.pivot_time <= lv_pivot or not (s * (x.price - lv_price) < 0):
+            continue
+        crossed = False
+        if history:
+            for j in range(x.index + p.right + 1, t + 1):
+                if s * (adverse_ext(bars[j], s) - x.price) > 0:
+                    crossed = True
+                    break
+        if not crossed:
+            ids.append(interior_id('IH' if s > 0 else 'IL', x.pivot_time))
+    return ','.join(sorted(ids)) if ids else '-'
+
+
+def replay_levels(bars, p):
+    """replay with the protecting level of every bar recorded (test helper)"""
+    st = St()
+    sw, _ = t2.find_swings(bars, len(bars), p.left, p.right, p.period)
+    fv = t2.find_fvgs(bars, len(bars), p.period)
+    tracks = []
+    events = []
+    out = []
+    for t in range(len(bars)):
+        process_bar(t, bars, sw, fv, p, st, tracks, events)
+        out.append((st.dir, st.has_level, st.lv_pivot, st.lv_price, st.li_key, st.has_lint, st.li_id, st.li_price))
+    return out, sw, events
+
+
+class Lcg(object):
+    """small deterministic generator (the test must not depend on the random module of a Python version)"""
+    def __init__(self, seed):
+        self.x = (seed * 2654435761 + 12345) % 4294967296
+
+    def u(self, a, b):
+        self.x = (self.x * 1664525 + 1013904223) % 4294967296
+        return a + (b - a) * (self.x / 4294967296.0)
+
+
+def random_bars(seed, n):
+    g = Lcg(seed)
+    c = 100.0
+    out = []
+    for i in range(n):
+        c += g.u(-6, 6)
+        hw = g.u(0.5, 7)
+        h = c + hw * g.u(0.2, 1.6)
+        l = c - hw * g.u(0.2, 1.6)
+        cl = c + g.u(-hw, hw) * 0.8
+        h = max(h, cl)
+        l = min(l, cl)
+        out.append(Bar(T0 + i * PERIOD, round(h, 2), round(l, 2), round(cl, 2)))
+    return out
+
+
+def replay_forgetful(bars, n, p, k0):
+    """MODEL-ONLY negative control: a replay that IGNORES every crossing before bar k0 (a B that lacks part of the
+    consumption history). The product never does this."""
+    orig = globals()['liq_first_cross']
+
+    def forgetful(st, bars_, p_, sw, i, upto):
+        r = orig(st, bars_, p_, sw, i, upto)
+        return r if r >= k0 else -1
+    globals()['liq_first_cross'] = forgetful
+    try:
+        return replay(bars, n, p)
+    finally:
+        globals()['liq_first_cross'] = orig
+
+
+def test_29_internal_liquidity_layer():
+    print('--- 29. revision 14 PROPOSAL / PROTOTYPE (awaiting the client): per-level internal liquidity (observation layer)')
+    p = Params(left=2, right=2, period=PERIOD, lookback=300, rebuild=1000, hard_cap=5000)
+    base = len(liq_demo([]).bars())          # index of the crossing row of the demo series
+    for pref in ('', 'm_'):
+        tag = 'SELL' if pref == '' else 'BUY'
+        K = 'IH' if pref == '' else 'IL'
+        KF = 'IL' if pref == '' else 'IH'      # the kind after a flip (the other side)
+        d0 = 'BEAR' if pref == '' else 'BULL'
+
+        def case(kind):
+            return case_by_name(pref + 'l14_' + kind)
+
+        def rp(kind):
+            return rep_of(pref + 'l14_' + kind)
+
+        def at(kind, i):
+            c = case(kind)
+            return [e for e in rp(kind).events if e.bar_time == c.bars[i].time]
+
+        def liv(kind, i):
+            return li_of_key(rp(kind).keys[i])
+
+        def idt(i, k=None):
+            return (k or K) + ts(T0 + i * PERIOD)
+
+        def keyset(*ids):
+            return ','.join(sorted(ids)) if ids else '-'
+        # ---- 29a several levels in one bar keep their own result
+        r = rp('multi_break_sweep')
+        ev = at('multi_break_sweep', base)
+        pre = liv('multi_break_sweep', base - 1).split(',')
+        check(len(pre) == 2 and pre[0] < pre[1],
+              '%s 29a: before the crossing bar two unconsumed internal levels are in the set (100 with the earlier pivot, 90 with the later pivot)' % tag)
+        lv100, lv90 = pre
+        check([e.type for e in ev] == [EV_INT_BREAK, EV_INT_SWEEP] and ev[0].ref == lv90 and ev[1].ref == lv100,
+              '%s 29a: close beyond the LOWER later-pivot level = INTERNAL_BREAK for it, wick over the HIGHER earlier-pivot level = INTERNAL_SWEEP for it, in one bar, breaks first, neither deletes the other' % tag)
+        check(dval(ev[1].detail, 'setup') == '1' and dval(ev[1].detail, 'top') == '1' and dval(ev[1].detail, 'restart') == '0'
+              and dval(ev[0].detail, 'setup') == '' and r.hist[base][1] == 'SWEEP_WAIT' and dir_name(r.state.dir) == d0
+              and EV_FLIP not in types_of(r) and r.hist[base][2].startswith('SWEEP@' + ts(T0 + base * PERIOD)),
+              '%s 29a: the sweep creates ONE SWEEP setup (ACTIVE -> SWEEP_WAIT) from the swept level; bias unchanged, no FLIP' % tag)
+        check(liv('multi_break_sweep', base) == '-', '%s 29a: both crossed levels left the set (consumed)' % tag)
+        # ---- 29b two levels swept in one bar: ONE setup, from the most adverse level
+        ev = at('multi_two_sweeps', base)
+        pre = liv('multi_two_sweeps', base - 1).split(',')
+        check([e.type for e in ev] == [EV_INT_SWEEP, EV_INT_SWEEP] and ev[0].ref == pre[1] and ev[1].ref == pre[0]
+              and [dval(e.detail, 'top') for e in ev] == ['0', '1'] and [dval(e.detail, 'setup') for e in ev] == ['0', '1'],
+              '%s 29b: two levels swept in one bar: both raise INTERNAL_SWEEP (most adverse LAST); the setup is created ONCE, from the most adverse level (top=1, setup=1)' % tag)
+        check(rp('multi_two_sweeps').hist[base][1] == 'SWEEP_WAIT' and not [e for e in ev if e.type == EV_SETUP_ENDED]
+              and liv('multi_two_sweeps', base) == '-',
+              '%s 29b: one setup per bar, both levels consumed' % tag)
+        # ---- 29c close beyond both levels: two breaks (by pivot time), no sweep, no setup
+        ev = at('multi_two_breaks', base)
+        pre = liv('multi_two_breaks', base - 1).split(',')
+        r = rp('multi_two_breaks')
+        check([e.type for e in ev] == [EV_INT_BREAK, EV_INT_BREAK] and [e.ref for e in ev] == pre
+              and r.hist[base][1] == 'ACTIVE' and r.hist[base][2] == '' and liv('multi_two_breaks', base) == '-',
+              '%s 29c: close beyond both levels: two INTERNAL_BREAK (earlier pivot first), no sweep, no setup, both consumed' % tag)
+        # ---- 29c2 a close EQUAL to a level is not a close beyond it
+        ev = at('close_equal', base)
+        pre = liv('close_equal', base - 1).split(',')
+        check([e.type for e in ev] == [EV_INT_SWEEP, EV_INT_SWEEP] and ev[0].ref == pre[1] and ev[1].ref == pre[0]
+              and EV_INT_BREAK not in types_of(rp('close_equal')),
+              '%s 29c2: a close EQUAL to the level 90 is not a close beyond it: both levels are swept, none is broken' % tag)
+        # ---- 29d touch versus strict crossing, interior level
+        ev = at('touch_inner', base)
+        pre = liv('touch_inner', base - 1).split(',')
+        check([e.type for e in ev] == [EV_INT_BREAK] and ev[0].ref == pre[1] and liv('touch_inner', base) == pre[0],
+              '%s 29d: a high EQUAL to the internal level 100 is a touch: no sweep, no consumption (the level stays in the set; only the close beyond 90 breaks that level)' % tag)
+        ev = at('touch_inner', base + 1)
+        check([e.type for e in ev] == [EV_INT_SWEEP] and ev[0].ref == pre[0] and dval(ev[0].detail, 'setup') == '1'
+              and liv('touch_inner', base + 1) == '-',
+              '%s 29d: the next bar crosses 100 strictly (100.5): INTERNAL_SWEEP, and the level is consumed' % tag)
+        # ---- 29e touch of the protecting level itself
+        r = rp('touch_level')
+        check([e.type for e in at('touch_level', base)] == [EV_INT_BREAK, EV_INT_SWEEP] and EV_WICK not in types_of(r) and EV_FLIP not in types_of(r)
+              and dir_name(r.state.dir) == d0 and r.state.lv_price == rp('multi_break_sweep').state.lv_price,
+              '%s 29e: a high EQUAL to the protecting level is not a structural wick; the interior events are raised normally, the level is unchanged' % tag)
+        # ---- 29f structural priority
+        r = rp('beyond_level')
+        check([e.type for e in at('beyond_level', base)] == [EV_WICK] and r.hist[base][1] == 'HOLD' and liv('beyond_level', base) == '-',
+              '%s 29f: a high strictly beyond the protecting level is a WICK only (no INTERNAL_*); the interior levels it crossed are consumed silently' % tag)
+        check(at('beyond_level', base + 1) == [] and liv('beyond_level', base + 1) == '-',
+              '%s 29f: the next bar crosses a level that the wick bar consumed silently: no event (consumption is historical)' % tag)
+        check([e.type for e in at('flip_level', base)] == [EV_FLIP] and liv('flip_level', base) == '-',
+              '%s 29f: a close strictly beyond the protecting level is a FLIP only (no INTERNAL_*); the set is empty (no level after a flip)' % tag)
+        # ---- 29g / 29h HOLD and RECONFIRMED are not replaced by a sweep
+        for kind, ph, num in (('hold_sweep', 'HOLD', 'g'), ('recon_sweep', 'RECONFIRMED', 'h')):
+            r = rp(kind)
+            sw_ev = [e for e in r.events if e.type == EV_INT_SWEEP]
+            i = bar_idx(case(kind), sw_ev[0].bar_time) if sw_ev else -1
+            check(len(sw_ev) == 1 and dval(sw_ev[0].detail, 'setup') == '0' and dval(sw_ev[0].detail, 'top') == '1'
+                  and dval(sw_ev[0].detail, 'restart') == '0' and r.hist[i - 1][1] == ph and r.hist[i][1] == ph
+                  and r.hist[i][2] == r.hist[i - 1][2] and r.hist[i][2].startswith('WICK@') and not [e for e in r.events if e.type == EV_SETUP_ENDED],
+                  '%s 29%s: a sweep seen in %s is raised with setup=0 (top=1); the phase, setup_id and setup type are NOT replaced (no SETUP_ENDED)' % (tag, num, ph))
+        # ---- 29i the level moves (ratchet): the scope changes; a consumed level is not revived
+        c = case('ratchet')
+        r = rp('ratchet')
+        a105, h2, hs = idt(29), idt(36), idt(39)
+        lv, sw_, _ = replay_levels(c.bars, p)
+        check(liv('ratchet', 38) == keyset(a105, h2),
+              '%s 29i: under the first protecting level the set holds the high A (105) and the internal high h2 (103)' % tag)
+        ev = at('ratchet', 39)
+        check([e.type for e in ev] == [EV_INT_SWEEP] and ev[0].ref == h2 and dval(ev[0].detail, 'setup') == '1' and liv('ratchet', 39) == a105
+              and liv('ratchet', 40) == a105,
+              '%s 29i: the sweep bar (high 104, close below h2) sweeps h2 only; its OWN high is not in the set at its own bar nor on the next two bars' % tag)
+        check(liv('ratchet', 41) == keyset(a105, hs) and liv('ratchet', 49) == keyset(a105, hs),
+              '%s 29i: the sweep bar high enters the set only when it is confirmed (after two lower bars)' % tag)
+        check(r.hist[48][5] == r.hist[49][5] and r.hist[49][5] != r.hist[50][5] and liv('ratchet', 50) == hs,
+              '%s 29i: when the lower low is confirmed the protecting level moves to A (ratchet): A leaves the set (it is the level), the scope shrinks' % tag)
+        geo = liq_brute_key(c.bars, sw_, p, 50, lv[50][0], lv[50][2], lv[50][3], history=False)
+        check(h2 in geo.split(',') and h2 not in liv('ratchet', 50).split(','),
+              '%s 29i: NO REVIVAL: h2 lies inside the new level (pivot later, price inside) but stays consumed, as it was consumed under the old level' % tag)
+        check(at('ratchet', 52) == [] and [e.type for e in at('ratchet', 53)] == [EV_SETUP_ENDED, EV_INT_SWEEP]
+              and at('ratchet', 53)[1].ref == hs and dval(at('ratchet', 53)[1].detail, 'restart') == '1'
+              and dval(at('ratchet', 53)[1].detail, 'setup') == '1',
+              '%s 29i: a bar crossing the consumed h2 only raises nothing; the next bar crosses the sweep-bar high: one INTERNAL_SWEEP (restart=1), the old SWEEP setup is REPLACED' % tag)
+        # ---- 29j flip: the scope is re-evaluated, a level crossed before it entered the scope stays consumed
+        c = case('flip_scope')
+        r = rp('flip_scope')
+        x37, y42 = idt(37, KF), idt(42, KF)
+        lv, sw_, _ = replay_levels(c.bars, p)
+        check([e.type for e in at('flip_scope', 40)] == [EV_FLIP] and liv('flip_scope', 40) == '-' and not lv[41][1],
+              '%s 29j: FLIP: the set is empty, the new bias has no protecting level and no internal level' % tag)
+        check(lv[42][1] and liv('flip_scope', 42) == '-',
+              '%s 29j: the new protecting level appears (bar 42) and the swing X, crossed by that very bar while the bias had no level, is already consumed' % tag)
+        geo = liq_brute_key(c.bars, sw_, p, 42, lv[42][0], lv[42][2], lv[42][3], history=False)
+        check(x37 in geo.split(','),
+              '%s 29j: X is inside the new level in pivot and price (geometric scope) although it is consumed: the historical consumption does not depend on the scope at the time' % tag)
+        check(liv('flip_scope', 44) == y42 and r.hist[45][1] == 'ACTIVE',
+              '%s 29j: the low of the crossing bar itself becomes a level only after its confirmation' % tag)
+        ev = at('flip_scope', 46)
+        check([e.type for e in ev] == [EV_INT_SWEEP] and ev[0].ref == y42 and liv('flip_scope', 46) == '-',
+              '%s 29j: a later bar crossing both X and Y raises ONE event, for Y only (X was consumed before it entered the scope)' % tag)
+        # ---- 29k no look-ahead: first usable bar, own high, confirmation
+        c = case('first_usable')
+        ev = at('first_usable', 42)
+        check(liv('first_usable', 40) == idt(29) and liv('first_usable', 41) == keyset(idt(29), hs),
+              '%s 29k: a swing joins the set at the end of the bar that confirms it (pivot + 2), not before' % tag)
+        check([e.type for e in ev] == [EV_SETUP_ENDED, EV_INT_SWEEP] and ev[1].ref == hs and dval(ev[1].detail, 'setup') == '1',
+              '%s 29k: the FIRST usable bar (pivot + 3) already crosses it: INTERNAL_SWEEP' % tag)
+        check([e.type for e in at('first_usable', 39)] == [EV_INT_SWEEP] and at('first_usable', 39)[0].ref == h2,
+              '%s 29k: at its own bar the sweep bar raises only the event of the level it crosses, never one about its own high' % tag)
+    # ---- 29l prefix replay equals full replay (no look-ahead), all revision 14 series
+    bad = []
+    n_pref = 0
+    for pref in ('', 'm_'):
+        for kind in LIQ_KINDS:
+            name = pref + 'l14_' + kind
+            c = case_by_name(name)
+            full = rep_of(name)
+            for k in range(30, len(c.bars) + 1, 2):
+                pr = replay(c.bars[:k], k, c.params())
+                n_pref += 1
+                ev_full = [e.text() for e in full.events if e.bar_time <= c.bars[k - 1].time]
+                if pr.keys != full.keys[:k] or [e.text() for e in pr.events] != ev_full:
+                    bad.append((name, k))
+    check(not bad and n_pref > 300,
+          '29l: the replay of every prefix gives the keys and events of the full replay up to that bar (no look-ahead; %d prefixes of %d series) %s' % (n_pref, 2 * len(LIQ_KINDS), bad[:3]))
+    # ---- 29m the LI key equals an independent brute-force reference on every bar (scenarios + random series)
+    bad = []
+    n_bars = 0
+    n_levels = 0
+    series = []
+    for pref in ('', 'm_'):
+        for kind in LIQ_KINDS:
+            series.append((pref + 'l14_' + kind, case_by_name(pref + 'l14_' + kind).bars))
+    for sd in range(30):
+        series.append(('random%d' % sd, random_bars(sd, 220)))
+    for nm, bars in series:
+        lv, sw_, _ = replay_levels(bars, p)
+        for t in range(len(bars)):
+            d_, has_l, lvp, lvpr, key, has_lint, li_id, li_price = lv[t]
+            exp = liq_brute_key(bars, sw_, p, t, d_, lvp, lvpr) if (d_ != 0 and has_l) else '-'
+            n_bars += 1
+            if key != exp:
+                bad.append((nm, t))
+            if key != '-':
+                n_levels += len(key.split(','))
+                ok = has_lint and li_id in key.split(',')
+                if not ok:
+                    bad.append((nm, t, 'display'))
+            elif has_lint:
+                bad.append((nm, t, 'display'))
+    check(not bad and n_levels > 500,
+          '29m: the LI key equals an independent brute-force reference on every one of %d bars (%d level slots, 28 scenarios and 30 random series) %s' % (n_bars, n_levels, bad[:3]))
+    # ---- 29n the regression case (mirror of the 25.09 12:00 example, generic units)
+    for pref in ('', 'm_'):
+        tag = 'SELL' if pref == '' else 'BUY'
+        K = 'IH' if pref == '' else 'IL'
+        c = case_by_name(pref + 'l14_regression')
+        r = rep_of(pref + 'l14_regression')
+        evs = [e for e in r.events if e.type in (EV_INT_SWEEP, EV_RECONFIRMED, EV_RECONF_LOST, EV_FLIP, EV_WICK, EV_SETUP_ENDED)]
+        sweep = [e for e in evs if e.type == EV_INT_SWEEP]
+        i = bar_idx(c, sweep[0].bar_time) if sweep else -1
+        h_id = K + ts(T0 + 36 * PERIOD)
+        check([e.type for e in evs] == [EV_INT_SWEEP, EV_RECONFIRMED, EV_RECONF_LOST, EV_RECONFIRMED] and sweep[0].ref == h_id,
+              '%s 29n: the confirmed internal high h (pivot before the latest lower low, below the protecting level, not the highest after the extreme) is swept: INTERNAL_SWEEP, then RECONFIRMED, RECONF_LOST, RECONFIRMED; no FLIP, no WICK' % tag)
+        check(r.hist[i - 1][1] == 'ACTIVE' and r.hist[i][1] == 'SWEEP_WAIT' and r.hist[i][0] == r.hist[i - 1][0] and dval(sweep[0].detail, 'setup') == '1',
+              '%s 29n: the sweep takes the setup from ACTIVE to SWEEP_WAIT, the bias is unchanged' % tag)
+        lvp = set(h[5] for h in r.hist[i - 8:])
+        check(len(lvp) == 1, '%s 29n: the protecting level stays untouched (same price on the bars around and after the sweep)' % tag)
+        sid = set(h[2] for h in r.hist[i:])
+        phases = [r.hist[k][1] for k in range(i, len(c.bars))]
+        seq = [phases[0]]
+        for ph_ in phases[1:]:
+            if ph_ != seq[-1]:
+                seq.append(ph_)
+        fv_ids = [e.ref for e in evs if e.type in (EV_RECONFIRMED, EV_RECONF_LOST)]
+        check(len(sid) == 1 and list(sid)[0].startswith('SWEEP@' + ts(sweep[0].bar_time)) and seq == ['SWEEP_WAIT', 'RECONFIRMED', 'SWEEP_WAIT', 'RECONFIRMED']
+              and r.state.recon_reason == 'INTERNAL' and fv_ids[0] == fv_ids[1] and fv_ids[2] != fv_ids[0],
+              '%s 29n: ONE setup_id through SWEEP_WAIT -> RECONFIRMED(INTERNAL) -> RECONF_LOST -> SWEEP_WAIT -> RECONFIRMED (the lost FVG is not reused; a second FVG reconfirms)' % tag)
+    # ---- 29o event detail and comparison signature
+    n_sw = 0
+    bad = []
+    for pref in ('', 'm_'):
+        for kind in LIQ_KINDS:
+            r = rep_of(pref + 'l14_' + kind)
+            per_bar = {}
+            for e in r.events:
+                if e.type == EV_INT_SWEEP:
+                    n_sw += 1
+                    keys_ = [x.split('=')[0] for x in e.detail.split(';')]
+                    if keys_ != ['dir', 'lint', 'sweep', 'restart', 'setup', 'top'] or e.sig != e.id() or dval(e.detail, 'lint') != e.ref:
+                        bad.append((kind, 'detail'))
+                    per_bar.setdefault(e.bar_time, []).append(e)
+                elif e.type == EV_INT_BREAK:
+                    if e.detail != 'dir=%s;lint=%s' % (e.detail.split(';')[0][4:], e.ref) or e.sig != e.id():
+                        bad.append((kind, 'break'))
+            for bt, lst in per_bar.items():
+                if [dval(e.detail, 'top') for e in lst].count('1') != 1 or [dval(e.detail, 'setup') for e in lst].count('1') > 1 \
+                        or [e for e in lst if dval(e.detail, 'setup') == '1' and dval(e.detail, 'top') != '1']:
+                    bad.append((kind, 'top/setup'))
+    check(not bad and n_sw >= 20,
+          '29o: INTERNAL_SWEEP detail is dir;lint;sweep;restart;setup;top (restart= kept for compatibility), one top and at most one setup per bar; INTERNAL_BREAK detail unchanged; the comparison signature is the event id only (%d sweeps) %s' % (n_sw, bad[:3]))
+    # ---- 29p a replay keeps nothing between replays
+    c1 = case_by_name('l14_ratchet')
+    c2 = case_by_name('l14_flip_scope')
+    a1 = replay(c1.bars, len(c1.bars), p)
+    replay(c2.bars, len(c2.bars), p)
+    replay(c1.bars[:40], 40, p)
+    a2 = replay(c1.bars, len(c1.bars), p)
+    check(a1.keys == a2.keys and [e.text() for e in a1.events] == [e.text() for e in a2.events] and replay_text(a1) == replay_text(a2)
+          and a1.state is not a2.state and a1.state.liq_cache is not a2.state.liq_cache,
+          '29p: replays in between change nothing: the consumption cache belongs to one replay (a fresh state per replay)')
+    # ---- 29q SELL and BUY are mirror images
+    bad = []
+    for kind in LIQ_KINDS:
+        if swap_sides(replay_text(rep_of('l14_' + kind))) != strip_prices(replay_text(rep_of('m_l14_' + kind))):
+            bad.append(kind)
+    check(not bad, '29q: SELL and BUY revision 14 series give mirror-image transcripts (roles swapped, prices dropped) %s' % bad)
+    # ---- 29r A/B negative controls for the LI element
+    for pref in ('', 'm_'):
+        tag = 'SELL' if pref == '' else 'BUY'
+        c = case_by_name(pref + 'l14_flip_scope')
+        n = 46                                           # up to the bar before the second crossing of the level X
+        ra = replay(c.bars[:n], n, p)
+        rb = replay_forgetful(c.bars[:n], n, p, 43)
+        ka, kb = struct_key(ra.state), struct_key(rb.state)
+        fa, fb = state_fields(ra.state, ra.tracks), state_fields(rb.state, rb.tracks)
+        diff = [la for (la, va), (lb, vb) in zip(fa, fb) if va != vb]
+        check(diff == ['LI'] and ka != kb,
+              '%s 29r: a B whose consumption history lacks one crossing differs from A ONLY in the unconsumed set (LI): the unconsumed set is a state element' % tag)
+        why = ab_reasons(ka, kb, setup_key(ra.state, ra.tracks), setup_key(rb.state, rb.tracks),
+                         events_sig_text(ra.events, 0), events_sig_text(rb.events, 0), ra.state.dir, 10 ** 12, 0)
+        check(why == 'AB_STRUCTURE_DIFF',
+              '%s 29r: the A/B comparison flags it: AB_STRUCTURE_DIFF alone (no setup or event difference)' % tag)
+        check(ab_without(ra, rb, {'LI'}) and not ab_without(ra, rb, set()) and first_diff_field(fa, fb)[0] == 'LI',
+              '%s 29r: NEGATIVE CONTROL: with the LI element removed from the compared key the same two windows would be called equal (so the element is what catches it); the first differing field is named LI' % tag)
+        rc = replay(c.bars[:n], n, p)
+        check(ab_reasons(ka, struct_key(rc.state), setup_key(ra.state, ra.tracks), setup_key(rc.state, rc.tracks),
+                         events_sig_text(ra.events, 0), events_sig_text(rc.events, 0), ra.state.dir, 10 ** 12, 0) == '',
+              '%s 29r: two identical replays compare as reliable (the control is not always firing)' % tag)
+    check(STATE_FIELDS.index('LI') < STRUCT_FIELD_COUNT and 'set' in FIELD_MEANING['LI'] and len(STATE_FIELDS) == 12,
+          '29r: LI is one of the 12 listed fields, in the STRUCTURE part, described as a set')
+
+
+def test_deferred():
+    print('--- deferred groups (NOT counted as PASS)')
+    deferred('test 9 (EA lifecycle and reload: no duplicate objects, clear/rebuild as in T002)')
+    deferred('test 18 (intrabar overlay P12: crossing blocks only, wick-only close -> HOLD, body close -> flip, equality)')
+    deferred('test 20 (target candidate P13: latest HH shown, pullback level not, newer HH changes it, T002 ERL unchanged)')
+    deferred('drawing/panel tests (criterion 10: labels, panel, LIMITED_BY_HISTORY display)')
+    deferred('M5/M15 logic (out of scope)')
+
+
+# ------------------------------------------------------------ MQL5 emit ----
+def chunks(text, n=700):
+    return [text[i:i + n] for i in range(0, len(text), n)]
+
+
+def emit_mql():
+    cases = build_cases()
+    out = ['// BEGIN GENERATED CASE DATA (tests/t003_reference_test.py --emit-mql)']
+    out.append('#define T3_CASE_COUNT %d' % len(cases))
+    out.append('void T3LoadCase(const int id, MqlRates &bars[], int &n, int &kind, int &lookback, int &rebuild, int &hard_cap, string &name, string &expected)')
+    out.append('  {')
+    out.append('   switch(id)')
+    out.append('     {')
+    for i, c in enumerate(cases):
+        exp = run_case(c)
+        assert '"' not in exp and '\\' not in exp
+        vals = []
+        for b in c.bars:
+            vals += ['%r' % b.high, '%r' % b.low, '%r' % b.close]
+        # at most 24 numbers per source line (long series would otherwise give very long lines)
+        flat = ',\n           '.join(','.join(vals[j:j + 24]) for j in range(0, len(vals), 24))
+        out.append('      case %d:' % i)
+        out.append('        {')
+        out.append('         double d[] = {%s};' % flat)
+        out.append('         name = "%s"; kind = %d; lookback = %d; rebuild = %d; hard_cap = %d;' % (
+            c.name, {'R': 0, 'E': 1, 'D': 2}[c.kind], c.lookback, c.rebuild, c.hard_cap))
+        out.append('         expected = "";')
+        for part in chunks(exp):
+            # diagnostics texts hold line breaks: escape them inside the MQL5 string literal
+            out.append('         expected += "%s";' % part.replace('\n', '\\n'))
+        first = (c.bars[0].time - T0) // PERIOD
+        assert T0 + first * PERIOD == c.bars[0].time
+        slots = [(b.time - T0) // PERIOD for b in c.bars]
+        for b, sl in zip(c.bars, slots):
+            assert T0 + sl * PERIOD == b.time
+        if slots == list(range(first, first + len(c.bars))):
+            out.append('         T3FillBars(d, %d, %d, bars);' % (len(c.bars), first))
+        else:
+            # open times with holes (weekend / missing history): explicit 4h slot numbers
+            out.append('         int sl[] = {%s};' % ','.join(str(x) for x in slots))
+            out.append('         T3FillBarsAt(d, %d, sl, bars);' % len(c.bars))
+        out.append('         n = %d;' % c.n_use)
+        out.append('         break;')
+        out.append('        }')
+    out.append('     }')
+    out.append('  }')
+    x, row, nm = csv_sample()
+    out.append('string T3CsvExpectedHeader(void)')
+    out.append('  {')
+    out.append('   string h = "";')
+    hl = csv_header(x).split('\n')
+    for i, line in enumerate(hl):
+        assert '"' not in line and '\\' not in line
+        out.append('   h += "%s%s";' % (line, '\\n' if i < len(hl) - 1 else ''))
+    out.append('   return(h);')
+    out.append('  }')
+    out.append('string T3CsvExpectedRow(void) { return("%s"); }' % row)
+    out.append('string T3CsvExpectedName(void) { return("%s"); }' % nm)
+    out.append('// END GENERATED CASE DATA')
+    return '\n'.join(out)
+
+
+def main():
+    if '--emit-mql' in sys.argv:
+        print(emit_mql())
+        return 0
+    print('T003 reference model tests - these verify the PYTHON MODEL of the PROPOSED rules,')
+    print('NOT the MQL5 source. T003_LogicTest.mq5 has not been compiled or run.')
+    test_01_body_vs_wick()
+    test_02_correction()
+    test_03_wick_blocks()
+    test_04_prewick()
+    test_05_new_fvg()
+    test_06_repeated()
+    test_07_level_selection()
+    test_08_no_lookahead()
+    test_10_buy_mirror()
+    test_11_acceptance_ab()
+    test_12_retro()
+    test_13_one_flip_trigger()
+    test_14_history_and_precedence()
+    test_15_determinism()
+    test_16_depth_check()
+    test_16u_units()
+    test_17_depth_and_window()
+    test_19_internal_liquidity()
+    test_21_no_fixed_count()
+    test_22_freeze_internal()
+    test_23_anchor_by_bars()
+    test_24_diagnostics()
+    test_25_trackchanges()
+    test_26_csv_export()
+    test_27_hypothesis_frozen_age()
+    test_28_revision10()
+    test_28b_properties()
+    test_28c_weekend_right()
+    test_28d_context()
+    test_ids_and_windows()
+    test_consumer()
+    test_29_internal_liquidity_layer()
+    test_deferred()
+    print('')
+    print('%d passed, %d failed, %d deferred (deferred are NOT passes)' % (len(PASSES), len(FAILS), len(DEFERRED)))
+    if FAILS:
+        for f in FAILS:
+            print('  FAILED: ' + f)
+        return 1
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
