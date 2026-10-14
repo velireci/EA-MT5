@@ -1,12 +1,16 @@
 // T008 manually supplied candidate + real broker parameters. NEVER sends orders.
+// T010 adds opt-in automatic USD-high-news (MT5 calendar, read-only) and spread filters; results feed only the permit snapshot.
 #property strict
-#property version "1.02"
+#property version "1.03"
 #include "include/SymbolSnapshot.mqh"
 #include "include/BrokerLossCheck.mqh"
 #include "include/SessionPolicy.mqh"
+#include "include/NewsSpreadFilters.mqh"
 enum PREVIEW_SIDE {PREVIEW_UNSET=0,PREVIEW_BUY=1,PREVIEW_SELL=-1};
 enum PREVIEW_STATE {STATE_UNKNOWN=0,STATE_CLEAR=1,STATE_BLOCK=2};
 enum PREVIEW_SESSION_SOURCE {SESSION_MANUAL=0,SESSION_TIRANE_CLOCK=1};
+enum PREVIEW_NEWS_SOURCE {NEWS_SRC_MANUAL=0,NEWS_SRC_CALENDAR_AUTO=1};
+enum PREVIEW_SPREAD_SOURCE {SPREAD_SRC_MANUAL=0,SPREAD_SRC_QUOTE_AUTO=1};
 input PREVIEW_SIDE InpDirection=PREVIEW_UNSET;
 input string InpSignalId="";
 input string InpSetupId="";
@@ -24,8 +28,11 @@ input int InpSessionEndMinute=1230;
 input int InpSessionWeekdayMask=62;
 input bool InpFridayCloseEnabled=true;
 input int InpFridayCloseMinute=1260;
-input PREVIEW_STATE InpNewsState=STATE_UNKNOWN;
-input PREVIEW_STATE InpSpreadState=STATE_UNKNOWN;
+input PREVIEW_NEWS_SOURCE InpNewsSource=NEWS_SRC_MANUAL; // auto: MT5 calendar, USD + HIGH, +-30 min, server time; unavailable in tester
+input PREVIEW_STATE InpNewsState=STATE_UNKNOWN; // used only when InpNewsSource=NEWS_SRC_MANUAL
+input PREVIEW_SPREAD_SOURCE InpSpreadSource=SPREAD_SRC_MANUAL; // auto: (Ask-Bid)/point of the quote this preview already reads
+input double InpMaxSpreadPoints=-1; // auto spread only; -1 = policy UNSET (blocks); 0 = only zero spread; no default value is chosen
+input PREVIEW_STATE InpSpreadState=STATE_UNKNOWN; // used only when InpSpreadSource=SPREAD_SRC_MANUAL
 input PREVIEW_STATE InpSignalUnused=STATE_UNKNOWN; // CLEAR=externally confirmed unused; BLOCK=duplicate
 input long InpOpenPositions=-1; // explicit external snapshot, NOT read from account
 input long InpTradesToday=-1;
@@ -46,6 +53,42 @@ void StopPreview(const string reason)
   {
    panel="T008 PREVIEW ONLY / NO ORDERS\nBLOCK: "+reason;
    Print("T008 PREVIEW BLOCK: ",reason);Paint();
+  }
+// Thin READ-ONLY calendar reader (T010). The only place that touches the MT5 economic calendar. Converts calendar values into
+// SNfEvent records for the pure NF_NewsEvaluate. Times are server time (calendar value time vs TimeTradeServer), no UTC/Tirane.
+int ReadUsdCalendar(const datetime now,SNfEvent &events[],int &count)
+  {
+   ArrayResize(events,0);count=0;
+   if(MQLInfoInteger(MQL_TESTER)) return(NF_Q_TESTER);
+   if(!TerminalInfoInteger(TERMINAL_CONNECTED)) return(NF_Q_NOT_READY);
+   MqlCalendarValue values[];
+   ResetLastError();
+   bool read_ok=CalendarValueHistory(values,now-NF_WINDOW_SECONDS,now+NF_WINDOW_SECONDS,NULL,"USD");
+   int read_error=GetLastError();
+   int total=ArraySize(values);
+   PrintFormat("T010 CALENDAR query ok=%d error=%d values=%d from_server=%s to_server=%s",(int)read_ok,read_error,total,
+               TimeToString(now-NF_WINDOW_SECONDS,TIME_DATE|TIME_SECONDS),TimeToString(now+NF_WINDOW_SECONDS,TIME_DATE|TIME_SECONDS));
+   if(!read_ok) return(NF_Q_ERROR);
+   if(total<=0) return(NF_Q_OK);
+   ArrayResize(events,total);
+   for(int i=0;i<total;i++)
+     {
+      events[i].time=values[i].time;
+      events[i].time_ok=false;events[i].currency="";events[i].importance=NF_IMP_NONE;events[i].fetch_ok=false;events[i].name="";
+      MqlCalendarEvent cal_event;
+      MqlCalendarCountry country;
+      if(!CalendarEventById(values[i].event_id,cal_event)) continue;
+      if(!CalendarCountryById(cal_event.country_id,country)) continue;
+      events[i].fetch_ok=true;
+      events[i].currency=country.currency;
+      events[i].name=cal_event.name;
+      events[i].importance=(cal_event.importance==CALENDAR_IMPORTANCE_HIGH ? NF_IMP_HIGH :
+                            cal_event.importance==CALENDAR_IMPORTANCE_MODERATE ? NF_IMP_MODERATE :
+                            cal_event.importance==CALENDAR_IMPORTANCE_LOW ? NF_IMP_LOW : NF_IMP_NONE);
+      events[i].time_ok=(cal_event.time_mode==CALENDAR_TIMEMODE_DATETIME && values[i].time>0);
+     }
+   count=total;
+   return(NF_Q_OK);
   }
 void Evaluate()
   {
@@ -121,6 +164,30 @@ void Evaluate()
      }
    snap.news_state=(InpNewsState==STATE_CLEAR ? TP_NEWS_CLEAR : InpNewsState==STATE_BLOCK ? TP_NEWS_BLOCKED : TP_NEWS_UNKNOWN);
    snap.spread_state=(InpSpreadState==STATE_CLEAR ? TP_SPREAD_CLEAR : InpSpreadState==STATE_BLOCK ? TP_SPREAD_BLOCKED : TP_SPREAD_UNKNOWN);
+   string news_text="MANUAL "+EnumToString(InpNewsState),spread_text="MANUAL "+EnumToString(InpSpreadState);
+   if(InpNewsSource==NEWS_SRC_CALENDAR_AUTO)
+     {
+      SNfEvent news_events[];
+      int news_count=0;
+      int news_query=ReadUsdCalendar(now,news_events,news_count);
+      SNfNews news;
+      NF_NewsEvaluate(now,news_events,news_count,news_query,news);
+      snap.news_state=NF_ToNewsState(news.state);
+      PrintFormat("T010 NEWS source=CALENDAR_AUTO status=%s state=%s blocking=%d unknown=%d nearest=%s '%s' | server now %s | USD HIGH +-%d s inclusive | filter result feeds permit snapshot only, no actions",
+                  news.status,NF_StateName(news.state),news.blocking,news.unknown,TimeToString(news.nearest_time,TIME_DATE|TIME_SECONDS),
+                  news.nearest_name,TimeToString(now,TIME_DATE|TIME_SECONDS),NF_WINDOW_SECONDS);
+      news_text="CALENDAR_AUTO "+news.status+(news.blocking>0 ? " ("+news.nearest_name+" "+TimeToString(news.nearest_time,TIME_DATE|TIME_SECONDS)+")" : "");
+     }
+   else PrintFormat("T010 NEWS source=MANUAL state=%s | filter result feeds permit snapshot only",EnumToString(InpNewsState));
+   if(InpSpreadSource==SPREAD_SRC_QUOTE_AUTO)
+     {
+      SNfSpread spread;
+      NF_SpreadEvaluate(quote.bid,quote.ask,symbol.point,InpMaxSpreadPoints,spread);
+      snap.spread_state=NF_ToSpreadState(spread.state);
+      PrintFormat("T010 SPREAD source=QUOTE_AUTO status=%s state=%s spread_points=%.6f max_points=%.6f tolerance=%.3e bid=%.8f ask=%.8f point=%.8f | same quote as the preview, feeds permit snapshot only, no actions",
+                  spread.status,NF_StateName(spread.state),spread.spread_points,InpMaxSpreadPoints,spread.tolerance,quote.bid,quote.ask,symbol.point);
+      spread_text="QUOTE_AUTO "+spread.status+" "+DoubleToString(spread.spread_points,4)+" pts (max "+DoubleToString(InpMaxSpreadPoints,4)+")";
+     }
    snap.open_positions=InpOpenPositions;snap.trades_today=InpTradesToday;snap.existing_risk=InpExistingRisk;
    STpLimits limits;
    limits.max_positions_set=(InpMaxPositions>=0);limits.max_positions=InpMaxPositions;
@@ -147,6 +214,7 @@ void Evaluate()
          " | model loss "+DoubleToString(plan.risk_model,4)+"\nBroker loss check: "+loss_check+
          "\n"+(preview_ok ? "PREVIEW CHECKS PASS" : "PREVIEW BLOCK")+"\n"+reasons+
          "\nPermit risk "+DoubleToString(guarded.risk_model,4)+
+         "\nNEWS "+news_text+"\nSPREAD "+spread_text+"\nFilter results feed ONLY the permit snapshot; no order action."+
          "\nExternal policy snapshot; costs/actual fills NOT modelled.\nStatic snapshot: reattach or change inputs to refresh.";
    PrintFormat("T008 PREVIEW RESULT %s | E %.8f SL %.8f TP %.8f lots %.8f | loss_check %s | permit %s | reasons %s | NO ORDERS",
                preview_ok ? "CHECKS_PASS" : "BLOCK",plan.e_out,plan.s_out,plan.tp,plan.volume_out,loss_check,

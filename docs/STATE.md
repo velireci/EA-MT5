@@ -2,14 +2,14 @@
 Updated: 2026-10-14 (Europe/Tirane). Snapshot, not a transcript.
 
 ## Resume here
-- Branch codex/t004-m15-confirmation, PR4; Codex sole writer during Claude rate limit. T009 session/day-identity helper and opt-in preview session source added on4b6a5b5. No merge, no order activation.
-- Read PROJECT_CHECKLIST.md, relevant STRATEGY_SPEC sections, tasks/T009-session-policy.md and docs/T009-session-policy.md. No repeat of completed scopes without reason.
-- T009: UTC to Tirane using current EU recurrence1996–2099; MonFri00–20:30, Friday21 flag, local day key and midnightUTC. No counters reset/persistence or actions. EA1.02 manual default; auto TimeGMT outside tester only, PC clock must be checked. Static OnInit preview only.
-- Codex6 new Python tests pass including26,280 hourly IANA oracle comparisons; T006–T009106 totalpass. PreviewEA and T009test compile0/0; scoped independent review no material findings.
-- NEXT OWNER: T009_SessionTest inMT5, then preview source SESSION_TIRANE_CLOCK and log T009 SESSION. Other unknown policy gates must stay blocked. Actual T009 terminal proof pending.
-- T008 owner4b6a5b5 helper25/0 and hypothetical BUY preview model/broker8.98EUR at.01lot/budget10EUR, unknown-policy BLOCK. Initial inconsistent symbol tick property replaced by candidate-specific OrderCalcProfit probe; final-volume budget check retained. No orders.
-- T007 owner corrected40fede0 MT51092/0, Python43/0, compile0/0. T006 owner559794a MT5710/0, Python47/0; T005 owner67f02e5 MT5572/0, Python39/0. Pure scopes verified, not strategy/broker execution.
-- Open: signal/FVG/SL/target selection, direction priority, risk base/costs, news, exposure accounting, persistence, pending lifecycle, partial management and actual order APIs. Updated T004 TimelineTest owner run pending.
+- Branch codex/t004-m15-confirmation, PR4, base 8c562fe (T009). T010 (owner-approved, Claude sole writer) adds USD-HIGH news and spread filters to the preview EA v1.03; UNCOMMITTED until the parent commits. No merge, no order activation.
+- T010: pure src/include/NewsSpreadFilters.mqh (news window +-1800 s inclusive, SERVER time, USD+HIGH only, unknown/error/tester -> UNKNOWN; spread (Ask-Bid)/point vs InpMaxSpreadPoints, -1 = UNSET, noise tolerance 16*DBL_EPSILON-scaled). Thin calendar reader inside the EA. MANUAL stays default per filter; results feed only the T007 permit snapshot. Docs: tasks/T010-news-spread-filters.md, docs/T010-news-spread.md, reports/T010-verification.md.
+- T010 evidence (Claude, sandbox): Python test_t010_filters 19 tests OK with 17 mutation checks; T007-T009 78 tests total OK; tools/t010-static-checks.sh ALL PASS. UNVERIFIED: MetaEditor compile, T010_FiltersTest in MT5, live calendar, tester, official MQL5 docs (site unreachable; signatures from memory).
+- NEXT: Codex reviews and compiles XauUsdTradePreview.mq5 and T010_FiltersTest.mq5, checks calendar API signatures/time semantics against the official docs. Then owner runs T010_FiltersTest, then the preview with MANUAL, then with CALENDAR_AUTO + QUOTE_AUTO (send T010 CALENDAR/NEWS/SPREAD log lines).
+- Not decided: spread threshold value, action after spread block, positions at news/session end, calendar history in tester.
+- T009 owner step still pending: T009_SessionTest in MT5 and preview SESSION_TIRANE_CLOCK log T009 SESSION. Other unknown policy gates stay blocked.
+- T008 owner 4b6a5b5 helper 25/0 and hypothetical BUY preview model/broker 8.98 EUR at .01 lot/budget 10 EUR, unknown-policy BLOCK. T007 owner 40fede0 MT5 1092/0; T006 559794a 710/0; T005 67f02e5 572/0. Pure scopes verified, not strategy/broker execution.
+- Open: signal/FVG/SL/target selection, direction priority, risk base/costs, exposure accounting, persistence, pending lifecycle, partial management and actual order APIs. Updated T004 TimelineTest owner run pending.
 
 ## Verified T003 baseline: 6676a01
 - Codex MetaEditor: XauUsdH4Bias, T003_LogicTest and T003_LayersTest each 0 errors / 0 warnings.
