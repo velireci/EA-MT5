@@ -1,0 +1,43 @@
+# T007 verification: pure trade planning, permit checks and pending-cancel request
+
+Date: 2026-10-14. Branch codex/t004-m15-confirmation on top of 559794a; the T007 files are UNCOMMITTED when this is written. Evidence is separated by source. Nothing here validates the strategy, the client limits, the broker behaviour, an order or profitability; nothing is wired to an EA and nothing can send, modify or close an order.
+
+## Relayed from owner or Codex (NOT run in this session)
+- T006 at 559794a: Codex Python 47/0 and MetaEditor 0 errors, 0 warnings; owner MT5 on 14.10.2026 18:42:14: `T006 SIZING TEST finished: 710 passed, 0 failed`. The pure T006 module is verified; broker integration is not.
+- Nothing relayed yet for T007.
+
+## Executed in this session (Claude, Linux, Python 3; no MetaEditor, no MT5)
+| Check | Command | Result |
+|---|---|---|
+| T007 + T006 + T005 unit tests | `cd tests && python3 -m unittest test_t007_planning test_t006_sizing test_t005_geometry` | Ran 120 tests, OK (T007 34, T006 47, T005 39) |
+| T007 alone | `cd tests && python3 -m unittest test_t007_planning` | Ran 34 tests, OK |
+| T007 static checks | `bash tools/t007-static-checks.sh` | ALL PASS: 98 PASS lines, 0 FAIL, 18 negative controls detected (static only) |
+The T004, T002, T003 suites and the T001-T006 static-check scripts were NOT re-run: their files are byte-identical to 559794a (the T007 static check S5 proves that for 62 paths).
+
+What the T007 tests contain:
+- Hand-computed tables (tests/t007_planning_fixtures.py, derivations in its docstring, separate from the code formulas): 36 plan rows (BUY and mirrored SELL; normalization of raw E/S; target farther/nearer than 2R; tick 0.05 with tick value 5; step 0.1; with a bid/ask quote; every refusal: SL wrong side BUY/SELL, zero risk, bad direction, incompatible tick/digits, non-positive price, target wrong side, below stops level, pending too close, geometry wins over sizing; SKIP_BELOW_MIN, rounds-to-zero, SKIP_ABOVE_MAX, SKIP_ABOVE_CAP BUY/SELL, invalid step, off-grid minimum, invalid budget and tick value; empty/blank signal and setup ids, ids win over geometry), 56 permit rows (allow BUY/SELL; plan not OK in three ways; every data/session/news/spread block and UNKNOWN, invalid state; positions below/at/above max and max 0; trades below/at/above max; combined risk exactly at the cap allowed, one cent over blocked, binary-noise sum allowed and a one-cent real excess blocked; each POLICY_UNSET alone and together, UNSET winning over an invalid count; invalid counts and limits; registry other id, duplicate, full, full-but-duplicate, capacity 0, last slot; all reasons in the fixed order, with a bad plan, and all unknowns together), 22 cancel rows (each cause alone, two combined, all five, pending+position, position only, nothing, no event, unknown/negative events with and without a pending, empty/blank pending id).
+- The plan is built by the REAL T005 and T006 references: `unittest.mock` proves that `compute` is called once and its result object is the first argument of `size`; sizing is not called after a geometry refusal; geometry is not called after an id error; every geometry and sizing status and reason is propagated unchanged; plan numbers equal the T005/T006 result fields; BUY and mirrored SELL give the same distances, volume and risk; immutability and unchanged inputs; NaN/inf inputs are refused.
+- Permit: reason order test and header order; non-plan objects block; defaults alone never allow (all limits UNSET); invalid types/values for every count and limit; inclusive risk boundary at three cap magnitudes with 1e-6 over blocking; registry invalid count, capacity 0; the registry is changed only by an ALLOW and only by the signal id; ALLOW is labelled PERMIT_ONLY / NOT_AN_ORDER.
+- Sequences: same signal twice (second BLOCK DUPLICATE_SIGNAL, registry unchanged), a different signal allowed, a BLOCKed attempt does not consume the id, overflow blocks without dropping, `check_permit` is pure.
+- Cancel: positions_untouched is true for all 2x2x32 combinations of flags and event masks; a request exists only with a pending and a non-zero mask; fixed reason order; unknown/odd-typed events are INVALID_INPUT; no field for expiry, cooldown, re-entry or closing positions.
+- 24 mutation checks (defective copies of the reference source, each caught by the named row or sequence): unset limit treated as unlimited (positions, trades, cap), registering also on BLOCK, never registering, allow at max positions, allow at max trades, block exactly at the cap, no noise tolerance, tolerance far too wide, plan status ignored, unreliable data allowed, unknown news allowed, duplicate not detected, registry overflow ignored, position alone gives a cancel request, positions_untouched false, unknown event bit accepted, events validated only after the pending check, TP taken from level_2R, risk_model = budget, sizing refusal ignored, geometry refusal ignored, ids not validated.
+- The MQL5 fixture block in src/tests/T007_PlanningTest.mq5 is textually equal to the generated Python table (test_mql_fixture_block_equals_generated_text).
+
+Static checks (tools/t007-static-checks.sh): no trading API; no quote/tick/symbol/account/series/clock; no file, global-variable, network or process access (module, test, reference); header statements and labels returned by code; MQL5/Python parity of statuses, stages, plan/permit/cancel reason tags in the same first-occurrence order, event order, eight numeric constants, the state constants (also against the fixture mapping) and five labels; the exact boundary comparisons, register-only-after-ALLOW order, POLICY_UNSET guards, geometry-before-sizing, positions_untouched, and no rounding of its own in either language; balanced syntax, format strings, ASCII, includes; 62 T001-T006 paths identical to 559794a; 18 negative controls.
+
+## NOT run (UNVERIFIED)
+- MetaEditor compilation of src/include/TradePlanning.mqh and src/tests/T007_PlanningTest.mq5 (not available here). The MQL5 was written by hand and mirrored from the Python reference; compile errors or warnings are possible (areas to look at first: a struct with a fixed `string reasons[12]` member, `const string &arr[]` parameters, `STpPlan before=p;` struct copy with strings, `StringSplit` with a char separator, `~` on a macro in `events & ~TP_EV_ALL`).
+- Execution of T007_PlanningTest.mq5 in MT5. The Python tests prove the contract of the Python reference; the MQL5 table is only checked for textual equality with the generated Python table. The MQL5 test also repeats the sequences, NaN/inf inputs, the 2x2x32 cancel sweep and a BUY/SELL chain.
+- Any behaviour with a real broker, calendar, session clock, account or open orders: none of it exists in T007.
+
+## Findings while reusing T005/T006 (reported, not changed)
+1. T006 reports `GEOMETRY_NOT_OK` for a non-OK geometry. The plan never reaches it because it stops after a geometry refusal; the plan reports the T005 status (the more specific one).
+2. The reason texts I compared (T005 direction, non-positive price, tick/digits; T006 tags) match between Python and MQL5; I did not diff every text. T007 compares reason prefixes/tags only, never full texts.
+3. T005 `tp_equals_2r` (TP coincides with the partial point; remainder behaviour unspecified) is passed through the plan as a flag; it is still an open client decision.
+4. tools/t006-static-checks.sh compares T001-T005 to 25dbb10 and does not list the T006 files; T007's check compares T001-T006 to 559794a. No defect, noted for the next consolidation.
+
+## Conventions needing review (proposals, not client answers)
+See tasks/T007-trade-planning.md, section "Conventions needing review": inclusive risk cap with a 4-ulp noise tolerance, strict `<` for positions/trades, DATA_UNRELIABLE semantics, fail-closed handling of invalid counts, fixed reason order, registry check before limits, limit value 0 accepted.
+
+## Still open (not decided by this module)
+Base of the 1%; costs; combined 2% numbers and pending reservation; 2 vs 3 trades; win/loss counting; manual-trade ownership; session/news/spread sources and thresholds; time/DST; broker order check and placement; 80/20 split; expiry, cooldown, re-entry; restart recovery; EA wiring.
