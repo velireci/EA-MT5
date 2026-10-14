@@ -4,7 +4,7 @@ Përditësuar më 14.10.2026. Pamje e evidencës së njohur, jo kontroll i ri i 
 
 ## Ku jemi
 
-H4 → M15 → FVG → kthim është ndërtuar dhe vëzhguar në replay. T005 u dorëzua te 67f02e5; Codex Python 39/0, MetaEditor 0/0; pronari MT5 572/0. Robot që hap dhe menaxhon urdhra: ende jo.
+H4 → M15 → FVG → kthim është ndërtuar dhe vëzhguar në replay. T005 u dorëzua te 67f02e5; Codex Python 39/0, MetaEditor 0/0; pronari MT5 572/0. T006 (sizing i pastër me buxhet risku të dhënë, hapi i parë i fushës 2) është programuar me teste Python 37/0 të ekzekutuara nga Claude; kompilimi MetaEditor dhe MT5 janë UNVERIFIED dhe moduli nuk është i lidhur. Robot që hap dhe menaxhon urdhra: ende jo.
 
 ## T001 — Themelet
 - [x] Themelet dhe kompilimi 0/0 në versionin e provuar.
@@ -60,17 +60,21 @@ Status: moduli i pastër i verifikuar, pa përzgjedhje sinjalesh, sizing ose urd
 
 ## Të gjitha fushat ende të panisura
 
-Rend pune i propozuar, jo task-e zyrtare të rinumëruara. Në repo te 5447ef3 u gjetën vetëm T001–T005; numërimi i mëparshëm i raundeve të ardhshme nuk ishte verifikuar. Një fushë mund të ndahet në disa raunde.
+Rend pune i propozuar, jo task-e zyrtare të rinumëruara. Fusha 2 është nisur vetëm me modulin e pastër T006 (pa lidhje, pa urdhra). Në repo te 5447ef3 u gjetën vetëm T001–T005; numërimi i mëparshëm i raundeve të ardhshme nuk ishte verifikuar. Një fushë mund të ndahet në disa raunde.
 
 ### 1. Zgjedhja e sinjalit për hyrje — PA NISUR
 - [ ] Cila FVG M15 zgjidhet kur ka disa
 - [ ] Përcaktimi mekanik i strukturës për SL
 - [ ] Përzgjedhja e targetit dhe burimit të drejtimit
 
-### 2. Risku dhe madhësia e pozicionit — PA NISUR
-- [ ] Baza e 1%, kostot dhe valuta e llogarisë
-- [ ] Tick value, volume step dhe minimumi i volumit
-- [ ] Kufiri 10 lote dhe risku i kombinuar 2%
+### 2. Risku dhe madhësia e pozicionit — NISUR (vetëm moduli i pastër T006; jo i lidhur)
+- [x] Moduli i pastër PositionSizing (model linear: stop ticks × tick value; rrumbullakim vetëm poshtë në volume step; SKIP nën min / mbi max / mbi cap, pa ngritje apo kufizim automatik): teste Python 37/0 të ekzekutuara nga Claude; shih tasks/T006-position-sizing.md
+- [ ] Kompilimi MetaEditor dhe ekzekutimi MT5 i T006_SizingTest — UNVERIFIED
+- [ ] Baza e 1% (balance/equity/...), kostot dhe konvertimi i valutës të llogarisë — hapur; moduli merr buxhetin e riskut nga thirrësi
+- [ ] Marrja e tick value, volume step, min/max nga brokeri real (Tauro XAUUSD.r/USD e paverifikuar)
+- [ ] Risku i kombinuar 2%, rezervimi nga pending, limiti 2 pozicione
+- [ ] Rrumbullakimi i volumit për 80% / 20% dhe mbetja kur TP = 2R
+Status: formula e pastër e sizing-ut e testuar në Python; 10 lotet dhe buxheti vijnë si input, asnjë vendim klienti nuk u shtua.
 
 ### 3. Vendosja e urdhrave limit — PA NISUR
 - [ ] Çmimet e normalizuara dhe stops/freeze levels
