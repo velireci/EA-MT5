@@ -29,6 +29,7 @@ Status: implementuar me prova teknike; validimi i strategjisë mbetet i hapur.
 - [x] Python 476/0/5 deferred dhe regresion privat në dy momente historike.
 - [x] Wick-u i 25 shtatorit regjistrohet pa FLIP; krahasim me përshkrimin e shembullit.
 - [x] Shfaqet mospërputhja T002/T003.
+- [x] Paneli vizual 1.13 (bb7c4b0, korrigjim i lexueshmërisë; rreshta ≤60 karaktere): Codex kompilim 0/0; MT5 LayersTest 111/0; fotoja e pronarit konfirmon titullin, BEAR dhe datat të plota (të përcjella, jo prova të mia). Bartur në PR#4 vetëm për panelin; shkaku (kufi 63 karaktere i etiketës) është përputhja më e mirë me prerjet, jo fakt i dokumentuar.
 - [ ] Vendimi për burimin e drejtimit kur modelet kundërshtohen.
 - [ ] Validimi i rregullave mekanike nga klienti.
 - [ ] Pjesët e shtyra dhe kontrollet e gjera të lifecycle/vizatimit, përfshirë P12/P13 sipas scope-it të tyre.

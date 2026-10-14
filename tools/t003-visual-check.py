@@ -806,16 +806,29 @@ def check_resize(paths):
             bad.append('Relayout deletes objects')
     en = _body_or_fail(dcode, r'\bvoid\s+End\s*\(\s*void\s*\)', 'panel End', bad)
     if en is not None:
-        for need in ('CHART_WIDTH_IN_PIXELS', 'CHART_HEIGHT_IN_PIXELS', 'H3LPanelRows(', 'H3LPanelCols(', 'H3LWrap(', 'H3LPanelBudget(', 'm_last_w = cw', 'm_last_h = ch'):
+        for need in ('CHART_WIDTH_IN_PIXELS', 'CHART_HEIGHT_IN_PIXELS', 'H3LPanelRows(', 'H3LPanelCols(', 'H3LWrap(', 'H3LPanelBudget(', 'm_last_w = cw', 'm_last_h = ch', 'CharWidth()', '(maxlen + 1) * cwe'):
             if need not in en:
                 bad.append(f'panel End() lacks {need} (layout from the chart size and the line budget)')
     ini = _body_or_fail(dcode, r'\bvoid\s+Init\s*\(\s*const\s+bool\s+enabled', 'panel Init', bad)
     if ini is not None and not re.search(r'font_size\s*<\s*7\s*\?\s*7', ini):
         bad.append('panel Init does not keep the font between 7 and 24')
+    if ini is not None and 'TERMINAL_SCREEN_DPI' not in ini:
+        bad.append('panel Init does not scale the line height and character width by the screen DPI')
+    cwb = _body_or_fail(dcode, r'\bdouble\s+CharWidth\s*\(\s*void\s*\)', 'panel CharWidth', bad)
+    if cwb is not None:
+        for need in ('TextSetFont(', 'TextGetSize(', 'measured > c'):
+            if need not in cwb:
+                bad.append(f'panel CharWidth lacks {need} (measured width may only enlarge the estimate)')
     if len(re.findall(r'\bm_font\s*=[^=]', dcode)) > 4:
         bad.append('the font member is assigned in more places than the constructors / Init: the font must not be shrunk to fit')
     if re.search(r'm_font\s*(-=|\*=|/=)|OBJPROP_FONTSIZE\s*,\s*[^,]*m_font\s*[-*/]', dcode):
         bad.append('the panel changes the font size to fit')
+    if '#define H3L_LABEL_MAX_CHARS 60' not in lcode:
+        bad.append('H4BiasLayers.mqh lacks the 60-character label row limit (#define H3L_LABEL_MAX_CHARS 60)')
+    for fn, pat in (('H3LWrap', r'if\(mc\s*>\s*H3L_LABEL_MAX_CHARS\)'), ('H3LPanelCols', r'if\(c\s*>\s*H3L_LABEL_MAX_CHARS\)')):
+        fb = _body_or_fail(lcode, r'\bint\s+' + fn + r'\s*\(', fn, bad)
+        if fb is not None and not re.search(pat, fb):
+            bad.append(f'{fn} does not cap the row length at H3L_LABEL_MAX_CHARS (rows longer than 63 characters were cut by the chart)')
     for fn in ('H3LWrap', 'H3LPanelRows', 'H3LPanelCols', 'H3LPanelBudget'):
         if not re.search(r'\b(int)\s+' + fn + r'\s*\(', lcode):
             bad.append(f'{fn} missing from H4BiasLayers.mqh')

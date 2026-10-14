@@ -577,6 +577,15 @@ void TestBaseline(void)
    PrintFormat("  INFO random walk: %d end bars, summed baseline run length %d, whole-prefix run length differs at %d (synthetic)", ends, total_run, pre_differs);
   }
 
+string NoSpaces(const string text)
+  {
+   string r = "";
+   for(int i = 0; i < StringLen(text); i++)
+      if(StringSubstr(text, i, 1) != " ")
+         r += StringSubstr(text, i, 1);
+   return(r);
+  }
+
 void TestPanelBudget(void)
   {
    Print("--- panel: wrap, size and line budget (the lowest priority lines are dropped, the font is never shrunk)");
@@ -597,13 +606,67 @@ void TestPanelBudget(void)
       joined += (joined != "" ? " " : "") + pc;
      }
    Check(np > 1 && okw == 1 && joined == longt, "a long line wraps at spaces, continuation rows are indented and no word is lost");
+   string very_long = "";
+   for(int w = 0; w < 120; w++)
+      very_long += "word" + IntegerToString(w) + " ";
+   np = H3LWrap(very_long, 40, pieces);
+   int too_wide = 0;
+   for(int i2 = 0; i2 < np; i2++)
+      if(StringLen(pieces[i2]) > 40)
+         too_wide++;
+   Check(np > 12 && too_wide == 0, "a very long explanation wraps into more than 12 rows and no row exceeds the width (no unwrapped remainder)");
+   np = H3LWrap("T003 H4 BIAS - PROPOSAL (client validation pending), visual only, NO TRADING", 30, pieces);
+   too_wide = 0;
+   for(int i3 = 0; i3 < np; i3++)
+      if(StringLen(pieces[i3]) > 30)
+         too_wide++;
+   Check(np == 3 && too_wide == 0, "the 76-character title wraps at spaces into 3 rows of at most 30 columns");
    Check(H3LPanelRows(300, 16, 6, 8) == 17 && H3LPanelRows(120, 16, 6, 8) == 5 && H3LPanelRows(10, 16, 6, 8) == 1,
          "rows from the chart height: 300 px -> 17, 120 px -> 5, tiny chart -> at least 1");
-   int c_wide = H3LPanelCols(1600, 7.0, 6, 8, 50);
-   int c_mid = H3LPanelCols(800, 7.0, 6, 8, 50);
+   int c_wide = H3LPanelCols(2400, 7.0, 6, 8, 50);
+   int c_mid = H3LPanelCols(500, 7.0, 6, 8, 50);
    int c_tiny = H3LPanelCols(200, 7.0, 6, 8, 50);
-   Check(c_wide > c_mid && c_mid > c_tiny && c_tiny >= 20 && c_wide <= 140, "columns follow the chart width (20..140) and shrink with it");
-   Check((c_mid + 2) * 7 <= 800 - 16, "the columns never need more width than the chart has left after the margins");
+   Check(c_wide > c_mid && c_mid > c_tiny && c_tiny >= 20 && c_wide == 60, "columns follow the chart width (20..60) and shrink with it; a huge chart is capped at the label limit");
+   Check(H3LPanelCols(5000, 7.0, 6, 8, 100) <= 60 && H3LPanelCols(1600, 7.0, 6, 8, 50) <= 60, "the column count never exceeds the label limit on any chart width");
+   Check((c_mid + 2) * 7 <= 500 - 16, "the columns never need more width than the chart has left after the margins");
+   // regression (owner photo of 6de979c): the title was shown as '... visual onl' and the bias line as '... BEA', both cut at exactly 63
+   // characters, with the date missing. Every row text is at most H3L_LABEL_MAX_CHARS and nothing is lost in the wrapping.
+   string rl[3];
+   rl[0] = "T003 H4 BIAS - PROPOSAL (client validation pending), visual only, NO TRADING";
+   rl[1] = "T003 bias (PROTOTYPE proposal, not the client's direction): BEAR  since 2026.10.01 12:00";
+   rl[2] = "HISTORICAL as-of 2026.10.06 00:00 (broker/server time, NOT UTC, NOT TradingView) - static, closed bars only";
+   int widths[] = {200, 400, 700, 1000, 1600, 2400, 5000};
+   int bad_len = 0, bad_join = 0, bad_tok = 0;
+   for(int wi = 0; wi < 7; wi++)
+     {
+      int cols = H3LPanelCols(widths[wi], 7.0, 6, 8, 55);
+      for(int ri = 0; ri < 3; ri++)
+        {
+         int n2 = H3LWrap(rl[ri], cols, pieces);
+         string all = "", flat2 = "";
+         for(int q = 0; q < n2; q++)
+           {
+            if(StringLen(pieces[q]) > 60 || StringLen(pieces[q]) > (cols > 8 ? cols : 8))
+               bad_len++;
+            string pc2 = (q > 0 ? StringSubstr(pieces[q], 2) : pieces[q]);
+            all += (all != "" ? " " : "") + pc2;
+            flat2 += "|" + pieces[q] + "|";
+           }
+         if(NoSpaces(all) != NoSpaces(rl[ri]))           // only spaces may differ: a word longer than the row is cut, the rest is kept
+            bad_join++;
+         string toks[];
+         int nt = (ri == 0 ? 3 : (ri == 1 ? 4 : 3));
+         if(ri == 0) {ArrayResize(toks, 3); toks[0] = "visual"; toks[1] = "only,"; toks[2] = "TRADING";}
+         if(ri == 1) {ArrayResize(toks, 4); toks[0] = "BEAR"; toks[1] = "since"; toks[2] = "2026.10.01"; toks[3] = "12:00";}
+         if(ri == 2) {ArrayResize(toks, 3); toks[0] = "2026.10.06"; toks[1] = "00:00"; toks[2] = "TradingView)";}
+         for(int tk = 0; tk < nt; tk++)
+            if(StringFind(flat2, " " + toks[tk]) < 0 && StringFind(flat2, "|" + toks[tk]) < 0 && StringFind(flat2, "|  " + toks[tk]) < 0)
+               bad_tok++;
+        }
+     }
+   Check(bad_len == 0, "regression: no panel row is longer than 60 characters at any chart width (title, bias line, as-of line)");
+   Check(bad_join == 0, "regression: the wrapped title, the bias line with BEAR and the full date and the as-of line lose no character (the pieces rejoin to the original apart from spaces)");
+   Check(bad_tok == 0, "regression: the words visual only, NO TRADING, BEAR, 2026.10.01, 12:00 stay whole words at every width");
    //--- budget
    int pr[] = {0, 0, 1, 2, 3, 3};
    int rw[] = {1, 1, 1, 2, 1, 1};

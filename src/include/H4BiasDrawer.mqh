@@ -862,7 +862,8 @@ private:
    int               m_corner;
    int               m_font;
    int               m_lh;
-   double            m_cw;
+   double            m_cw;         // estimated character width in px (font, screen DPI); End() raises it to the measured width
+   double            m_scale;      // screen DPI / 96: label fonts are scaled by the system, chart pixels are not
    int               m_pad;
    int               m_margin;
    color             m_bgclr;
@@ -903,6 +904,7 @@ public:
       m_font    = 9;
       m_lh      = 16;
       m_cw      = 7.0;
+      m_scale   = 1.0;
       m_pad     = 6;
       m_margin  = 8;
       m_bgclr   = C'16,20,28';
@@ -924,8 +926,12 @@ public:
       m_enabled = enabled;
       m_corner  = corner;
       m_font    = (font_size < 7 ? 7 : (font_size > 24 ? 24 : font_size));
-      m_lh      = (int)(m_font * 1.8);
-      m_cw      = m_font * 0.78;
+      int dpi   = (int)TerminalInfoInteger(TERMINAL_SCREEN_DPI);
+      if(dpi < 96 || dpi > 384)
+         dpi = 96;
+      m_scale   = dpi / 96.0;
+      m_lh      = (int)(m_font * 1.8 * m_scale);
+      m_cw      = m_font * 0.78 * m_scale;
       m_bgclr   = bg;
       m_rn      = 0;
       m_n       = 0;
@@ -934,6 +940,25 @@ public:
       m_last_h  = 0;
       m_hidden  = 0;
       ObjectsDeleteAll(m_chart, m_prefix);        // panel sub-prefix only
+     }
+
+   //--- character width used for the layout: the estimate, or the width measured with the label font when that is larger.
+   //--- Only ever LARGER than the estimate, so a wrong unit in the measurement can make the panel wrap more, never clip.
+   double            CharWidth(void) const
+     {
+      double c = m_cw;
+      string sample = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ.:-/ bear";
+      if(TextSetFont("Consolas", -m_font * 10))
+        {
+         uint tw = 0, th = 0;
+         if(TextGetSize(sample, tw, th) && tw > 0)
+           {
+            double measured = 1.03 * (double)tw / (double)StringLen(sample);
+            if(measured > c && measured <= m_font * 2.0 * m_scale)
+               c = measured;
+           }
+        }
+      return(c);
      }
 
    void              Begin(void)
@@ -964,7 +989,8 @@ public:
       int ch = (int)ChartGetInteger(m_chart, CHART_HEIGHT_IN_PIXELS);
       m_last_w = cw;
       m_last_h = ch;
-      int mc = H3LPanelCols(cw, m_cw, m_pad, m_margin, 55);
+      double cwe = CharWidth();                    // one width for the wrap, the panel size and the position
+      int mc = H3LPanelCols(cw, cwe, m_pad, m_margin, 55);
       int avail = H3LPanelRows(ch, m_lh, m_pad, m_margin);
       string piece[];
       string flat[];
@@ -999,7 +1025,7 @@ public:
       for(int i = 0; i < m_n; i++)
          if(StringLen(m_lines[i]) > maxlen)
             maxlen = StringLen(m_lines[i]);
-      int w = (int)(maxlen * m_cw) + 2 * m_pad;
+      int w = (int)((maxlen + 1) * cwe) + 2 * m_pad;     // one spare character: the last glyph is never cut
       int h = m_n * m_lh + 2 * m_pad;
       int x = m_margin;
       int y = m_margin;
