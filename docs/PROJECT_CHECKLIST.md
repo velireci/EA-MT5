@@ -168,3 +168,14 @@ Status: integrim vetëm për kontroll, jo sinjal ose urdhër; risku dhe ekspozim
 
 - [x] T008 v1.01 korrigjim: vlera efektive e loss tick nga broker probe, Python10pass, kompilim EA/test0/0.
 - [ ] Pronari: helper dhe preview v1.01 pas mospërputhjes property/model.
+
+## T008 — përfundimi i provës së kufizuar
+- [x] Owner MT5 helper4b6a5b5:25/0.
+- [x] Preview brokeri BUY hipotetik:model/broker8.98EUR,.01lot,buxhet10EUR; unknown-policy BLOCK.
+
+## T009 — orari dhe identiteti i ditës
+- [x] Moduli UTC→Tirane, DST, orari, flag-uFriday dhe day_key/midnightUTC; pa reset llogarie.
+- [x] Python6 teste të reja me oracle të pavarur IANA; EA/test kompilim0/0.
+- [ ] Pronari: MT5 T009_SessionTest.
+- [ ] Pronari: preview opsional SESSION_TIRANE_CLOCK, verifikimi i UTC/Tirane dhe portës së seancës.
+Mbetet: orari nuk dërgon ende anulime ose mbyllje; persistence/catchup/lajmet të pandërtuara.

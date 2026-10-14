@@ -1,10 +1,12 @@
 // T008 manually supplied candidate + real broker parameters. NEVER sends orders.
 #property strict
-#property version "1.01"
+#property version "1.02"
 #include "include/SymbolSnapshot.mqh"
 #include "include/BrokerLossCheck.mqh"
+#include "include/SessionPolicy.mqh"
 enum PREVIEW_SIDE {PREVIEW_UNSET=0,PREVIEW_BUY=1,PREVIEW_SELL=-1};
 enum PREVIEW_STATE {STATE_UNKNOWN=0,STATE_CLEAR=1,STATE_BLOCK=2};
+enum PREVIEW_SESSION_SOURCE {SESSION_MANUAL=0,SESSION_TIRANE_CLOCK=1};
 input PREVIEW_SIDE InpDirection=PREVIEW_UNSET;
 input string InpSignalId="";
 input string InpSetupId="";
@@ -16,6 +18,12 @@ input double InpRiskBudget=0; // account currency, NOT percent; no automatic ris
 input double InpLotCap=10; // confirmed client cap; no clamping
 input PREVIEW_STATE InpDataState=STATE_UNKNOWN;
 input PREVIEW_STATE InpSessionState=STATE_UNKNOWN;
+input PREVIEW_SESSION_SOURCE InpSessionSource=SESSION_MANUAL; // auto uses PC-derived UTC, unavailable in tester
+input int InpSessionStartMinute=0;
+input int InpSessionEndMinute=1230;
+input int InpSessionWeekdayMask=62;
+input bool InpFridayCloseEnabled=true;
+input int InpFridayCloseMinute=1260;
 input PREVIEW_STATE InpNewsState=STATE_UNKNOWN;
 input PREVIEW_STATE InpSpreadState=STATE_UNKNOWN;
 input PREVIEW_STATE InpSignalUnused=STATE_UNKNOWN; // CLEAR=externally confirmed unused; BLOCK=duplicate
@@ -98,6 +106,19 @@ void Evaluate()
    snap.data_state=(InpDataState==STATE_CLEAR ? TP_DATA_READY : InpDataState==STATE_BLOCK ? TP_DATA_NOT_READY : TP_DATA_UNKNOWN);
    snap.data_reliable=(InpDataState==STATE_CLEAR);
    snap.session_state=(InpSessionState==STATE_CLEAR ? TP_SESSION_OPEN : InpSessionState==STATE_BLOCK ? TP_SESSION_CLOSED : TP_SESSION_UNKNOWN);
+   if(InpSessionSource==SESSION_TIRANE_CLOCK)
+     {
+      if(MQLInfoInteger(MQL_TESTER)) {StopPreview("SESSION_UTC_UNAVAILABLE_IN_TESTER");return;}
+      SSessionPolicy session;
+      if(!SP_Evaluate(TimeGMT(),InpSessionStartMinute,InpSessionEndMinute,InpSessionWeekdayMask,
+                      InpFridayCloseEnabled,InpFridayCloseMinute,session))
+        {StopPreview("SESSION_CLOCK: "+session.status);return;}
+      snap.session_state=(session.entry_open ? TP_SESSION_OPEN : TP_SESSION_CLOSED);
+      PrintFormat("T009 SESSION UTC %s | Tirane %s | day %d | midnightUTC %s | open=%d cancel_pending_due=%d friday_close_due=%d | PC clock source, no actions",
+                  TimeToString(session.utc,TIME_DATE|TIME_SECONDS),TimeToString(session.local_time,TIME_DATE|TIME_SECONDS),
+                  session.day_key,TimeToString(session.midnight_utc,TIME_DATE|TIME_SECONDS),(int)session.entry_open,
+                  (int)session.cancel_pending_due,(int)session.friday_close_due);
+     }
    snap.news_state=(InpNewsState==STATE_CLEAR ? TP_NEWS_CLEAR : InpNewsState==STATE_BLOCK ? TP_NEWS_BLOCKED : TP_NEWS_UNKNOWN);
    snap.spread_state=(InpSpreadState==STATE_CLEAR ? TP_SPREAD_CLEAR : InpSpreadState==STATE_BLOCK ? TP_SPREAD_BLOCKED : TP_SPREAD_UNKNOWN);
    snap.open_positions=InpOpenPositions;snap.trades_today=InpTradesToday;snap.existing_risk=InpExistingRisk;

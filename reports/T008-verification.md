@@ -15,3 +15,6 @@ T007 relayed owner evidence: 2026.10.14 19:36:11.672 T007_PlanningTest-40fede0 (
 ## v1.01 broker-probe correction
 Owner helper da2a24c MT5:19/0 at2026.10.14 19:47:38.012. Owner defaultEA read real MetaQuotes-Demo XAUUSD/EUR/hedging properties and blocked INPUT_UNSET as intended. Manual hypothetical E4000/SL3990/budget10EUR preview gave model10 vs broker89.79 for volume.1, BUDGET_EXCEEDED and all unknown policies blocked; no orders. This proves the protection, not accuracy of reported LOSS tick property. No new raw broker data added.
 Codex changed adapter to derive candidate-specific average tick loss from minimum-volume OrderCalcProfit, with no property fallback. Final proposed-volume check retained. Python10 pass; MetaEditor EA0/0 (1462ms), test0/0 (684ms). Test now25 assertions: expected count only, owner run pending. Independent review no material findings. New helper/EA actual broker run pending.
+
+## Completed owner read-only scope at4b6a5b5
+Owner supplied20:09:08.740 BUY hypothetical E4000/SL3990,TP4020,.01lot: model8.98EUR,broker8.98EUR,budget10EUR,loss checkOK; permitBLOCK for unknown data/session/news/spread/policies/signal usage. Owner supplied20:11:51.928 T008_BrokerLossTest-4b6a5b5:25passed,0failed. These supersede pending updated-helper/BUY-preview observations only; no actual orders/strategy acceptance claimed.

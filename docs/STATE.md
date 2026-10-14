@@ -2,15 +2,14 @@
 Updated: 2026-10-14 (Europe/Tirane). Snapshot, not a transcript.
 
 ## Resume here
-- T008 v1.01: derive candidate-specific loss tick from read-only OrderCalcProfit at minimum volume; reported property diagnostic only. Owner v1.00 helper19/0 and defaults INPUT_UNSET observed, but manual model10EUR vs broker89.79EUR correctly blocked budget. New Python10pass, EA/testcompile0/0; actual v1.01 terminal rerun pending. Existing pure T005–T007 unchanged.
-- Branch codex/t004-m15-confirmation, PR #4. Codex is sole writer during Claude rate limit; T008 adds a read-only manually supplied broker preview on base40fede0. No existing production logic changed; no merge or trading activation.
-- Read PROJECT_CHECKLIST.md and the relevant STRATEGY_SPEC.md sections before directives. New task tasks/T008-broker-preview.md; usage docs/T008-broker-preview.md; evidence reports/T008-verification.md.
-- T008 XauUsdTradePreview reads actual symbol/quote/loss tick value, calls tested T005–T007, compares read-only OrderCalcProfit with supplied risk budget, and checks externally supplied policy snapshot. Unknown policies block. No automatic signal selection, risk base, exposure/history reconstruction or order APIs.
-- Codex: 8 new Python tests pass; T006/T007/T008 together98 pass. EA and T008_BrokerLossTest compile0 errors/0 warnings. Independent review finding about broker/model combined risk corrected; no outstanding material finding in scoped re-review.
-- NEXT OWNER: run T008_BrokerLossTest; then attach preview EA (defaults INPUT_UNSET expected) before entering a manual candidate. Actual broker preview and MT5 test remain pending. PREVIEW_CHECKS_PASS never means execution permission.
-- T007 owner supplied corrected MT5 log 2026.10.14 19:36:11.672: T007_PlanningTest-40fede0 (XAUUSD,M15),1092 passed/0failed. Earlier d9922581090/2 was fixture initialization; production unchanged by fixture correction.
-- T006 owner MT5 710/0 at559794a, Python47/0, compile0/0. T005 owner MT5 572/0 at67f02e5, Python39/0, compile0/0. Pure scopes only.
-- Open: exact signal/SL/target selectors and direction precedence, risk base/costs, pending lifecycle/persistence and actual orders. T004 updated TimelineTest owner run remains pending. No previously passed suite needs rerun without reason.
+- Branch codex/t004-m15-confirmation, PR4; Codex sole writer during Claude rate limit. T009 session/day-identity helper and opt-in preview session source added on4b6a5b5. No merge, no order activation.
+- Read PROJECT_CHECKLIST.md, relevant STRATEGY_SPEC sections, tasks/T009-session-policy.md and docs/T009-session-policy.md. No repeat of completed scopes without reason.
+- T009: UTC to Tirane using current EU recurrence1996–2099; MonFri00–20:30, Friday21 flag, local day key and midnightUTC. No counters reset/persistence or actions. EA1.02 manual default; auto TimeGMT outside tester only, PC clock must be checked. Static OnInit preview only.
+- Codex6 new Python tests pass including26,280 hourly IANA oracle comparisons; T006–T009106 totalpass. PreviewEA and T009test compile0/0; scoped independent review no material findings.
+- NEXT OWNER: T009_SessionTest inMT5, then preview source SESSION_TIRANE_CLOCK and log T009 SESSION. Other unknown policy gates must stay blocked. Actual T009 terminal proof pending.
+- T008 owner4b6a5b5 helper25/0 and hypothetical BUY preview model/broker8.98EUR at.01lot/budget10EUR, unknown-policy BLOCK. Initial inconsistent symbol tick property replaced by candidate-specific OrderCalcProfit probe; final-volume budget check retained. No orders.
+- T007 owner corrected40fede0 MT51092/0, Python43/0, compile0/0. T006 owner559794a MT5710/0, Python47/0; T005 owner67f02e5 MT5572/0, Python39/0. Pure scopes verified, not strategy/broker execution.
+- Open: signal/FVG/SL/target selection, direction priority, risk base/costs, news, exposure accounting, persistence, pending lifecycle, partial management and actual order APIs. Updated T004 TimelineTest owner run pending.
 
 ## Verified T003 baseline: 6676a01
 - Codex MetaEditor: XauUsdH4Bias, T003_LogicTest and T003_LayersTest each 0 errors / 0 warnings.
