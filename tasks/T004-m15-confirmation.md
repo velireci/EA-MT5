@@ -1,6 +1,6 @@
 # T004 - H4 to M15 confirmation foundation
 
-Status: first round verified in MT5 by the owner (49/0 at 51884ec); selector 37/0 and timeline 19/0 relayed; fourth round (ordinary H4 touch source) implemented, Python-verified, MetaEditor/MT5 UNVERIFIED. Base 6676a01; branch codex/t004-m15-confirmation. Owner authorised Codex as sole writer on 2026-10-14 while Claude is paused. No changes to T001-T003 source or existing tests/tools. No merge or trading.
+Status: first round verified in MT5 by the owner (49/0 at 51884ec); selector 37/0 and timeline 19/0 relayed; fourth round (ordinary H4 touch source) implemented; at 78879cd the owner relayed T004_OrdinaryTest 79/0 in MT5, Codex relayed 94 Python tests and 0/0 compiles of EA v1.02, OrdinaryTest and TimelineTest; the MT5 run of the UPDATED TimelineTest is PENDING; one owner historical EA observation relayed (reports/T004-verification.md), not client validation. Base 6676a01; branch codex/t004-m15-confirmation. Owner authorised Codex as sole writer on 2026-10-14 while Claude is paused. No changes to T001-T003 source or existing tests/tools. No merge or trading.
 
 ## Confirmed flow
 H4 context/FVG -> wick touch allowed -> wait for the touching H4 candle to close -> new M15 structure break -> M15 FVG -> return. After a liquidity event the existing requirement for a new H4 FVG stands. M5 is removed. Sources: DECISIONS S5/E6/N4/N5.

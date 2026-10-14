@@ -73,3 +73,27 @@ EXECUTED HERE (2026-10-14/ session):
 NOT RUN: no C++ compiler or MetaEditor here, so the MQL5 code (H4TouchContext.mqh, T004_OrdinaryTest.mq5, EA v1.02) is UNCOMPILED and its MQL5/Python equivalence is unproven; a Python test only checks that the embedded fixtures in T004_OrdinaryTest.mq5 equal the generated ones. No MT5 execution, no EA attach/display of the ordinary source, no replay-cost measurement, no client-example comparison, no real M15 data for the ordinary path.
 
 Findings about T001-T003 (not changed): none that blocks. Observations: T002 selection ordering never offers zones on the far side of the last closed price; T002 and T003 can disagree (flagged in the EA, not resolved). Open decisions OD1-OD6 are listed in tasks/T004-m15-confirmation.md.
+
+## Relayed evidence at 78879cd (2026-10-14) - NOT our runs
+Sources are kept apart. Nothing below was executed by the writer of this section (documents-only round).
+
+RELAYED, owner MT5: T004_OrdinaryTest at 78879cd: 79 passed, 0 failed. Observed by the owner, not run by us. It covers the MQL5 mirror of the ordinary-source fixtures only; it is not strategy validation.
+
+RELAYED, Codex: ran the 94 Python T004 tests, all pass; compiled EA v1.02, T004_OrdinaryTest and T004_TimelineTest with 0 errors, 0 warnings; its review found no material defect in this round. The MT5 run of the UPDATED T004_TimelineTest is still PENDING (the earlier 19/0 at cfa5f00 does not cover the changed script).
+
+RELAYED, owner EA observation (historical replay, server time). Inputs: InpContextSource = M4_T002_TOUCH_AFTER_LOSS_PROPOSAL, InpM15Level = M4_LATEST_FRACTAL_PROPOSAL, InpFvgTiming = M4_A_AFTER_BOS_PROPOSAL (all three are UNVALIDATED technical proposals). Observed sequence:
+- 2026.09.18 04:00 context T002TOUCH-202609180400-F202609170800U opens, direction BUY, state WAIT_BREAK. T003 shows BEAR; the T002/T003 disagreement is displayed and NOT resolved automatically.
+- 06:45 BOS_CANDIDATE, known from the 06:30 bar.
+- 08:00 FVG_CANDIDATE, known from the 07:45 bar; state WAIT_RETURN.
+- 09:45 candidate M15F1789722000U confirmed from the 09:30 bar.
+- 10:00 RETURN_OBSERVED for that candidate, from the 09:45 bar.
+- 11:30 FVG_INVALIDATED for the same candidate, from the 11:15 bar.
+- 12:00 the context closes with ERL_TAKEN; state WAIT_CONTEXT.
+
+Reading of this observation (limits stated explicitly):
+- It shows the proposals behaving as specified in a sequence, including the OD1 closing reason ERL_TAKEN. It is observed behaviour of the PROPOSALS only.
+- It is NOT client validation. RETURN_OBSERVED is a fact, NOT entry permission.
+- It does NOT decide T002 versus T003 priority (the disagreement stays flagged).
+- It fixes NO entry price, NO SL placement and NO risk; no price from it may be used as a rule.
+- OD1-OD6 remain UNVALIDATED technical proposals; Q04 and the other open statuses are unchanged.
+- T004 and the strategy are NOT declared fully validated. Replay cost of the ordinary scan remains unmeasured; EA display/log evidence is a single owner observation, not a screenshot comparison with the client.

@@ -7,8 +7,10 @@ Updated: 2026-10-14 (Europe/Tirane). Snapshot, not a transcript.
 - Delivered: pure H4-to-M15 observer, disabled-by-default M15 swing proposal, chronological read-only EA XauUsdM15Observer v1.02, and (round 4) the ORDINARY H4 FVG-touch context source H4TouchContext.mqh, distinct from the T003 RECONFIRMED source. No orders, SL/TP, risk or M5. All events are REPLAY facts; RETURN_OBSERVED is not entry permission.
 - Four opt-ins, all UNSELECTED by default: context source (T003 RECONF, or ordinary T002 touch with AFTER_LOSS / FIRST_ONLY re-touch policy), M15 level (latest fractal), FVG timing (A at/after BOS). Ordinary source rules are TECHNICAL PROPOSALS (open decisions OD1-OD6 in the task file). T002/T003 direction disagreement is flagged, never resolved. Q04 stays open.
 - Relayed owner MT5 evidence (not our runs): LogicTest 49/0 at 51884ec; SelectorTest 37/0 at 786568a; TimelineTest 19/0 at cfa5f00; EA eedbe92 historical 2026.10.06: H4 BEAR/RECONFIRMED/CONVERGED, RETURN_OBSERVED, BOS 4152.00, 8 FVGs, 69 facts, survived M15->H4->M15 (rebuild after timeframe change verified, not strategy validity). Codex relayed: Python 67 tests, EA and updated Timeline script compile 0/0; updated TimelineTest MT5 run pending.
-- Round 4 executed in this environment: Python 94 tests (67 + 27 new) pass; T001-T003 checks rerun; no C++ compiler. MetaEditor compile of EA v1.02, H4TouchContext.mqh and T004_OrdinaryTest.mq5: UNVERIFIED. MT5 runs UNVERIFIED.
-- Next action: Codex compiles XauUsdM15Observer, T004_OrdinaryTest and the updated T004_TimelineTest in MetaEditor; the owner runs both scripts in MT5, then observes the EA historically with source 2 or 3 plus the other two opt-ins. Replay cost of the ordinary scan is unmeasured.
+- Round 4 executed in an earlier session here: Python 94 tests pass; T001-T003 checks rerun.
+- Relayed at 78879cd (owner/Codex, NOT our runs): owner MT5 T004_OrdinaryTest 79 passed, 0 failed; Codex Python 94 pass, EA v1.02 + OrdinaryTest + TimelineTest compile 0 errors / 0 warnings, review found no material defect this round. MT5 run of the UPDATED TimelineTest is still PENDING.
+- Relayed owner EA observation (historical replay, server time; sources M4_T002_TOUCH_AFTER_LOSS / M4_LATEST_FRACTAL / M4_A_AFTER_BOS, all UNVALIDATED proposals): 09.18 04:00 context T002TOUCH-202609180400-F202609170800U BUY, WAIT_BREAK (T003 BEAR, disagreement shown, not resolved); 06:45 BOS_CANDIDATE (06:30 bar); 08:00 FVG_CANDIDATE (07:45 bar), WAIT_RETURN; 09:45 candidate M15F1789722000U confirmed (09:30 bar); 10:00 RETURN_OBSERVED (09:45 bar); 11:30 FVG_INVALIDATED (11:15 bar); 12:00 context closes ERL_TAKEN, WAIT_CONTEXT. It is observed behaviour of the proposals only: NOT client validation, RETURN_OBSERVED is NOT entry permission, does NOT decide T002 vs T003 priority, fixes NO entry price, SL or risk. OD1-OD6 stay unvalidated proposals; T004 and the strategy are NOT fully validated.
+- Next action: owner runs the updated TimelineTest in MT5. Separately, review tasks/T005-entry-sl-tp-plan.md (planning only) and decide whether the bounded "trade geometry" step (section D) is assigned. No order code until the blocking items in that plan are answered.
 - Claude must not continue T004 writing on the T003 branch.
 
 ## Verified T003 baseline: 6676a01
@@ -48,7 +50,7 @@ Updated: 2026-10-14 (Europe/Tirane). Snapshot, not a transcript.
 ## Open choices for relevant later steps
 - Q04: actual M15 structural swing, break definition and FVG association/timing.
 - Direction-source selection when prototype bias contradicts T002; structural-versus-local H4 swing.
-- Q05/Q07-Q11: entry edge, SL/buffer, target, sizing, costs, partial exit, ownership/restart, limits/session/news/expiry and re-entry.
+- Q05/Q07-Q11: entry edge, SL/buffer, target, sizing, costs, partial exit, ownership/restart, limits/session/news/expiry and re-entry. Classified in tasks/T005-entry-sl-tp-plan.md (planning, not validated).
 - Ask only what blocks the current step; build independent infrastructure. Never silently invent a client rule.
 
 ## Environment and handoff
