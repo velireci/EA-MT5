@@ -35,4 +35,18 @@ Executed by Codex:
 - Independent read-only review found no actionable selector defect and independently ran the then-current 54 tests successfully. Two suggested coverage additions (post-gap recovery and asymmetric Left/Right) were added; final 56-test result is Codex's run.
 - Literal BUY/SELL full paths: pre-context swing -> post-H4-close BOS candidate -> eligible FVG -> subsequent return. Stale pre-context body-broken levels do not create a fresh BOS. Covered prefix/future exclusion, ambiguity/ties, window identity, latest versus highest, fallback, lookback boundaries, invalid input, gaps and configuration.
 
-NOT RUN: actual MT5 T004_SelectorTest. No real M15 CSV is available; synthetic paths are not client-chart agreement. More history can reveal an older still-unbroken swing, so the reported lookback is a limit rather than a history-convergence claim.
+Owner MT5 T004_SelectorTest-786568a: 37 passed, 0 failed, log supplied `2026.10.14 14:32:33.054`. Observed by owner and relayed here, not run by Codex. No real M15 CSV is available; synthetic paths are not client-chart agreement. More history can reveal an older still-unbroken swing, so the reported lookback is a limit rather than a history-convergence claim.
+
+## Third round: chronological observer EA (runtime pending)
+Added pure M15Timeline.mqh, a separate Python timeline reference/tests, T004_TimelineTest.mq5 and XauUsdM15Observer.mq5. Existing core observer/bridge/selector and earlier tests remain unchanged. Only T003 RECONFIRMED contexts are integrated; ordinary H4 FVG touch contexts are not yet supplied by this EA.
+
+Executed by Codex:
+- Python 66 tests passed, 0 failures (33 observer + 23 selector + 10 timeline). Timeline failures were observed before implementation, and the same-M15-cut H4 rebuild case failed before the lifecycle helper fix.
+- MetaEditor T004_TimelineTest: 0 errors, 0 warnings, 2475 ms.
+- MetaEditor XauUsdM15Observer: 0 errors, 0 warnings, 10538 ms.
+- Independent read-only review found missing current-level drawing. Corrected it using a fresh NEXT-bar selection over all copied closed M15 bars (including consumption by the latest bar); no stale pre-bar selection is plotted. Reviewer verified the fix, the rebuild helper and reran all 66 Python tests successfully, with no outstanding concrete finding.
+- Scan of the new EA/timeline/test found no trading API, live price or clock-based price input. CopyRates/TimeframeWatcher feed closed bars; GetTickCount is used only for replay duration. ObjectsDeleteAll is limited to velo_t004_.
+
+Temporal behavior: initial context uses the H4 prefix closed by replay start, later snapshots use H4 prefixes at each close. Equal-close H4 updates precede M15, and final H4 updates are flushed even without an M15 bar. Full replay is repeated on new M15/H4 boundaries and after recovery. All events are REPLAY facts, never NEW notifications or entry permission. Initial truncated replay does not claim original M15 setup history.
+
+NOT RUN: actual MT5 TimelineTest, EA attach/display, historical snapshot observation, live timer/data-loading/clear-recovery, object ownership and runtime cost. The 10538 ms above is compilation time, not replay cost. Same-cut unannounced historical revisions require re-attachment or the next live boundary; historical mode is static after a successful copy. No private M15 CSV or client-example matching is claimed. Compile logs accompany the sources.

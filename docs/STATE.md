@@ -5,11 +5,13 @@ Updated: 2026-10-14 (Europe/Tirane). Snapshot, not a transcript.
 - Codex is the sole writer for the first T004 round, authorised by the owner while Claude is paused.
 - T004 branch: codex/t004-m15-confirmation, based on exact T003 commit 6676a01b63992261b63a9938ace17300658a012f.
 - Read tasks/T004-m15-confirmation.md and reports/T004-verification.md before continuing.
-- Delivered scope: pure H4-to-M15 observer, external level interface, T003 context adapter and a separate disabled-by-default experimental latest-unbroken-fractal candidate selector. No live multi-timeframe EA integration or trading.
+- Delivered scope: pure H4-to-M15 observer, external level interface, T003 adapter, disabled-by-default swing proposal and a separate chronological read-only observer EA. Only T003 RECONFIRMED contexts are integrated; ordinary H4 touch path remains unfinished. No trading.
 - Default source and timing gates block. The opt-in FVG timing proposal is candle A at/after BOS candle. RETURN_OBSERVED is not entry permission.
 - Owner ran T004_LogicTest-51884ec in MT5: 49 passed, 0 failed (2026.10.14 14:21:21.639, relayed). Observer/bridge/source script remain unchanged since that version.
-- Selector round: Codex Python 56/0 (33 observer + 23 selector); MetaEditor T004_SelectorTest 0 errors / 0 warnings. Selector MT5 execution pending. Independent review found no actionable defect in the selector scope.
-- Next action: owner runs T004_SelectorTest in MT5. Then review M15 structural selection/timing and integrate a chronological observer without silently choosing between T002/T003. Q04 remains open; a fractal candidate is not client approval.
+- Owner ran T004_SelectorTest-786568a in MT5: 37 passed, 0 failed (2026.10.14 14:32:33.054, relayed).
+- Current round: Codex Python 66/0; MetaEditor T004_TimelineTest and XauUsdM15Observer each 0 errors / 0 warnings. Read-only review found a missing current-level drawing; fixed and re-reviewed with no outstanding concrete findings.
+- Next action: owner runs TimelineTest in MT5, then attaches XauUsdM15Observer on a new XAUUSD M15 chart for historical 2026.10.06 00:00, explicitly opting into all three proposals. EA runtime/chart/loading/recovery and replay cost are UNVERIFIED.
+- All EA events are REPLAY facts, never NEW or entry permission. Historical mode is static after successful copy; live replays on boundaries/recovery. Q04 remains open; a fractal candidate is not client approval. See docs/T004-m15.md for settings and limits.
 - Claude must switch to this branch only after handoff; do not continue writing T004 on the T003 branch.
 
 ## Verified T003 baseline: 6676a01
