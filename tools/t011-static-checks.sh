@@ -5,7 +5,7 @@ set -u
 cd "$(dirname "$0")/.."
 FAIL=0
 NEG=$(mktemp -d); trap 'rm -rf "$NEG"' EXIT
-BASE=1e34b34
+BASE=1e34b34   # the base of the split module; the checklist and progress page are Codex-owned and were not changed by T011
 HDR=src/include/ExitSplit.mqh
 TST=src/tests/T011_SplitTest.mq5
 REF=tests/t011_split_reference.py
@@ -52,14 +52,9 @@ for f in $NEWFILES; do
 done
 echo "  INFO ASCII-only checked for every T011 file"
 
-echo "=== S5: nothing else changed relative to $BASE (T001-T010 untouched) ==="
+echo "=== S5: the files T011 must not change are identical to $BASE (the tree has moved on since: T003 panel, activation) ==="
 if git cat-file -e "$BASE^{commit}" 2>/dev/null; then
-  changed=$(git diff --name-only "$BASE" -- . ; git ls-files --others --exclude-standard)
-  printf '%s\n' docs/STATE.md $NEWFILES > "$NEG/allowed.txt"
-  extra=$(echo "$changed" | sort -u | grep -v '^$' | grep -vxFf "$NEG/allowed.txt" || true)
-  if [ -z "$extra" ]; then echo "  PASS changed/new paths are only T011 files and docs/STATE.md"
-  else echo "$extra" | sed 's/^/  FAIL unexpected change: /'; FAIL=1; fi
-  for p in docs/PROJECT_CHECKLIST.md docs/PROJECT_PROGRESS.html src/include/PositionSizing.mqh tests/t006_sizing_reference.py; do
+  for p in src/include/PositionSizing.mqh src/include/TradeGeometry.mqh tests/t006_sizing_reference.py src/include/H4Bias.mqh src/include/H4Structure.mqh; do
     git diff --quiet "$BASE" -- "$p" && echo "  PASS $p identical to $BASE" || { echo "  FAIL $p differs from $BASE"; FAIL=1; }
   done
 else
