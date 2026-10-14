@@ -107,8 +107,8 @@ neg "trade class in the module" trading $MOD "bool PS_Compute(" "CTrade trade; b
 neg "symbol read in the module" nofeed $MOD "double loss_per_lot=(double)stop_ticks*tick_value;" "double tv=SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_VALUE); double loss_per_lot=(double)stop_ticks*tick_value;" "SymbolInfoDouble"
 neg "account read in the module" nofeed $MOD "double loss_per_lot=(double)stop_ticks*tick_value;" "double eq=AccountInfoDouble(ACCOUNT_EQUITY); double loss_per_lot=(double)stop_ticks*tick_value;" "AccountInfoDouble"
 neg "wall clock in the module" nofeed $MOD "double loss_per_lot=(double)stop_ticks*tick_value;" "datetime now=TimeCurrent(); double loss_per_lot=(double)stop_ticks*tick_value;" "TimeCurrent"
-neg "hidden 0.01 step in the module" nodefaults $MOD "long cap_steps=(long)MathFloor(cap_x+PS_EPS_STEPS);" "long cap_steps=(long)MathFloor(cap_x+PS_EPS_STEPS); double hidden_step=0.01;" "hidden default literal 0.01" $REF
-neg "hidden 10-lot cap in the module" nodefaults $MOD "long cap_steps=(long)MathFloor(cap_x+PS_EPS_STEPS);" "long cap_steps=(long)MathFloor(cap_x+PS_EPS_STEPS); double hidden_cap=10.0;" "hidden default literal 10.0" $REF
+neg "hidden 0.01 step in the module" nodefaults $MOD "long cap_steps=(long)MathFloor(cap_x+PS_CAP_ULPS*DBL_EPSILON*MathMax(1.0,cap_x));" "long cap_steps=(long)MathFloor(cap_x+PS_CAP_ULPS*DBL_EPSILON*MathMax(1.0,cap_x)); double hidden_step=0.01;" "hidden default literal 0.01" $REF
+neg "hidden 10-lot cap in the module" nodefaults $MOD "long cap_steps=(long)MathFloor(cap_x+PS_CAP_ULPS*DBL_EPSILON*MathMax(1.0,cap_x));" "long cap_steps=(long)MathFloor(cap_x+PS_CAP_ULPS*DBL_EPSILON*MathMax(1.0,cap_x)); double hidden_cap=10.0;" "hidden default literal 10.0" $REF
 neg "costs label removed from code" contract $MOD 'string PS_CostsLabel() {return("COSTS_NOT_MODELLED");}' 'string PS_CostsLabel() {return("");}' "COSTS_NOT_MODELLED" $REF
 neg "no-reduction label removed from code" contract $MOD 'return("NO_REDUCTION_TO_LIMIT (a limit' 'return("(a limit' "NO_REDUCTION_TO_LIMIT" $REF
 neg "status dropped from the MQL5 enum" parity $MOD "   PS_SKIP_ABOVE_CAP
@@ -121,6 +121,8 @@ neg "NormalizeDouble on the volume in MQL5" guards $MOD "out.volume_out=(double)
 neg "reduced_to_limit field added in MQL5" guards $MOD "   double risk_unused;" "   double risk_unused;
    bool reduced_to_limit;" "reduced_to_limit" $REF
 negpy "round down replaced by ceil in Python" guards "n = int(math.floor(raw_steps + EPS_STEPS))" "n = int(math.ceil(raw_steps + EPS_STEPS))" "sizing expression missing in Python"
+neg "cap tolerance back to the 1e-6 step in MQL5" guards $MOD "long cap_steps=(long)MathFloor(cap_x+PS_CAP_ULPS*DBL_EPSILON*MathMax(1.0,cap_x));" "long cap_steps=(long)MathFloor(cap_x+PS_EPS_STEPS);" "sizing expression missing in MQL5" $REF
+negpy "cap tolerance back to the 1e-6 step in Python" guards "cap_x + CAP_ULPS * DBL_EPSILON * max(1.0, cap_x)" "cap_x + EPS_STEPS" "sizing expression missing in Python"
 negpy "cap checked before max in Python" guards "    if n > max_steps:" "    if n > cap_steps:" "limits must be checked min -> max -> cap"
 negpy "Python tolerance constant differs" parity "EPS_STEPS = 1e-6          #" "EPS_STEPS = 1e-5          #" "PS_EPS_STEPS / EPS_STEPS differs"
 # syntax / format / ASCII controls use the shared checkers

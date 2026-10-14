@@ -32,8 +32,13 @@
 //
 // LIMITS (integer steps, after the rounding, first conflict wins):
 //  n < min_steps -> SKIP_BELOW_MIN_VOLUME (includes n = 0) ; n > max_steps -> SKIP_ABOVE_MAX_VOLUME (broker maximum,
-//  checked BEFORE the cap) ; n > cap_steps -> SKIP_ABOVE_CAP, cap_steps = floor(cap_lots/volume_step + EPS_STEPS): the
-//  cap need NOT be on the step grid, it is only a comparison bound and never a volume. Max and cap are NOT merged into one
+//  checked BEFORE the cap) ; n > cap_steps -> SKIP_ABOVE_CAP, x = cap_lots/volume_step,
+//  cap_steps = floor(x + PS_CAP_ULPS*DBL_EPSILON*max(1,x)): the cap need NOT be on the step grid, it is only a comparison
+//  bound and never a volume. CAP RULE: the 1e-6 step PS_EPS_STEPS is NOT used for the cap; it is ~10^9 times larger than
+//  binary noise and would round a cap genuinely below a step boundary UP (0.29999995/0.1 = 2.9999995 -> 3). The cap
+//  tolerance is a few ulps of x: it absorbs division noise (0.3/0.1 = 2.9999999999999996 -> 3) but not a real shortfall.
+//  The comparison is in integer steps; volume_out = n*step may carry binary noise above a cap exactly on the grid
+//  (0.30000000000000004 for cap 0.3), accepted and documented. Never reduced to fit the cap (SKIP). Max and cap are NOT merged into one
 //  smaller limit. A cap below volume_min is valid input: every sizing is then a SKIP.
 //
 // STATUSES, first failure wins, in this order (INVALID_INPUT reasons start with a fixed tag):
@@ -57,6 +62,7 @@
 #include "TradeGeometry.mqh"
 
 #define PS_EPS_STEPS 1e-6
+#define PS_CAP_ULPS 4.0
 #define PS_MAX_STEPS 1e9
 #define PS_MAX_RAW_STEPS 1e15
 #define PS_MAX_STOP_TICKS 1e13
@@ -186,7 +192,7 @@ bool PS_Compute(const STgResult &geo,const double risk_budget,const double tick_
    long max_steps=PS_GridSteps(volume_max,volume_step);
    if(max_steps<0)
       return(PS_Fail(out,PS_INVALID_INPUT,StringFormat("VOLUME_NOT_ON_GRID: volume_max %.10g is not a multiple of step %.10g",volume_max,volume_step)));
-   long cap_steps=(long)MathFloor(cap_x+PS_EPS_STEPS);
+   long cap_steps=(long)MathFloor(cap_x+PS_CAP_ULPS*DBL_EPSILON*MathMax(1.0,cap_x));
 
    // linear model
    double loss_per_lot=(double)stop_ticks*tick_value;

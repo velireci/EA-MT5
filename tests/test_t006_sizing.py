@@ -404,6 +404,63 @@ class LimitTests(unittest.TestCase):
         r = p.size(self.GEO, 187.5, 1.0, 0.1, 0.1, 100.0, 0.29)
         self.assertEqual((r.status, r.cap_steps), ('SKIP_ABOVE_CAP', 2))
 
+    def cap_steps_of(self, cap, step):
+        """cap_steps reported for a sizing of exactly one step (always inside min and max)."""
+        r = p.size(self.GEO, step * 625.0, 1.0, step, step, 1e6 * step, cap)
+        self.assertIn(r.status, ('OK', 'SKIP_ABOVE_CAP'))
+        return r.cap_steps
+
+    def test_cap_just_below_a_step_boundary_is_not_rounded_up(self):
+        # raw 0.3 lots = 3 steps of 0.1 (budget 187.5 on 625 ticks, loss per lot 625): hand-computed
+        for geo in (geo_ticks(195040, 194415), geo_ticks(231020, 231645)):          # BUY and SELL tick pairs: 625 stop ticks
+            with self.subTest(geo=geo):
+                a = p.size(geo, 187.5, 1.0, 0.1, 0.1, 100.0, 0.29999995)    # 2.9999995 steps: a real 5e-7 step shortfall
+                self.assertEqual((a.status, a.cap_steps, a.steps_rounded, a.volume_out), ('SKIP_ABOVE_CAP', 2, 3, 0.0))
+                b = p.size(geo, 187.5, 1.0, 0.1, 0.1, 100.0, 0.3)             # 0.3/0.1 = 2.9999999999999996: noise, 3 steps
+                self.assertEqual((b.status, b.cap_steps, b.steps_rounded), ('OK', 3, 3))
+                self.assertLessEqual(abs(b.volume_out - 0.3), 1e-15)         # may be 0.30000000000000004: accepted noise
+                c = p.size(geo, 187.5, 1.0, 0.1, 0.1, 100.0, 0.30000005)
+                self.assertEqual((c.status, c.cap_steps, c.steps_rounded), ('OK', 3, 3))
+
+    def test_reported_defect_from_the_t005_geometry(self):
+        # BUY E=2000 SL=1999 tick .01 digits 2 = 100 stop ticks, budget 30, tick value 1, step .1: raw .3 lots, cap .29999995
+        geo = g5.compute('BUY', 2000.0, 1999.0, 0.01, 2, 0.01, 0)
+        r = p.size(geo, 30.0, 1.0, 0.1, 0.1, 10.0, 0.29999995)
+        self.assertEqual((r.status, r.cap_steps, r.steps_rounded, r.volume_out), ('SKIP_ABOVE_CAP', 2, 3, 0.0))
+
+    def test_cap_tolerance_is_ulps_not_the_step_tolerance(self):
+        self.assertEqual(p.CAP_ULPS, 4.0)
+        self.assertEqual(p.DBL_EPSILON, 2.0 ** -52)
+        for step, k in ((0.01, 3), (0.05, 3), (1.0, 3), (0.001, 5000000), (0.5, 3)):
+            with self.subTest(step=step):
+                self.assertEqual(self.cap_steps_of(k * step, step), k)                       # on the grid
+                self.assertEqual(self.cap_steps_of((k - 5e-7) * step, step), k - 1)           # 5e-7 step below: NOT absorbed
+                self.assertEqual(self.cap_steps_of((k + 5e-7) * step, step), k)               # slightly above
+        # large x: 1e-6 step below 5e6 steps is still a shortfall (eps is only 4.4e-9 there)
+        self.assertEqual(self.cap_steps_of(4999.999999999, 0.001), 4999999)
+        self.assertEqual(self.cap_steps_of(5000.0, 0.001), 5000000)
+
+    def test_binary_noise_on_a_grid_boundary_is_not_misclassified_as_below(self):
+        self.assertEqual(0.7 / 0.1, 6.999999999999999)
+        self.assertEqual(self.cap_steps_of(0.7, 0.1), 7)
+        self.assertEqual(self.cap_steps_of(0.1 + 0.2, 0.1), 3)                               # 0.30000000000000004
+        self.assertEqual(self.cap_steps_of(0.3, 0.1), 3)
+        self.assertEqual(self.cap_steps_of(0.15, 0.05), 3)                                   # 2.9999999999999996
+        for step in (0.01, 0.02, 0.05, 0.1, 0.25, 0.001):                                    # every on-grid cap k*step, sums and products
+            for k in range(1, 3000):
+                self.assertEqual(self.cap_steps_of(k * step, step), k, (step, k))
+                s = 0.0
+                if k <= 10:
+                    for _ in range(k):
+                        s += step                                                            # accumulated float noise
+                    self.assertEqual(self.cap_steps_of(s, step), k, (step, k, 'sum'))
+
+    def test_cap_below_the_minimum_always_skips(self):
+        r = p.size(self.GEO, 1234.56, 1.0, 0.1, 0.1, 100.0, 0.05)       # cap_steps 0, min 1 step
+        self.assertEqual((r.status, r.cap_steps), ('SKIP_ABOVE_CAP', 0))
+        r = p.size(self.GEO, 1234.56, 1.0, 0.1, 0.1, 100.0, 0.09999999)
+        self.assertEqual((r.status, r.cap_steps), ('SKIP_ABOVE_CAP', 0))
+
     def test_cap_and_max_are_checked_separately_max_first(self):
         self.assertEqual(self.go(vmax=100.0, cap=1.5).status, 'SKIP_ABOVE_CAP')          # cap smaller than max
         self.assertEqual(self.go(vmax=1.5, cap=10.0).status, 'SKIP_ABOVE_MAX_VOLUME')    # cap greater than max
@@ -466,7 +523,7 @@ def load_mutant(old, new, count=1):
 ROUND = ("    n = int(math.floor(raw_steps + EPS_STEPS))\n    while n > 0 and n * risk_per_step > risk_budget:\n"
          "        n -= 1\n")
 LIMITS = "    # LIMITS: a conflict is a skip, never a reduction\n"
-CAPLINE = "    cap_steps = int(math.floor(cap_x + EPS_STEPS))\n"
+CAPLINE = "    cap_steps = int(math.floor(cap_x + CAP_ULPS * DBL_EPSILON * max(1.0, cap_x)))\n"
 MUTANTS = {
     'round UP instead of down': (ROUND, "    n = int(math.ceil(raw_steps))\n"),
     'no never-exceed guard loop': (ROUND, "    n = int(math.floor(raw_steps + EPS_STEPS))\n"),
@@ -482,6 +539,8 @@ MUTANTS = {
     'no grid check for volume_min': ("    if min_steps < 0:\n", "    if False:\n"),
     'no grid check for volume_max': ("    if max_steps < 0:\n", "    if False:\n"),
     'no step range guard': ("or max_x > MAX_STEPS or cap_x > MAX_STEPS:", "or False:"),
+    'cap tolerance back to the 1e-6 step': (CAPLINE, "    cap_steps = int(math.floor(cap_x + EPS_STEPS))\n"),
+    'cap tolerance 1e-6 step relative to x': (CAPLINE, "    cap_steps = int(math.floor(cap_x + EPS_STEPS * max(1.0, cap_x)))\n"),
     'cap floored without tolerance': (CAPLINE, "    cap_steps = int(math.floor(cap_x))\n"),
 }
 
@@ -527,6 +586,11 @@ class MutationTests(unittest.TestCase):
         self.assertIn('BUY_TICKVALUE_08', table_failures(load_mutant(*MUTANTS['ignore tick_value'])))
         self.assertIn('BUY_STEP_01', table_failures(load_mutant(*MUTANTS['assume volume_step 0.01'])))
         self.assertIn('BUY_EPS_BUMP_NEEDED', table_failures(load_mutant(*MUTANTS['no float tolerance in floor'])))
+        for name in ('cap tolerance back to the 1e-6 step', 'cap tolerance 1e-6 step relative to x'):
+            bad = table_failures(load_mutant(*MUTANTS[name]))
+            self.assertIn('BUY_CAP_JUST_BELOW_STEP01', bad, name)
+            self.assertIn('SELL_CAP_JUST_BELOW_STEP01', bad, name)
+        self.assertIn('BUY_CAP_NOISE_07', table_failures(load_mutant(*MUTANTS['cap floored without tolerance'])))
         self.assertTrue(by)
 
 

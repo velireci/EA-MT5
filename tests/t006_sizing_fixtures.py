@@ -24,7 +24,8 @@ candidate and volume_out/risk are 0; invalid and geometry rows have exp None (no
     .008 lots = 0 steps (rounds to zero); budget 62.5 -> .10 lots exactly the minimum; max 1.5 -> 150 < 197 skip; max 1.97 ok;
     cap 1.5 skip; cap 1.97 ok; cap 1.975 (off grid) floors to 197 steps: ok; cap 1.969 floors to 196: skip; both exceeded:
     the broker maximum is reported first; cap .05 below min .10: 197 > 5 steps: skip above cap. Float-sensitive cap 0.3 with step .1 (0.3/0.1 = 2.9999999999999996)
-    still allows 3 steps.
+    still allows 3 steps.  Cap rule: cap_steps = floor(x + 4*DBL_EPSILON*max(1, x)), x = cap/step; cap .29999995 (x = 2.9999995)
+    is 2 steps and the 3-step candidate is SKIP_ABOVE_CAP; cap .3 and .30000005 allow 3 (see the cap-rule block below).
 """
 
 BUY, SELL, HOLD = 'BUY', 'SELL', 'HOLD'
@@ -89,6 +90,33 @@ case('BUY_EXACTLY_CAP', GA_BUY, P(cap=1.97), OKS, (625, 625.0, 197, 1.97, 1231.2
 case('BUY_CAP_OFF_GRID_ABOVE', GA_BUY, P(cap=1.975), OKS, (625, 625.0, 197, 1.97, 1231.25))
 case('BUY_CAP_OFF_GRID_BELOW', GA_BUY, P(cap=1.969), ACAP, (625, 625.0, 197, 0.0, 0.0))
 case('BUY_CAP_FLOAT_03', GA_BUY, P(budget=187.5, vmin=0.1, step=0.1, cap=0.3), OKS, (625, 625.0, 3, 0.3, 187.5))
+# --- cap rule: floor(x + 4 ulp * max(1, x)), x = cap/step; a real shortfall (5e-7 step) is NOT absorbed ------
+# step .1, budget 187.5 on 625 ticks = raw .3 lots = 3 steps (risk 3*.1*625 = 187.5): cap .29999995 = 2.9999995 steps -> 2.
+case('BUY_CAP_JUST_BELOW_STEP01', GA_BUY, P(budget=187.5, vmin=0.1, step=0.1, cap=0.29999995), ACAP, (625, 625.0, 3, 0.0, 0.0))
+case('BUY_CAP_ON_GRID_STEP01', GA_BUY, P(budget=187.5, vmin=0.1, step=0.1, cap=0.3), OKS, (625, 625.0, 3, 0.3, 187.5))
+case('BUY_CAP_JUST_ABOVE_STEP01', GA_BUY, P(budget=187.5, vmin=0.1, step=0.1, cap=0.30000005), OKS, (625, 625.0, 3, 0.3, 187.5))
+case('SELL_CAP_JUST_BELOW_STEP01', GA_SELL, P(budget=187.5, vmin=0.1, step=0.1, cap=0.29999995), ACAP, (625, 625.0, 3, 0.0, 0.0))
+case('SELL_CAP_ON_GRID_STEP01', GA_SELL, P(budget=187.5, vmin=0.1, step=0.1, cap=0.3), OKS, (625, 625.0, 3, 0.3, 187.5))
+case('SELL_CAP_JUST_ABOVE_STEP01', GA_SELL, P(budget=187.5, vmin=0.1, step=0.1, cap=0.30000005), OKS, (625, 625.0, 3, 0.3, 187.5))
+# step .01, budget 18.75 = raw .03 lots = 3 steps (risk 3*.01*625 = 18.75): cap .0299999 = 2.99999 steps -> 2.
+case('BUY_CAP_JUST_BELOW_STEP001', GA_BUY, P(budget=18.75, step=0.01, cap=0.0299999), ACAP, (625, 625.0, 3, 0.0, 0.0))
+case('BUY_CAP_ON_GRID_STEP001', GA_BUY, P(budget=18.75, step=0.01, cap=0.03), OKS, (625, 625.0, 3, 0.03, 18.75))
+case('BUY_CAP_JUST_ABOVE_STEP001', GA_BUY, P(budget=18.75, step=0.01, cap=0.0300001), OKS, (625, 625.0, 3, 0.03, 18.75))
+case('SELL_CAP_JUST_BELOW_STEP001', GA_SELL, P(budget=18.75, step=0.01, cap=0.0299999), ACAP, (625, 625.0, 3, 0.0, 0.0))
+case('SELL_CAP_ON_GRID_STEP001', GA_SELL, P(budget=18.75, step=0.01, cap=0.03), OKS, (625, 625.0, 3, 0.03, 18.75))
+# step .05, budget 93.75 = raw .15 lots = 3 steps (risk 3*.05*625 = 93.75): cap .1499999 = 2.999998 steps -> 2;
+# 0.15/0.05 = 2.9999999999999996 is binary noise and stays 3.
+case('BUY_CAP_JUST_BELOW_STEP005', GA_BUY, P(budget=93.75, vmin=0.05, step=0.05, cap=0.1499999), ACAP, (625, 625.0, 3, 0.0, 0.0))
+case('BUY_CAP_ON_GRID_STEP005', GA_BUY, P(budget=93.75, vmin=0.05, step=0.05, cap=0.15), OKS, (625, 625.0, 3, 0.15, 93.75))
+case('BUY_CAP_JUST_ABOVE_STEP005', GA_BUY, P(budget=93.75, vmin=0.05, step=0.05, cap=0.1500001), OKS, (625, 625.0, 3, 0.15, 93.75))
+# large x: step .001, budget 3125000 = raw 5000 lots = 5000000 steps (risk 5000000*.001*625 = 3125000). The cap 4999.999999999
+# is 1e-6 step below the 5000000 boundary: floor(x + 1e-6) would call it 5000000 (above the cap); 4 ulp of 5e6 is 4.4e-9.
+case('BUY_CAP_LARGE_ON_GRID', GA_BUY, P(budget=3125000.0, vmin=0.001, step=0.001, vmax=10000.0, cap=5000.0), OKS, (625, 625.0, 5000000, 5000.0, 3125000.0))
+case('BUY_CAP_LARGE_JUST_BELOW', GA_BUY, P(budget=3125000.0, vmin=0.001, step=0.001, vmax=10000.0, cap=4999.999999999), ACAP, (625, 625.0, 5000000, 0.0, 0.0))
+# binary noise on the boundary is NOT misclassified as below: 0.7/0.1 = 6.999999999999999 (7 steps, budget 437.5),
+# cap 0.1+0.2 = 0.30000000000000004 and 3*0.1 style sums.
+case('BUY_CAP_NOISE_07', GA_BUY, P(budget=437.5, vmin=0.1, step=0.1, cap=0.7), OKS, (625, 625.0, 7, 0.7, 437.5))
+case('BUY_CAP_NOISE_SUM_03', GA_BUY, P(budget=187.5, vmin=0.1, step=0.1, cap=0.1 + 0.2), OKS, (625, 625.0, 3, 0.3, 187.5))
 case('BUY_CAP_GREATER_THAN_MAX', GA_BUY, P(vmax=1.5, cap=10.0), AMAX, (625, 625.0, 197, 0.0, 0.0))
 case('BUY_CAP_SMALLER_THAN_MAX', GA_BUY, P(vmax=100.0, cap=1.5), ACAP, (625, 625.0, 197, 0.0, 0.0))
 case('BUY_BOTH_EXCEEDED', GA_BUY, P(vmax=1.5, cap=1.0), AMAX, (625, 625.0, 197, 0.0, 0.0))

@@ -36,8 +36,15 @@ ROUNDING (the only adjustment this module ever makes): the volume is rounded DOW
 LIMITS (integer steps, evaluated AFTER the rounding, first conflict wins):
   n < min_steps   -> SKIP_BELOW_MIN_VOLUME (includes n = 0, i.e. rounds to zero)
   n > max_steps   -> SKIP_ABOVE_MAX_VOLUME (broker maximum, checked BEFORE the cap)
-  n > cap_steps   -> SKIP_ABOVE_CAP        (cap_steps = floor(cap_lots / volume_step + EPS_STEPS); the cap need NOT be on
-                                            the step grid: it is only a comparison bound, never used as a volume)
+  n > cap_steps   -> SKIP_ABOVE_CAP        (x = cap_lots / volume_step ; cap_steps = floor(x + CAP_ULPS * DBL_EPSILON * max(1, x));
+                                            the cap need NOT be on the step grid: it is only a comparison bound, never a volume)
+  CAP RULE: the 1e-6 step EPS_STEPS is NOT used for the cap. It is ~10^9 times larger than binary noise and would round a
+  cap that is genuinely below a step boundary UP (cap 0.29999995 / step 0.1 = 2.9999995 -> 3, volume 0.3 above the cap).
+  The cap tolerance is only a few ulps of x (CAP_ULPS = 4, relative to max(1, x)): it absorbs binary division noise
+  (0.3 / 0.1 = 2.9999999999999996 -> 3, 0.7 / 0.1 = 6.999999999999999 -> 7) but NOT a real shortfall (5e-7 step).
+  The comparison is in integer steps (n > cap_steps -> skip). volume_out = n * step may carry binary noise above a cap
+  that is exactly on the grid (0.30000000000000004 for cap 0.3): accepted, documented noise, not a cap violation.
+  The volume is never reduced to fit the cap (SKIP).
   max and cap are NOT merged into one smaller limit: the broker maximum is reported first when both are exceeded.
   A cap below volume_min is valid input: every sizing is then a SKIP (below min or above cap).
 
@@ -79,6 +86,8 @@ SKIP_ABOVE_MAX_VOLUME = 'SKIP_ABOVE_MAX_VOLUME'
 SKIP_ABOVE_CAP = 'SKIP_ABOVE_CAP'
 
 EPS_STEPS = 1e-6          # tolerance, in volume steps, for "on the grid" and float noise on an exact fit
+DBL_EPSILON = 2.220446049250313e-16   # = MQL5 DBL_EPSILON (2^-52)
+CAP_ULPS = 4.0            # cap tolerance, in ulps of x = cap/step relative to max(1, x); NOT EPS_STEPS (see CAP RULE)
 MAX_STEPS = 1e9           # volume_max/step and cap/step bound (double spacing there is 1.2e-7 < EPS_STEPS)
 MAX_RAW_STEPS = 1e15      # risk_budget/risk_per_step bound; far below 2^53, so the integer n is exact
 MAX_STOP_TICKS = 1e13     # bound for the geometry tick counts (T005 itself stays below 3e12)
@@ -163,7 +172,7 @@ def size(geo, risk_budget, tick_value, volume_min, volume_step, volume_max, cap_
     if max_steps < 0:
         return _fail(INVALID_INPUT, 'VOLUME_NOT_ON_GRID: volume_max %.10g is not a multiple of step %.10g' %
                      (volume_max, volume_step))
-    cap_steps = int(math.floor(cap_x + EPS_STEPS))
+    cap_steps = int(math.floor(cap_x + CAP_ULPS * DBL_EPSILON * max(1.0, cap_x)))
 
     # linear model
     loss_per_lot = float(stop_ticks) * tick_value
