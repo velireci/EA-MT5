@@ -11,5 +11,5 @@ Preview EA v1.03 shton dy burime automatike, secili me zgjedhje te vecante. Para
 1. Compile (MetaEditor) XauUsdTradePreview.mq5 dhe src/tests/T010_FiltersTest.mq5.
 2. Ekzekuto T010_FiltersTest nga Scripts; dergo rreshtin "T010 FILTERS TEST finished: N passed, M failed" (te gjitha PASS).
 3. Preview me burime MANUAL (inputet T008) - duhet te jape te njejtin rezultat si 1.02.
-4. Preview me InpNewsSource=NEWS_SRC_CALENDAR_AUTO, InpSpreadSource=SPREAD_SRC_QUOTE_AUTO, InpMaxSpreadPoints = nje prag provues; dergo rreshtat "T010 CALENDAR", "T010 NEWS", "T010 SPREAD" dhe "T008 PREVIEW RESULT". Prove e dobishme: nje moment brenda 30 minutave nga nje lajm USD HIGH, dhe nje jashte; pastaj nje prag nen/mbi spread-in aktual.
-5. Dergo gjithashtu nese ppyetja e kalendarit ktheu ok=0 ne nje dritare pa lajme (do te tregonte UNKNOWN pa arsye).
+4. Preview me InpNewsSource=NEWS_SRC_CALENDAR_AUTO, InpSpreadSource=SPREAD_SRC_QUOTE_AUTO, InpMaxSpreadPoints = nje prag provues; dergo rreshtat "T010 CALENDAR" (tani me ok/ret/error/values/range_server: ret mund te jete 1/0 ose numer, vlera e vertete na duhet; range_server eshte i zgjeruar ne dite te plota, +-1 dite), "T010 NEWS", "T010 SPREAD" dhe "T008 PREVIEW RESULT". Prove e dobishme: nje moment brenda 30 minutave nga nje lajm USD HIGH, dhe nje jashte; pastaj nje prag nen/mbi spread-in aktual.
+5. Dergo gjithashtu nese pyetja e kalendarit ktheu ok=0 ne nje dritare pa lajme (do te tregonte UNKNOWN pa arsye).

@@ -12,6 +12,8 @@ DBL_EPSILON = sys.float_info.epsilon
 CLEAR, BLOCKED, UNKNOWN = 'CLEAR', 'BLOCKED', 'UNKNOWN'
 IMP_NONE, IMP_LOW, IMP_MODERATE, IMP_HIGH = 0, 1, 2, 3
 Q_OK, Q_ERROR, Q_NOT_READY, Q_TESTER = 0, 1, 2, 3
+DAY_SECONDS = 86400
+MAX_DATETIME = 32535215999   # 3000-12-31 23:59:59, the MQL5 datetime ceiling
 
 
 @dataclass(frozen=True)
@@ -45,6 +47,39 @@ class Spread:
 def in_window(now, event_time):
     d = now - event_time
     return -WINDOW_SECONDS <= d <= WINDOW_SECONDS
+
+
+def floor_day(t):
+    r = t % DAY_SECONDS
+    if r < 0:
+        r += DAY_SECONDS
+    return t - r
+
+
+def query_range(now):
+    """Calendar query range (server-time seconds) or None when invalid. Widened to whole server days, one extra day each
+    side, so USD HIGH events with undefined time cannot fall outside the query. Technical proposal (over-blocking is safe)."""
+    if now <= 0:
+        return None
+    lo = floor_day(now - WINDOW_SECONDS) - DAY_SECONDS
+    hi = floor_day(now + WINDOW_SECONDS) + 2 * DAY_SECONDS - 1
+    if lo < 0 or hi > MAX_DATETIME:
+        return None
+    return (lo, hi)
+
+
+def classify_calendar_read(ret, last_error, array_size):
+    """CalendarValueHistory's return type is DISPUTED (bool vs count); safe under both. ret==1 with array_size>1 is accepted
+    only because a bool true is 1: it never hides events (more present than reported is not a loss)."""
+    if array_size < 0 or last_error != 0 or ret < 0:
+        return Q_ERROR
+    if ret == 0:
+        return Q_OK if array_size == 0 else Q_ERROR
+    if ret > array_size:
+        return Q_ERROR
+    if ret == array_size or ret == 1:
+        return Q_OK
+    return Q_ERROR
 
 
 def news_evaluate(now, events, query_status=Q_OK):

@@ -26,6 +26,7 @@ out=$($CHK calendar $HDR $TST $EA) && echo "  PASS Calendar* calls only inside R
 out=$($CHK tester $EA) && echo "  PASS tester guard precedes the first calendar call" || { echo "$out"; FAIL=1; }
 out=$($CHK servertime $HDR $EA) && echo "  PASS no TimeLocal/TimeGMT/TimeCurrent in header, reader or news block; now=TimeTradeServer()" || { echo "$out"; FAIL=1; }
 out=$($CHK wiring $EA) && echo "  PASS MANUAL defaults, one quote read, spread uses it, no timer/OnTick" || { echo "$out"; FAIL=1; }
+out=$($CHK reader $EA) && echo "  PASS reader: range helper -> int CalendarValueHistory -> GetLastError -> pure classifier -> conversion; no bool, no now+-1800 query" || { echo "$out"; FAIL=1; }
 out=$($CHK guards $HDR) && echo "  PASS boundary, tolerance, unknown and unset guards present" || { echo "$out"; FAIL=1; }
 out=$($CHK contract $HDR) && echo "  PASS header keeps the contract text" || { echo "$out"; FAIL=1; }
 
@@ -90,6 +91,12 @@ neg "calendar call outside the reader in the EA" calendar $EA "int OnInit() {Eva
 neg "tester guard removed" tester $EA "if(MQLInfoInteger(MQL_TESTER)) return(NF_Q_TESTER);" "" "tester guard missing" "$NEG/XauUsdTradePreview.mq5"
 neg "TimeGMT in the news block" servertime $EA "int news_query=ReadUsdCalendar(now," "datetime g=TimeGMT();int news_query=ReadUsdCalendar(now," "TimeGMT" $HDR "$NEG/XauUsdTradePreview.mq5"
 neg "file access in the header" persist $HDR "bool NF_Finite(" "int h=FileOpen(\"x\",FILE_WRITE); bool NF_Finite(" "FileOpen" "$NEG/NewsSpreadFilters.mqh"
+neg "query narrowed back to now+-1800" reader $EA "CalendarValueHistory(values,query_from,query_to,NULL,\"USD\")" "CalendarValueHistory(values,now-NF_WINDOW_SECONDS,now+NF_WINDOW_SECONDS,NULL,\"USD\")" "now+-window" "$NEG/XauUsdTradePreview.mq5"
+neg "result stored as bool" reader $EA "int ret=CalendarValueHistory(" "bool ret=CalendarValueHistory(" "stored as bool" "$NEG/XauUsdTradePreview.mq5"
+neg "classifier call removed from the reader" reader $EA "int read_status=NF_ClassifyCalendarRead(ret,read_error,total);" "int read_status=NF_Q_OK;" "lacks NF_ClassifyCalendarRead" "$NEG/XauUsdTradePreview.mq5"
+neg "range helper call removed from the reader" reader $EA "if(!NF_QueryRange(now,query_from,query_to))" "if(false)" "lacks NF_QueryRange" "$NEG/XauUsdTradePreview.mq5"
+neg "classifier accepts ret above size" guards $HDR "if(ret>array_size) return(NF_Q_ERROR);" "" "guard expression missing" "$NEG/NewsSpreadFilters.mqh"
+neg "range lost the extra day" guards $HDR "NF_FloorDay((long)now-NF_WINDOW_SECONDS)-NF_DAY_SECONDS" "NF_FloorDay((long)now-NF_WINDOW_SECONDS)" "guard expression missing" "$NEG/NewsSpreadFilters.mqh"
 neg "boundary made exclusive in the header" guards $HDR "d>=-NF_WINDOW_SECONDS && d<=NF_WINDOW_SECONDS" "d>-NF_WINDOW_SECONDS && d<NF_WINDOW_SECONDS" "guard expression missing" "$NEG/NewsSpreadFilters.mqh"
 neg "second quote read in the EA" wiring $EA "int OnInit() {Evaluate();" "int OnInit() {MqlTick q2;SymbolInfoTick(_Symbol,q2);Evaluate();" "second quote read" "$NEG/XauUsdTradePreview.mq5"
 cp $HDR "$NEG/Unbalanced.mqh"; echo "void x(){" >> "$NEG/Unbalanced.mqh"

@@ -67,6 +67,77 @@ news('INVALID_QUERY_STATUS', [], 'UNKNOWN', 'UNKNOWN_CALENDAR_ERROR', q=9)
 news('NOW_ZERO', [], 'UNKNOWN', 'UNKNOWN_INVALID_INPUT', now=0)
 news('NOW_NEGATIVE', [], 'UNKNOWN', 'UNKNOWN_INVALID_INPUT', now=-5)
 
+# CALENDAR READ classifier: name, ret, last_error, array_size, expected query status (OK=0 / ERR=1).
+CLASSIFY_CASES = []
+
+
+def cls(name, ret, err, size, want):
+    CLASSIFY_CASES.append(dict(name=name, ret=ret, err=err, size=size, want=want))
+
+
+cls('EMPTY_OK', 0, 0, 0, OK)
+cls('NEGATIVE_RET', -1, 0, 0, ERR)
+cls('NEGATIVE_RET_WITH_VALUES', -1, 0, 3, ERR)
+cls('ZERO_RET_WITH_ERROR', 0, 4001, 0, ERR)
+cls('ZERO_RET_BUT_VALUES', 0, 0, 2, ERR)
+cls('RET_ABOVE_SIZE_PARTIAL', 3, 0, 2, ERR)
+cls('RET_BELOW_SIZE_PARTIAL', 2, 0, 3, ERR)
+cls('RET_EQUALS_SIZE_3', 3, 0, 3, OK)
+cls('RET_EQUALS_SIZE_1', 1, 0, 1, OK)
+cls('BOOL_TRUE_COMPAT_MANY_VALUES', 1, 0, 3, OK)
+cls('RET_ONE_BUT_EMPTY', 1, 0, 0, ERR)
+cls('POSITIVE_RET_WITH_ERROR', 3, 5, 3, ERR)
+cls('BOOL_TRUE_WITH_ERROR', 1, 5, 3, ERR)
+cls('NEGATIVE_ARRAY_SIZE', 0, 0, -1, ERR)
+cls('NEGATIVE_ARRAY_SIZE_POSITIVE_RET', 1, 0, -1, ERR)
+
+# QUERY RANGE: name, now, (from, to) or None. D = 1799971200 is a server-day start (D mod 86400 = 0, NOW = D + 28800 = 08:00).
+# Hand arithmetic: from = floor_day(now-1800) - 86400, to = floor_day(now+1800) + 172800 - 1.
+D = 1799971200
+RANGE_CASES = []
+
+
+def rng(name, now, want):
+    RANGE_CASES.append(dict(name=name, now=now, want=want))
+
+
+rng('MID_DAY', NOW, (D - 86400, D + 172799))                        # floor(NOW-1800)=floor(NOW+1800)=D
+rng('JUST_AFTER_MIDNIGHT', D + 1000, (D - 172800, D + 172799))       # now-1800=D-800 -> D-86400 ; now+1800 -> D
+rng('JUST_BEFORE_MIDNIGHT', D - 1000, (D - 172800, D + 172799))      # now-1800=D-2800 -> D-86400 ; now+1800=D+800 -> D
+rng('EXACTLY_MIDNIGHT', D, (D - 172800, D + 172799))
+rng('FROM_EDGE_LOW', D + 1799, (D - 172800, D + 172799))             # now-1800 = D-1 -> previous day
+rng('FROM_EDGE_HIGH', D + 1800, (D - 86400, D + 172799))             # now-1800 = D exactly
+rng('TO_EDGE_LOW', D - 1801, (D - 172800, D + 86399))               # now+1800 = D-1 -> previous day
+rng('TO_EDGE_HIGH', D - 1800, (D - 172800, D + 172799))             # now+1800 = D exactly
+rng('NOW_ZERO', 0, None)
+rng('NOW_NEGATIVE', -5, None)
+rng('NOW_TOO_EARLY_FROM_NEGATIVE', 88199, None)                      # floor(86399)=0 -> from=-86400
+rng('NOW_EARLIEST_VALID', 88200, (0, 259199))                        # floor(86400)=86400 -> from=0 ; to=86400+172800-1
+rng('NOW_LATEST_VALID', 32535127799, (32534956800, 32535215999))  # floor(now-1800)=32535043200 ; to = max exactly
+rng('NOW_OVERFLOW_BY_ONE_DAY', 32535127800, None)                    # to would be 32535302399 > max
+
+# COVERAGE: a fake calendar with ABSOLUTE anchors (delta from D, the day start) is filtered by NF_QueryRange of NOW, then given to
+# NF_NewsEvaluate. name, [(anchor_delta_from_D, time_ok, currency, importance, name)], expected state, status.
+# NOW = D + 28800 (08:00); window is [D+27000, D+30600].
+COVERAGE_CASES = []
+
+
+def cov(name, evs, state, status):
+    COVERAGE_CASES.append(dict(name=name, evs=evs, state=state, status=status))
+
+
+cov('COV_USD_HIGH_UNDEFINED_SAME_DAY_OUTSIDE_WINDOW', [(0, False, USD, HIGH, 'ALLDAY')], 'UNKNOWN', 'UNKNOWN_EVENT_DATA')
+cov('COV_USD_HIGH_UNDEFINED_PREVIOUS_DAY', [(-3600, False, USD, HIGH, 'ALLDAY')], 'UNKNOWN', 'UNKNOWN_EVENT_DATA')
+cov('COV_USD_HIGH_UNDEFINED_NEXT_DAY', [(86400 + 3600, False, USD, HIGH, 'ALLDAY')], 'UNKNOWN', 'UNKNOWN_EVENT_DATA')
+cov('COV_USD_HIGH_UNDEFINED_FIRST_SECOND_OF_RANGE', [(-86400, False, USD, HIGH, 'ALLDAY')], 'UNKNOWN', 'UNKNOWN_EVENT_DATA')
+cov('COV_USD_HIGH_UNDEFINED_BEFORE_RANGE', [(-86401, False, USD, HIGH, 'ALLDAY')], 'CLEAR', 'CLEAR')
+cov('COV_USD_HIGH_UNDEFINED_LAST_SECOND_OF_RANGE', [(172799, False, USD, HIGH, 'ALLDAY')], 'UNKNOWN', 'UNKNOWN_EVENT_DATA')
+cov('COV_USD_HIGH_UNDEFINED_AFTER_RANGE', [(172800, False, USD, HIGH, 'ALLDAY')], 'CLEAR', 'CLEAR')
+cov('COV_USD_HIGH_DEFINED_OUTSIDE_WINDOW', [(0, True, USD, HIGH, 'DEF')], 'CLEAR', 'CLEAR')
+cov('COV_USD_HIGH_DEFINED_INSIDE_WINDOW', [(30600, True, USD, HIGH, 'DEF')], 'BLOCKED', 'BLOCKED_WINDOW')
+cov('COV_EUR_HIGH_UNDEFINED', [(0, False, EUR, HIGH, 'ALLDAY')], 'CLEAR', 'CLEAR')
+cov('COV_USD_MEDIUM_UNDEFINED', [(0, False, USD, MOD, 'ALLDAY')], 'CLEAR', 'CLEAR')
+
 # name, bid, ask, point, max, state, status
 SPREAD_CASES = []
 
@@ -157,6 +228,32 @@ def emit_mql():
     arr('int', 'E_IMP', [str(e[3]) for e in E])
     arr('int', 'E_FETCH', ['1' if e[4] else '0' for e in E])
     arr('string', 'E_NAME', [q(e[5]) for e in E])
+    C = CLASSIFY_CASES
+    out.append('#define NCLS %d' % len(C))
+    arr('string', 'C_NAME', [q(c['name']) for c in C])
+    for key, nm in (('ret', 'C_RET'), ('err', 'C_ERR'), ('size', 'C_SIZE'), ('want', 'C_WANT')):
+        arr('int', nm, [str(c[key]) for c in C])
+    R = RANGE_CASES
+    out.append('#define NRNG %d' % len(R))
+    arr('string', 'R_NAME', [q(c['name']) for c in R])
+    arr('long', 'R_NOW', [str(c['now']) for c in R])
+    arr('int', 'R_VALID', ['0' if c['want'] is None else '1' for c in R])
+    arr('long', 'R_FROM', [str(c['want'][0] if c['want'] else 0) for c in R])
+    arr('long', 'R_TO', [str(c['want'][1] if c['want'] else 0) for c in R])
+    V = COVERAGE_CASES
+    out.append('#define NCOV %d' % len(V))
+    out.append('#define DAY_T %d' % D)
+    arr('string', 'V_NAME', [q(c['name']) for c in V])
+    arr('string', 'V_STATE', [q(c['state']) for c in V])
+    arr('string', 'V_STATUS', [q(c['status']) for c in V])
+    arr('int', 'V_EVCOUNT', [str(len(c['evs'])) for c in V])
+    arr('int', 'V_EVFIRST', [str(sum(len(x['evs']) for x in V[:i])) for i in range(len(V))])
+    VE = [e for c in V for e in c['evs']]
+    arr('long', 'VE_ANCHOR', [str(e[0]) for e in VE])
+    arr('int', 'VE_TIMEOK', ['1' if e[1] else '0' for e in VE])
+    arr('string', 'VE_CUR', [q(e[2]) for e in VE])
+    arr('int', 'VE_IMP', [str(e[3]) for e in VE])
+    arr('string', 'VE_NAME', [q(e[4]) for e in VE])
     S = SPREAD_CASES
     out.append('#define NSPR %d' % len(S))
     arr('string', 'S_NAME', [q(c['name']) for c in S])

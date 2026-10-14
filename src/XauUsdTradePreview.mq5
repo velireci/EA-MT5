@@ -62,13 +62,17 @@ int ReadUsdCalendar(const datetime now,SNfEvent &events[],int &count)
    if(MQLInfoInteger(MQL_TESTER)) return(NF_Q_TESTER);
    if(!TerminalInfoInteger(TERMINAL_CONNECTED)) return(NF_Q_NOT_READY);
    MqlCalendarValue values[];
+   datetime query_from=0,query_to=0;
+   if(!NF_QueryRange(now,query_from,query_to)) {Print("T010 CALENDAR query range invalid for server now ",(long)now);return(NF_Q_ERROR);}
    ResetLastError();
-   bool read_ok=CalendarValueHistory(values,now-NF_WINDOW_SECONDS,now+NF_WINDOW_SECONDS,NULL,"USD");
+   // The return type of CalendarValueHistory is disputed (bool vs count): keep it as int and classify with the pure helper.
+   int ret=CalendarValueHistory(values,query_from,query_to,NULL,"USD");
    int read_error=GetLastError();
    int total=ArraySize(values);
-   PrintFormat("T010 CALENDAR query ok=%d error=%d values=%d from_server=%s to_server=%s",(int)read_ok,read_error,total,
-               TimeToString(now-NF_WINDOW_SECONDS,TIME_DATE|TIME_SECONDS),TimeToString(now+NF_WINDOW_SECONDS,TIME_DATE|TIME_SECONDS));
-   if(!read_ok) return(NF_Q_ERROR);
+   int read_status=NF_ClassifyCalendarRead(ret,read_error,total);
+   PrintFormat("T010 CALENDAR query ok=%d ret=%d error=%d values=%d range_server=%s..%s window +-%d s inside day-widened range",(int)(read_status==NF_Q_OK),ret,read_error,total,
+               TimeToString(query_from,TIME_DATE|TIME_SECONDS),TimeToString(query_to,TIME_DATE|TIME_SECONDS),NF_WINDOW_SECONDS);
+   if(read_status!=NF_Q_OK) return(NF_Q_ERROR);
    if(total<=0) return(NF_Q_OK);
    ArrayResize(events,total);
    for(int i=0;i<total;i++)
