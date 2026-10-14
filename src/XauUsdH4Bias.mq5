@@ -81,7 +81,7 @@
 //|  (tools/t003-visual-static-checks.sh).                           |
 //+------------------------------------------------------------------+
 #property copyright   "velireci"
-#property version     "1.11"
+#property version     "1.12"
 #property description "T003 H4 bias (visual validation): proposed rules - client validation pending."
 #property description "Contains no order functions and no trading logic."
 

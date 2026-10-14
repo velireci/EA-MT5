@@ -421,7 +421,7 @@ int H3LWrap(const string text, const int maxchars, string &out[])
    string rest = text;
    bool first = true;
    int n = 0;
-   for(int guard = 0; guard < 12; guard++)
+   for(int guard = 0; guard < 80; guard++)
      {
       int avail = (first ? mc : mc - 2);
       if(StringLen(rest) <= avail)

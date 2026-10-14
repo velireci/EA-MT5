@@ -597,6 +597,21 @@ void TestPanelBudget(void)
       joined += (joined != "" ? " " : "") + pc;
      }
    Check(np > 1 && okw == 1 && joined == longt, "a long line wraps at spaces, continuation rows are indented and no word is lost");
+   string very_long = "";
+   for(int w = 0; w < 120; w++)
+      very_long += "word" + IntegerToString(w) + " ";
+   np = H3LWrap(very_long, 40, pieces);
+   int too_wide = 0;
+   for(int i2 = 0; i2 < np; i2++)
+      if(StringLen(pieces[i2]) > 40)
+         too_wide++;
+   Check(np > 12 && too_wide == 0, "a very long explanation wraps into more than 12 rows and no row exceeds the width (no unwrapped remainder)");
+   np = H3LWrap("T003 H4 BIAS - PROPOSAL (client validation pending), visual only, NO TRADING", 30, pieces);
+   too_wide = 0;
+   for(int i3 = 0; i3 < np; i3++)
+      if(StringLen(pieces[i3]) > 30)
+         too_wide++;
+   Check(np == 3 && too_wide == 0, "the 76-character title wraps at spaces into 3 rows of at most 30 columns");
    Check(H3LPanelRows(300, 16, 6, 8) == 17 && H3LPanelRows(120, 16, 6, 8) == 5 && H3LPanelRows(10, 16, 6, 8) == 1,
          "rows from the chart height: 300 px -> 17, 120 px -> 5, tiny chart -> at least 1");
    int c_wide = H3LPanelCols(1600, 7.0, 6, 8, 50);
