@@ -1,121 +1,178 @@
-# Strategy specification — draft
+# Strategjia e klientit — referenca qendrore
 
-Status: PARTIAL. This document is not an approved complete trading algorithm.
-Source: submission XAU-20261006-E27N93, schema 5. Original evidence is in inputs/client-E27N93/.
-Read the full analysis in docs/reference/strategy-review.md only when a detail needs investigation.
+Përditësuar: 14 tetor 2026. Versioni 1. Klienti: dorëzimi XAU-20261006-E27N93.
 
-## Intended sequence
-H1/H4 directional assessment → selected H4 FVG → qualifying return into that area → M15 MSS with associated FVG → limit order → structural SL and liquidity TP → partial exit and stop management.
+Ky dokument bashkon informacionin e disponueshëm të klientit. Nuk është deklaratë se strategjia është plotësisht e formalizuar, implementuar ose validuar. Një hollësi që mungon mbetet e hapur; nuk plotësohet nga emri i një koncepti apo nga rezultati i një testi.
 
-Direction/swing selection, zone selection, qualification and target selection require explicit rules. Do not treat this narrative as a complete implementation contract.
+## 1. Si lexohet dhe përditësohet
 
-## Explicit answers relevant to development
-- MT5, Tauro, XAUUSD.r, USD account; verify actual broker configuration.
-- M15 signals; H4 completed-candle context. Narrative also uses H1.
-- BUY and SELL, intended mirror rules; M15 forming-candle evaluation selected.
-- Limit entry at an M15 FVG; SL at a relevant M15 structural high/low; final TP at liquidity.
-- Cancel pending orders on direction change, opposite signal, session end and avoided news.
-- One entry per signal; definition of distinct FVG/MSS setups unresolved.
-- Close 80% of initial volume at 2R; remaining 20% until final TP/SL; no trailing.
-- Two open positions, 2% combined open risk, 10-lot cap, skip sizing conflicts.
-- Detailed daily trade limit: 2. Introductory confirmed fact: 3. OPEN conflict.
-- Introductory confirmed risk: 1% per trade. Active sizing method/base unknown. OPEN.
-- Stop after a win; two consecutive losses; breakeven neutral; partial exit counts as one trade. Event definitions and resets OPEN.
-- Daily limit: 2%, start-of-day balance, closed results only, EA scope, stop entries/cancel pending orders.
-- Monday-Friday 00:00-20:30 Europe/Tirane, local DST; daily reset midnight.
-- Friday close 21:00. Normal session-end open-position behavior OPEN.
-- High-impact USD news blackout: 30 minutes before/after. Existing-position behavior OPEN.
-- Push notifications; client also trades manually.
+- **K — Klienti:** tekst origjinal ose sqarim i klientit i përcjellë nga pronari; burimi shënohet.
+- **I — Interpretim:** leximi ynë i tekstit/fotove. Nuk barazohet me konfirmim.
+- **P — Propozim teknik:** mënyrë mekanike e zgjedhur për prototip, ende pa validim klienti.
+- **H — Hapur/konflikt:** informacion që mungon ose dy pohime që duhen pajtuar.
+- Përpara një pyetjeje të re: kërko rregullin këtu, pastaj tekstin origjinal dhe sqarimet më të reja. Fusha “?” në pyetësor nuk anulon një përgjigje të qartë me tekst.
+- Sqarimi i ri shprehimor mund të zëvendësojë një përgjigje më të vjetër. Regjistro çfarë zëvendëson. Në konflikt të pazgjidhur mos zgjidh në heshtje.
+- Teksti i klientit ka përparësi ndaj interpretimit të vizatimeve. Çmimet, datat dhe numri i BOS në një shembull nuk janë parametra të robotit.
+- Ky dokument përmban kërkesat; docs/STATE.md përmban progresin; raportet përmbajnë provat; task-et përmbajnë detajet e implementimit. Një test që kalon nuk krijon rregull klienti.
 
-## Explicit conflicts / unresolved units
-- Stop after partial exit: entry plus costs versus prose “+0.2%”. Meaning OPEN.
-- 50 stop-distance limit is stored as gold-price units; ask client to confirm unit.
-- Screenshot levels may differ from the 2R partial answer; no level is adopted without confirmation.
-- H1/H4 roles and swing labels in prose need clarification.
+## 2. Burimet dhe kufijtë
 
-## Engineering requirements
-Use account/broker-aware prices and volume calculations; check all order outcomes; prevent duplicate setup entries; recover state after restart; establish trade ownership and account hedging/netting behavior. No raw price-distance value represents account-dollar risk without a volume/contract calculation.
+**B1:** përgjigjet origjinale inputs/client-E27N93/pergjigjet.json, dorëzuar 06.10.2026; në këtë workspace work/client-E27N93/pergjigjet.json. Fushat state.answers, state.examples dhe shënimet e fotove janë burime parësore. Lista automatike analysis.clarifyWithClient nuk është vendim klienti.
 
-## H4 map (T002) - three kinds of content, kept apart
-A. CLIENT ANSWERS relayed as confirmed by the owner (2026-10-07; see DECISIONS.md): direction and context zones from H4 only; only trend-direction setups, IRL -> ERL (ERL -> IRL excluded); IRL = H4 FVG, wick touch is enough; IRL is not the entry (structure confirmation after the touch, entry at the M15 FVG after the break); the H4 FVG nearest to price on the way back is chosen first, the next one may be reached if confirmation is missing; ERL is the structural destination.
+**B2:** specifikimi.txt nga i njëjti dorëzim: përmbledhje e përgjigjeve, fakte paraprake dhe kërkesa zhvilluesi. Nuk është përgjigje e dytë e pavarur. Seksionet “developer requirements” dhe “assumptions” nuk ngrihen në rregulla klienti.
 
-B. OWNER DECISION (2026-10-07): mechanical rules may be proposed for what the client selects visually. They stay PROPOSED until the client validates them on charts.
+**B3:** tri fotot origjinale: shembulli-1-sell-win.jpg, shembulli-2-sell-loss.jpg, shembulli-3-no-entry.jpg. U inspektuan në kontrollin e 14.10.2026. Vizatime, jo histori urdhrash/fill-esh.
 
-C. PROPOSED (developer proposals, NOT client answers; implemented only as drawings in T002, full text in tasks/T002-h4-map.md):
-- Swings: 2 closed bars left and right, strict comparison, equal values do not qualify; stored with pivot time and confirmation time (close of the 2nd bar to the right); a bar that is both high and low is AMBIGUOUS and unused.
-- Direction: last two confirmed swing highs and lows; LH+LL bearish, HH+HL bullish, anything else (including ties) MIXED, fewer than two of either UNKNOWN. MIXED/UNKNOWN declares no setup.
-- Interval: bearish = latest confirmed low and the latest confirmed high preceding it; bullish = latest confirmed high and the latest confirmed low preceding it; otherwise RANGE_UNDEFINED. ERL SELL = interval low, ERL BUY = interval high.
-- ERL TAKEN: a closed H4 bar's wick touches/crosses it after the interval became knowable; never restored.
-- FVG: three closed bars A,B,C; bullish Low(C) > High(A), bearish High(C) < Low(A); confirmed at close of C; no size/displacement filter.
-- FVG state: INVALID on a close strictly beyond the far edge, TOUCHED on a wick intersecting the zone, else FRESH; touch does not remove the zone; no re-use limit.
-- IRL candidate: valid same-direction FVG fully inside the interval (inclusive); others are OUTSIDE, never active IRL.
-- Visual order: nearest zone ahead of Bid; INSIDE shown first and never skipped; ties by distance, newer confirmation, then ID; zones are never merged.
-- Link IRL -> ERL drawn only with valid direction, valid interval, untouched ERL and a selectable candidate.
+**B4:** sqarimet e klientit të përcjella nga pronari në bisedë, të regjistruara në docs/DECISIONS.md: 07.10 dhe 13.10, S1–S5, E1–E6, N1–N7. Disa ruhen si përmbledhje e përcjellë, jo si citim origjinal. Datat e videove/analizave nuk duhen ngatërruar me kohën e candle-ve.
 
-D. STILL OPEN (not implemented, not decided): the M5 item is SUPERSEDED by the client statement of 2026-10-13 (N5 below: M15 only, no M5); the target-below-2R item is answered in principle by N6 below (minimum 2R), with the mechanical definitions left to a later task. The older suggestion to skip setups below 2R was never an approved decision and is superseded as a recommendation. Also open inside the proposal: whether an IRL FVG must also lie inside the swing leg in time; size filters for FVG; reuse limits; whether TAKEN should use live price.
+**B5:** kontrolli T005 i 14.10.2026, kontrolli i burimeve i regjistruar në historinë e këtij dokumenti, krahasoi B1–B3 me planin T005 te 5447ef3. Nuk u bë transkriptim i ri audio/video. Videot e përmendura në bisedë nuk pretendohet se janë analizuar plotësisht në këtë dokument.
 
-## H4 direction change and reconfirmation (T003 draft, revision 5) - four kinds of content, kept apart
-Sources: the client's text clarifications and the BUY example of 2026-10-13, relayed by the owner. Client screenshots are ILLUSTRATIONS: no price, date or candle index in them is a rule, and where a text clarification exists it takes priority over how arrows or shapes might be read. The screenshots are not stored in the repository. Full text, state table, acceptance criteria and tests: tasks/T003-h4-bias-change.md (nothing implemented).
+## 3. Instrumenti dhe rrjedha e përgjithshme
 
-A. CLIENT STATEMENTS (DECISIONS.md, 2026-10-13):
-- S1. A change from bearish to bullish needs a break of the relevant H4 structural level; in the client's first picture the first marked level is enough and the higher high need not be broken. "First level" is not automatically the nearest high or a small swing; its algorithmic choice is still to be formalised.
-- S2. The pass must be with the body; a wick-only pass does not confirm a change and may be a liquidity grab.
-- S3. SELL: after a wick above the structural level the robot stops NEW entries from the previous setup and waits for reconfirmation. Silent about open positions.
-- S4. SELL reconfirmation needs a NEW bearish H4 FVG formed AFTER the wick; a pre-wick FVG is not enough even if touched again.
-- S5. After the new H4 FVG: the touch is at that H4 FVG (wick allowed) and we wait for the close of the H4 candle that touched it (an earlier client clarification relayed by the owner; original wording not in the repository); then a new M15 structure break; entry at the M15 FVG after the break. H4 FVG/IRL is context, not entry; trend-direction setups only, IRL -> ERL.
-- S6. (2026-10-13, earlier text) Open: M5 role; policy below 2R. SUPERSEDED the same day by N5 (M5 removed, M15 only) and N6 (minimum 2R), see the revision 11 section below. Kept for history.
-- E1-E5 (BUY example, H4): price rising with two consecutive BOS; in the circled part price looked as if it had broken the structure down but was only a liquidity grab; after the grab the next H4 FVG formed; price touched it and then made another BOS up; the red arrow is the expected rise; the client said the entry is at the FVG and the target is the top of the third broken structure.
-- E6 (same BUY example, third screenshot; the client's words as relayed): "After the liquidity we have the main FVG where we expect price to return, and we have to wait for a structure break on M15. The target is the upper red line, at the last HH." An INTERNAL liquidity grab without a confirmed change of the BUY trend; after it a new H4 FVG forms; wait for the return/touch and then an M15 structure break. H4 FVG is context, not a direct entry; entry stays at the M15 FVG after the break (S5). The target of this example is the last HH (the upper red line), not the local level labelled on the price axis; no prices are used.
-  Limits (owner's instructions): evidence on the BUY side (E1-E6) for wick/grab versus confirmed structure change AND for the sequence new H4 FVG after the grab -> return/touch -> M15 structure break (this is no longer SELL-only evidence); "two/third BOS" is the order in this example, not a condition (no fixed number of BOS); the green zone is the H4 FVG formed after the grab; the arrow is an expectation, not a signal; "entry at the FVG" does not cancel S5 (H4 is context, entry is at the M15 FVG after the break); the target is the top of the broken structure / the last HH in this example only, not a universal ERL rule; internal liquidity is not the structural level and the grabbed low is not assumed to be the protecting low (automatic choice of the level stays a proposal for validation); no fixed count of BOS; the remaining BUY/SELL mirror details (body-close flip rule, which FVG candle must follow the wick, hysteresis, protected-level choice) are NOT client confirmations; M5 and the 2R policy stay open.
+**K, B1/B2:** robot automatik MT5/MQL5 për arin, brokeri i klientit Tauro, simboli i deklaruar XAUUSD.r, llogari USD. BUY dhe SELL; klienti thotë pasqyrim mes tyre. Synimi përfundimtar përfshin hapje, menaxhim dhe mbyllje, por aktivizimi i urdhrave është vendim i veçantë i pronarit.
 
-B. AUTHORISED EARLIER DECISIONS: the owner's authorisation (2026-10-07) to propose mechanical rules for what the client selects visually, as proposals awaiting visual validation; the T002 proposals (swing 2/2, direction test, interval, FVG states, ERL taken, ordering) stand unchanged and unvalidated.
+Rrjedha e deklaruar, duke bashkuar sqarimet më të reja:
 
-C. PROPOSED, NOT CLIENT ANSWERS (T003 P1-P14; labelled "proposed" everywhere). Three of them are technical proposals and not client statements: the intrabar block (P12, from Codex's review), candle A of the new FVG being allowed to be the wick candle (P5), and blocking entries when the history is insufficient (P11, fail-safe for a later execution task):
-- P1 Body = H4 close strictly beyond the level (equality is not a break); high beyond with the close not beyond = wick-only; "level crossed without a confirmed change" means wick-only.
-- P2 Structural level (bearish context): the highest confirmed swing high between the latest lower low and the low before it; minor swings inside the leg and corrective lows do not become the level; missing bounds or an already body-broken candidate = undefined. Mirror for bullish. Timing: the candidate is derived from the state known before the evaluated bar; the evaluated bar crossing it is an event to process, never a reason to discard it. A consumed candidate (already crossed and processed) is kept as the frozen protecting level during HOLD. A wick that preceded the level's discovery keeps its source time and is detected at discovery (no HOLD in NONE). Internal liquidity (for example an interior low) is kept distinct from this level (P14). Validated only by visual comparison with the client's examples (T003 section 10), never claimed validated.
-- P3 Bias layer with hysteresis next to T002's direction: once a bias exists, only a body close beyond the CURRENT protecting level reverses it, whatever T002 says; other breaks (latest HH/LL, interior levels) are continuation or internal events, not flips; a bias without a level cannot flip.
-- P4/P5/P6/P7 Wick event with separate timestamps: source_wick_time (the physical wick), source_wick_known_time (its close) and detected_at (when the machine could first know it is a wick against a held level); HOLD and the entry block start at detected_at, with no claim about the past before it (a wick before the level was known is retroactive); the new FVG qualifies by its candle A being at or after source_wick_time (working interpretation, see F1) while touches count only from detected_at; the touch counts at the close of the touching H4 candle (client information); transitions for repeated wicks, flips and invalidations.
-- P8 BUY mirror (a proposal; the BUY example E1-E6 supports the sequence grab -> new H4 FVG -> return/touch -> M15 break and the wick/grab distinction, not the other mirrored details).
-- P13 Target candidate for display only: the latest confirmed higher high (BUY) / lower low (SELL), kept apart from local pullback levels; T002's ERL unchanged; compared with the client's example, never validated, never a universal target rule.
-- P9 One causal replay over closed bars for live and historical.
-- P10 Bias start, from NONE only: breaks against levels known before the bar come first; only if the state is still NONE and the bar produced no CONFLICT does the T002 seed apply; a break outranks the seed; breaks of both kinds on one bar give NONE (CONFLICT) and the seed does not overwrite it on that bar; no evidence gives NONE (NO_EVIDENCE); the several P10 candidates are ignored once a bias exists. No direction is invented.
-- P11 History, restart and window, ONE mechanism: a stateless fixed-depth rebuild (no persisted state) with a depth-sensitivity check. REBUILD_BARS default 1000 (never below 3 x lookback), warm-up = lookback, check depth = warm-up, hard cap 5000 bars; the state is rebuilt over R_eff bars and over R_eff minus the check depth, and is RELIABLE only if both agree on the final state and the events in the shorter run's trusted region, the dependency anchor lies after the warm-up, and R_eff is at least 3 x lookback. Flags CONVERGED / SEEDED / LIMITED_BY_HISTORY: CONVERGED is evidence at the tested depth, not a guarantee that more or older history would not change the state. When not reliable (or the depth is not reached) the direction is reported UNKNOWN (limited by history) with no market event; depth-caused differences are RE-DERIVATION, never FLIP/WICK/RECONFIRMED/SWEEP. Failing entries closed when LIMITED is a technical proposal for the later execution task, not a client statement.
-- P14 Internal liquidity grab (the flow internal liquidity -> new H4 FVG -> touch -> M15 break is client-confirmed; the detection and the wait are technical proposals): an interior low swept by a wick with the protecting low not crossed raises INTERNAL_SWEEP and a SWEEP_WAIT for a new FVG, without changing the bias; a crossing of the protecting low is the structural wick/break instead and supersedes; whether entries of the previous setup are blocked during the wait is not stated by the client.
-- P12 Intrabar block (Codex's technical proposal, awaiting the owner's decision): a strict crossing of the held level by the forming H4 candle blocks new entries immediately and only restricts; the direction change is confirmed only by an H4 close beyond the level. At the close: wick-only becomes the closed-bar HOLD; a body break ends the block in the flip; equality is not a crossing. Live only; historical mode cannot reproduce it.
+**Drejtimi H4 → zonë kryesore FVG H4 / IRL → prekje → mbyllja e H4 prekëse → thyerje strukture M15 → FVG M15 → urdhër limit te fillimi i saj → target likuiditeti / minimum 2R → menaxhimi 80/20.**
 
-D. STILL OPEN:
-- F1 exact time definition of "new FVG after the wick"; F2 M5/M15 relation (M5 part closed by N5; the M15 details stay Q04); F3 policy below 2R (answered in principle by N6, mechanics later; the skip recommendation was never approved and is superseded); F4 positions already open; F5 ERL selection and reconfirmation validity (inside T002's interval or not, how long it stays valid, re-deriving the frozen level, target rule); F6 whether an intrabar block is wanted; F7 whether new entries are blocked while the state is LIMITED_BY_HISTORY (the fail-safe block is a technical proposal); F8 how interior liquidity is identified, whether entries are blocked during the internal wait, what a body close below an interior low means, and whether the grabbed low in the client's picture is interior or protecting (no assumption).
-- Resolved: the touch rule is client information (S5), no longer a question.
+Pas wick-ut/marrjes së likuiditetit, rruga e rikonfirmimit kërkon FVG H4 të RE pas ngjarjes, pastaj të njëjtën rrjedhë prekje/mbyllje/M15. Kjo nuk e bën çdo FVG ekzistuese automatikisht të vlefshme.
 
-## H4 direction layers and the client text of 2026-10-13 (T003 revision 11, DOCUMENTS ONLY) - four kinds of content, kept apart
-Source: text clarifications of the client relayed by the owner on 2026-10-13. The videos the client mentioned were NOT sent: nothing here claims they were seen or analysed. Photos stay illustrations. Full text, the layers, the comparison table, the scenarios and the open ambiguities: tasks/T003-h4-bias-change.md section 13 and reports/T003-verification.md section 15. No code was changed.
+## 4. Drejtimi, struktura dhe likuiditeti H4
 
-A. CLIENT STATEMENTS (relayed by the owner; DECISIONS.md rows of 2026-10-13, N1-N7):
-- N1. Direction is understood only from structure: rising = HH and HL; falling = LH and LL. So HH+HL = bullish structure, LH+LL = bearish structure. Confirms how the client DESCRIBES direction. Does NOT confirm: using the two latest local swings; the 2/2 fractal as the definition of a structural swing; the ratchet; holding a bias until a historical level is broken.
-- N2. Current structure and historical liquidity are different things. Red lines mark highs/lows and structure levels; if the market keeps falling and the red levels above stay unbroken for days, they can serve as liquidity zones when price returns. Four layers are distinguished (below). An old liquidity level is not a sufficient reason to keep the current direction frozen. The algorithm that tells a structural swing from a local swing is NOT given by the client and is not invented here.
-- N3. The sky-blue bars are the main H4 FVGs. In two other examples the marked structure was bearish (LH and LL); the circled parts were called liquidity grabs, not a direction change, because the previous direction later continued. Earlier clarifications: a wick alone does not confirm a change; the client wants a break with the body. Our reading "close of the candle beyond the level" is a technical interpretation; it is not a licence to use any local level as the protecting level. What is known at the close of the candle that crosses a level must stay separate from what later candles confirm; a later candle never classifies the past event and never permits a past entry.
-- N4. Flow kept: only trend-direction setups, IRL -> ERL; the IRL here is an H4 FVG and is NOT the entry; the H4 FVG touch may be by wick; wait for the close of the H4 candle that touched; then an M15 structure break; entry on the return to the M15 FVG after the break. After a wick / liquidity grab the client asked for a NEW H4 FVG; an FVG from before the event is not enough. BUY evidence too: liquidity -> new H4 FVG -> return/touch -> M15 break. The exact time of the three FVG candles relative to the event and the mechanical identification of the sweep remain technical proposals.
-- N5. M5 is removed from the confirmation: 'Make it break only on M15 so we do not mix it up. Since we also wait for the FVG on M15.' REPLACES the earlier request for M5 identification/confirmation (history kept: S6 and F2 above, marked superseded). Structure confirmation for entry is M15 only; the entry FVG is M15; no M5 confirmation, filter or condition exists.
-- N6. Minimum 2R: 'In cases where the target is less than 2R, the minimum will be set to 2R.' When the structural/ERL target gives less than 2R, TP is set at the 2R minimum (this can place TP beyond the initial ERL); the trade is NOT skipped only because the ERL is below 2R; a target farther than 2R is NOT shortened to 2R. The mechanical definitions of R, SL, entry/fill price and cost handling are NOT given and are specified in the relevant later task. Any earlier 'skip below 2R' suggestion is superseded as a recommendation (it was never an approved decision). Observation for that later task, not a question: the partial exit at 2R (section above) and a TP set at 2R coincide.
-- N7. Examples are not constants. Prices and dates in the photos are evidence, not robot parameters. 'First/second/third BOS' describe the examples: no fixed BOS count. The last HH as target is confirmed in the BUY example; this does not formalise a universal ERL algorithm.
+**K, B4 N1:** rritës = HH dhe HL; rënës = LH dhe LL. Teksti i vjetër i B1 për H1/H4 dhe “HH dhe LH” nuk përdoret për të anuluar sqarimin më të ri: konteksti është H4 sipas vendimit të regjistruar më 07.10.
 
-B. OWNER DECISIONS: (2026-10-13) this round is documents only; the text is relayed, the videos are not available; no M15, target, trading or code work starts. Earlier: the prototype authorisation (DECISIONS.md) is not a client answer.
+**K, B4 N2/N3:** struktura aktuale dhe likuiditeti historik janë të ndryshme. Vijat e kuqe shënojnë maja/funde/nivele. Nivelet e vjetra të paprekura mund të shërbejnë si zona likuiditeti pas disa ditësh; kjo nuk do të thotë se mbajnë domosdoshmërisht drejtimin e sotëm.
 
-C. TECHNICAL PROPOSALS (ours, unvalidated): T002 swing 2/2 and direction test; T003 P1-P14; the revision 10 prototype (ratchet, structure/setup separation, variant A, current level decides FLIP). N1-N7 do not turn any of them into a confirmed rule. In particular the ratchet and the bias hysteresis can hold a bias that contradicts the HH/HL or LH/LL structure of N1 (T003 section 13.6, report section 15.4): a finding about the proposal, by its design, not a client-approved behaviour.
+**K, B4 S1/S2:** kërkohet thyerja e nivelit strukturor përkatës me trup; wick-u i vetëm nuk konfirmon ndryshim dhe mund të jetë marrje likuiditeti. “Niveli i parë” në figurën e klientit ishte i mjaftueshëm në atë shembull; nuk përkthehet automatikisht si swing-u më i afërt.
 
-D. STILL OPEN: which swings count as STRUCTURE versus local (N2); whether and how long a bias may be held against HH/HL or LH/LL (extends C1, the level-update question already asked); F1, F4, F5, F6, F7, F8; the M15 details (Q04); the mechanics of R/SL/entry/fill/costs for the 2R minimum (later task); the interaction of the 2R minimum with the partial exit and with the target selection.
+**H/P:** përzgjedhja algoritmike e swing-eve strukturorë kundrejt atyre lokalë, përparësia e drejtimeve në konflikt dhe kriteri i saktë trup/close. Close rreptësisht përtej nivelit është interpretimi teknik aktual. Fractal 2/2, ratchet-i dhe bias-i me kujtesë nuk janë konfirmime klienti.
 
-Layers (T003 section 13.3): (1) CURRENT STRUCTURE for direction (HH/HL, LH/LL); (2) HISTORICAL LIQUIDITY LEVELS (unbroken old highs/lows, targets or return zones, not the direction); (3) H4 FVG ZONES (context/IRL, not the entry); (4) the SETUP awaiting confirmation (wick or sweep, new H4 FVG, touch, then M15). Layer (2) is not implemented as a separate layer.
+**K, B1:** nuk tregton në range. E përshkruan si të dallueshme me sy; algoritmi objektiv mbetet H.
 
-## Approval policy
-Record client-confirmed additions with date and source in DECISIONS.md and then update this specification. Developer proposals must be visibly labeled PROPOSED and confined to visual/experimental work until confirmed. A platform constraint may require a documented client choice; it is not permission to silently change strategy.
+## 5. FVG H4 dhe rikonfirmimi
 
+**K, B4 07.10/N4:** vetëm setup-e në drejtimin e trendit, IRL → ERL. IRL këtu është FVG H4, jo çmimi i hyrjes. Zona më e afërt në rrugën e kthimit merret e para; nëse nuk ka konfirmim, çmimi mund të arrijë zonën tjetër.
 
-## T004 first round (2026-10-14) - observer infrastructure, not a strategy approval
-The owner authorised progress on the independent H4-to-M15 observer. Confirmed flow N4/N5 stands. New component M15Confirmation.mqh accepts an explicit ready H4 context and an externally selected proposed M15 level; no automatic structural selector is implemented. H4M15Bridge.mqh can adapt T003 context only with explicit source opt-in and reliability. It never chooses between T002 direction and T003 bias.
+**K, B4 S5/N4:** prekja mund të jetë me wick. Pritet mbyllja e candle-s H4 që preku zonën; pastaj kërkohet thyerje e re M15. M15 e mëparshme nuk autorizohet nga një prekje e mëvonshme.
 
-Q04 remains open. Default FVG timing policy is UNSET. The only opt-in technical timing proposal implemented is candle A at/after the BOS candle, with closed contiguous M15 bars, a strict close beyond the supplied level and a later return (not candle C itself). All FVG candidates are reported rather than silently selecting an entry. These are development proposals, not client answers. RETURN_OBSERVED does not authorise orders. Task and limits: tasks/T004-m15-confirmation.md and docs/T004-m15.md. This first round is not full M15/live-EA integration.
+**K, B4 S3/S4:** për SELL, pas wick-ut mbi nivelin strukturor ndalen hyrjet e REJA të setup-it të mëparshëm dhe pritet rikonfirmim. Duhet FVG H4 rënëse e RE pas wick-ut; riprekja e një FVG-je të vjetër nuk mjafton. Ky pohim nuk urdhëron mbylljen e pozicioneve ekzistuese.
 
-The second round adds a separate disabled-by-default latest-unbroken-fractal candidate helper, reusing strict Left/Right swing math (default 2/2) on the closed M15 prefix. A prior strict close consumes a level; a wick/equality does not. This is an EXPERIMENTAL TECHNICAL PROPOSAL, not a decision about which swing the client calls structural. It neither changes H4 direction nor resolves Q04, and is not connected to a running EA.
+**K, B4 E1–E6:** shembulli BUY mbështet sekuencën marrje likuiditeti → FVG e re H4 → kthim/prekje → thyerje M15. Targeti në atë shembull ishte HH i fundit/vija e kuqe e sipërme. Nuk krijon një numër të detyrueshëm BOS ose algoritëm universal targeti.
 
-The third round supplies a read-only chronological observer EA connecting only T003 RECONFIRMED contexts to that opt-in candidate/timing pipeline. H4 evaluations use the prefix available at each snapshot time, with H4 changes first at equal closes. Source, swing and timing are explicit opt-ins, unselected by default. Every displayed event is a REPLAY fact, never an entry signal. Ordinary H4-touch integration, live entry notifications and trading remain unfinished. This updates the second-round "not connected" status without approving any mechanical rule.
+**H/P:** përkufizimi numerik i gap-it, renditja e zonave në raste të barabarta, candle A/B/C kundrejt wick-ut, jetëgjatësia, revokimi, ripërdorimi dhe identiteti i setup-it. Rregullat T002/T003 dhe OD1–OD6 të T004 janë propozime të dokumentuara, jo përgjigje klienti.
+
+## 6. Konfirmimi M15 dhe hyrja
+
+**K, B4 N5:** “Beje qe te thyhet vetem ne m15 qe mos ta ngaterrojm / Duke qen se dhe fvg e presim po ne m15”. M5 hiqet nga konfirmimi, jo kusht shtesë.
+
+**K, B1 own_words:** “Entry eshte te fillimi i FVG ne M15”. Urdhri është LIMIT. Pritet kthimi te FVG M15 pas thyerjes së strukturës/MSS.
+
+**I, B3:** hyrjet e vizatuara mbështesin skajin e parë në kthim: SELL skaji i poshtëm, BUY skaji i sipërm. Kjo është interpretim vizual i mbështetur; jo konfirmim numerik i OHLC-ve/offset-it.
+
+**K, B1 shembulli 3:** nëse çmimi afrohet por nuk prek FVG-në/çmimin e pritur, tregtia nuk aktivizohet. Kjo nuk do të thotë domosdoshmërisht se setup-i ishte i pavlefshëm ose se urdhri nuk duhej vendosur.
+
+**K, B1:** një hyrje për sinjal; “sinjal i ri” zgjedhur si çdo candle e re që plotëson kushtet. Candle e sinjalit është shënuar forming në pyetësor.
+
+**H/P:** cilin swing M15 përdor MSS; cila FVG zgjidhet kur ka disa; formimi i A/B/C kundrejt BOS; çfarë njihet intrabar. Prototipi me close dhe A në/pas BOS nuk e mbyll automatikisht pyetjen forming/closed. RETURN_OBSERVED është fakt replay, jo urdhër hyrjeje.
+
+## 7. Stop Loss, targeti dhe 2R
+
+**K, B1 own_words/pd_level:** SELL: SL te pika më e lartë e strukturës së thyer M15. BUY: te pika më e ulët e strukturës së thyer M15. Fusha sl_method='?' nuk anulon këtë përgjigje.
+
+**H:** identifikimi mekanik i gjithë strukturës së thyer; buffer ose offset. Mos supozo se niveli që u thye është gjithmonë vetë çmimi i SL-së. Mos e quaj buffer-in zero të konfirmuar.
+
+**K, B1:** targeti është likuiditeti i jashtëm/i radhës, i përshkruar edhe si struktura e radhës. **H:** zgjedhja universale mes disa niveleve dhe përditësimi i targetit.
+
+**K, B4 N6:** “Po ne raste kur target eshte me pak se 2R, minimumi do vendoset 2R”. Pra nuk e anashkalojmë trade-in vetëm për target nën 2R; minimumi mund të bjerë përtej ERL fillestare. Një target më i largët nuk shkurtohet nga ky minimum.
+
+**I/H, B2 assumptions:** 1R si distanca fillestare hyrje–SL është supozim i shprehur, jo përkufizim i ri klienti. Kostot, çmimi limit kundrejt fill-it dhe rrumbullakimi duhen ndarë shprehimisht.
+
+**K, B1:** kufi i distancës SL 50; fusha e eksportit e quan 50 USD lëvizje të çmimit të arit; trade-i anashkalohet kur SL tepër i madh. **H:** njësia duhet verifikuar, jo ngatërruar me 50 USD humbje llogarie.
+
+## 8. Menaxhimi pas hyrjes
+
+**K, B1:** në 2R mbyllet 80% e volumit FILLESTAR. 20% e mbetur vazhdon deri te TP ose SL. Pa trailing. Dalja e pjesshme numërohet si një trade.
+
+**K, B1 mg_priority:** fillimisht mbyllja 80%, pastaj zhvendosja e SL-së, pastaj pritja për TP/SL.
+
+**H — konflikt:** zgjedhja e strukturuar thotë SL te hyrja plus kostot; teksti thotë “stop loss tek +0.2%”. Baza dhe kuptimi i përqindjes nuk janë dhënë. Nuk zgjidhet në heshtje.
+
+**H:** kur TP përfundimtar është vetë 2R, si bashkëvepron dalja 80% me mbylljen e mbetjes; rrumbullakimi i volumit; gjendja pas fill-eve të pjesshme. Vijat e ndërmjetme të fotove nuk identifikohen automatikisht si 2R.
+
+## 9. Risku dhe kufijtë ditorë
+
+| Rregulli | Burimi/statusi | Çfarë mbetet hapur |
+|---|---|---|
+| 1% risk për trade | K, fakt paraprak i konfirmuar në B2 | baza/metoda/kostot e sizing-ut; fusha size_method është ? |
+| Maksimumi 2 pozicione njëkohësisht | K, B1 | trajtimi i pending dhe ekspozimit manual |
+| Maksimumi 2% risk i kombinuar | K, B1 | llogaritja dhe rezervimi për pending |
+| Kufiri 10 lote për trade | K, B1 | kufijtë realë të simbolit lexohen nga brokeri |
+| Në konflikt madhësie/risku/brokeri: skip | K, B1 | mos e ngatërro me propozim uljeje automatike |
+| Maksimumi 2 trade në ditë në përgjigjet e reja; 3 në faktet paraprake të konfirmuara | H, konflikt B1/B2 | cili kufi ka përparësi |
+| Pas një fitoreje ndalon për ditën | K, B1 | klasifikimi i trade-it me dalje të pjesshme/kosto |
+| Ndalon pas 2 humbjeve radhazi | K, B1 | në max 2 trade kufiri nuk sjell ndalim më të hershëm; nuk është kundërthënie më vete |
+| Breakeven as fitore as humbje | K, B1 | kriteri financiar me kosto dhe pjesshme |
+| Humbja ditore 2% e balance në fillim të ditës | K, B1 | mënyra e saktë e kontabilizimit/rikuperimit |
+| Vetëm rezultatet e mbyllura, vetëm roboti; pa floating | K, B1 | nuk është garanci kufizimi absolut të humbjes së llogarisë |
+| Në limit ditor: ndal hyrjet dhe anulo pending | K, B1 | nuk urdhëron mbylljen e pozicioneve ekzistuese |
+| Reset në mesnatë, Shqipëri | K, B1 | implementim Europe/Tirane/DST |
+
+Kapitali i planifikuar dhe lloji i llogarisë nuk janë plotësuar. Klienti tregton edhe manualisht. Mos ndrysho ose numëro tregti jashtë pronësisë së EA pa vendim të shprehur; kontrollo kufizimet e netting/hedging.
+
+## 10. Orari, lajmet dhe urdhrat në pritje
+
+**K, B1:** e hënë–e premte, 00:00–20:30 sipas orës së Shqipërisë, me ndryshimin sezonal të orës. Të premten kërkohet mbyllje në 21:00 dhe anulim pending.
+
+**K, B1:** shmang lajmet USD me ndikim të lartë, 30 minuta para dhe 30 minuta pas. **H:** çfarë bëhet me pozicionet e hapura para lajmeve dhe në fundin e zakonshëm të seancës.
+
+**K, B1:** pending anulohet në ndryshim drejtimi, sinjal të kundërt, fund seance dhe përpara lajmit të shmangur.
+
+**H:** skadimi sipas candle-ve/kohës; cooldown; ri-hyrja në të njëjtin setup; sinjali i kundërt kur ka pozicion të hapur; identiteti i sinjalit në restart.
+
+**K, B1:** zhvilluesi mund të zgjedhë prag spread për XAUUSD.r. **H:** veprimi pas bllokimit nga spread-i. Vlera kërkon matje, jo hamendje.
+
+**K, B1:** njoftime push në telefon. Detajet e njoftimeve operative janë implementim, jo sinjal strategjie.
+
+## 11. Shembujt dhe çfarë provojnë
+
+| Shembulli | Informacioni i klientit | Kufiri |
+|---|---|---|
+| SELL fitues, B3 foto 1 | MSS M15, FVG, kthim për hyrje, SL sipër, profit te likuiditeti | nuk provon përzgjedhjen H4, fill-in ose kuptimin e çdo vije të ndërmjetme |
+| SELL humbës, B3 foto 2 | kushtet u plotësuan, u prek SL, pastaj çmimi vazhdoi në drejtimin e pritur | mos zhvendos SL fillestare me informacionin e spike-ut të mëvonshëm; data e shkruar dhe grafiku duhen dalluar |
+| BUY i paaktivizuar, B3 foto 3 | çmimi nuk arriti pikën e pritur/nuk preku FVG | mos e klasifiko si sinjal të pavlefshëm vetëm se nuk pati fill |
+| BUY H4, B4 E1–E6 | likuiditet, FVG e re, kthim dhe konfirmim M15; target HH i fundit në shembull | jo numër universal BOS ose target universal |
+| Dy wick-e të rrethuara, B4 N3 | klienti i quan marrje likuiditeti me vazhdim të drejtimit të mëparshëm | vazhdimi i mëvonshëm nuk mund të përdoret si informacion i disponueshëm më herët |
+
+Grafikët TradingView TVC:GOLD, standard candles, ora e deklaruar Shqipëri. Të dhënat e Tauro/MetaQuotes nuk deklarohen identike me TradingView pa verifikim.
+
+## 12. Prototipet tona — jo rregulla klienti
+
+- T002: swing 2/2, drejtimi nga swing-et, intervali, klasifikimi/gjendjet FVG, renditja, ERL taken.
+- T003: niveli mbrojtës, ratchet, bias me kujtesë, HOLD/SWEEP_WAIT/RECONFIRMED, politika e FVG-ve dhe besueshmëria A/B.
+- T004: latest-unbroken-fractal M15, close rreptësisht përtej, A në/pas BOS, të gjithë kandidatët, burimet e dallueshme T002-touch/T003-reconfirmed dhe OD1–OD6.
+- CONVERGED do të thotë marrëveshje në thellësitë e provuara, jo saktësi ndaj strategjisë së klientit.
+- Kur T002 dhe T003 kundërshtohen, paneli e tregon. Përparësia nuk është zgjidhur nga testet.
+- Testet dhe vëzhgimet MT5 dokumentohen veçmas. RETURN_OBSERVED nuk autorizon hyrje.
+
+## 13. Regjistri i pyetjeve të reduktuara
+
+Mos pyes më nga fillimi: timeframe-i i konfirmimit (M15), nëse H4 FVG është hyrje (jo), nëse wick touch mjafton (po, pastaj mbyllja H4), fillimi apo mesi i FVG (klienti tha fillimi), parimi strukturor i SL-së, minimumi nën 2R, 80% në 2R dhe mungesa e trailing-ut.
+
+Pyetje të mundshme vetëm kur hapi përkatës bllokohet: zgjedhja mes FVG-ve M15; swing-et që përbëjnë strukturën; offset/buffer; targeti mes disa niveleve; përparësia T002/T003; sizing/kosto; 2 apo 3 trade; +0.2%; skadimi/ri-hyrja; pozicionet në lajme/fund seance. Para pyetjes kontrollo nëse shembulli ekzistues e zgjidh. Parametrat teknikë të brokerit lexohen nga llogaria, nuk pyeten si preferenca.
+
+## 14. Testimi, pranimi dhe mirëmbajtja
+
+**K, B1:** klienti raporton testim manual mbi 60 trade dhe 50–55% win rate, pa regjistër të dorëzuar. Këto janë pohime të klientit, jo rezultate të verifikuara. Periudha e krahasimit e kërkuar: nga përfundimi i robotit e tutje.
+
+**H:** toleranca e hyrjes/kohës, përputhja e kërkuar e trade-ve, krahasimi me kostot, periudha e plotë e testimit dhe trajtimi i candle-s që prek SL e TP. Nuk premtohet profitabilitet nga kalimi i testeve të logjikës.
+
+Pas çdo sqarimi: shto burimin dhe ndryshimin këtu; përditëso DECISIONS dhe pyetjen përkatëse; mbaj historinë e pikës së zëvendësuar. Mos kopjo logje të gjata ose të dhëna private çmimesh në këtë dokument. Përpara çdo raundi zhvillimi lexo seksionet përkatëse dhe STATE.
+
+## 15. Historia e korrigjimeve
+
+- 14.10.2026: u krijua referenca qendrore nga B1–B5 dhe sqarimet në bisedë.
+- 14.10.2026: korrigjim i rëndësishëm ndaj planit T005 te 5447ef3 dhe përgjigjes së mëparshme të Codex: “fillimi i FVG ne M15” është tekst origjinal klienti. Përgjigjja me tekst për SL nuk anulohet nga fusha automatike e paplotësuar.
+
+Referenca aktive në repo: docs/STRATEGY_SPEC.md. Checklist: [PROJECT_CHECKLIST.md](PROJECT_CHECKLIST.md); pamja: [PROJECT_PROGRESS.html](PROJECT_PROGRESS.html). Gjendja operative: [STATE.md](STATE.md).
+
+Detajet teknike: [T003](../tasks/T003-h4-bias-change.md), [T004](../tasks/T004-m15-confirmation.md), [T005](../tasks/T005-entry-sl-tp-plan.md). Specifikimi i mëparshëm ruhet vetëm si [arkiv historik](reference/strategy-spec-archive-2026-10-14.md), jo kopje aktive.

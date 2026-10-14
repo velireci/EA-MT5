@@ -38,3 +38,7 @@ The T003 proposals P1-P14 (body break, structural-level selection, bias hysteres
 
 ## Owner workflow decision, 2026-10-14
 The owner authorised Codex to act as the sole T004 writer while Claude is paused, after reviewing the bounded handoff scope. T004 may implement the independent H4-to-M15 observer infrastructure. This supersedes earlier workflow-only instructions not to start M15, without approving any new client trading definition. The M15 structural selector/timing remain labelled proposals; no trading activation or merge is authorised.
+
+
+## Documentation workflow, 2026-10-14
+Owner authorised consolidation of the client strategy, progress checklist and visual snapshot after Claude finished the task. Current requirements reference: STRATEGY_SPEC.md; progress: PROJECT_CHECKLIST.md and STATE.md; visual: PROJECT_PROGRESS.html. Consult these before each directive and update after evidence. The previous specification is an explicitly historical archive. This adds no client trading decision, merge or live activation.
