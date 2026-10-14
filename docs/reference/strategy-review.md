@@ -22,7 +22,7 @@ This table separates direct answers from interpretations requiring confirmation.
 | Direction | Prose refers to H1 and H4 swing structure; structured answer selects H4 | H1's role, agreement rule and swing definition unresolved |
 | Setup location | Select the “main” H4 FVG; wait for price to return for internal liquidity (IRL), then continue toward external liquidity (ERL) | Narrative present; zone selection and qualifying return undefined |
 | Lower-timeframe confirmation | On M15, wait for structure to break, create MSS, and leave an FVG | Exact swing, break criteria and sequence undefined |
-| Entry | Limit order at the beginning of the M15 FVG | Order type clear; exact boundary, offset and timing undefined |
+| Entry | Limit order at the beginning of the M15 FVG | Order type clear. CORRECTION 2026-10-14: "fillimi i FVG ne M15" is the client's own wording (pergjigjet.json:187, specifikimi.txt:24), not a reviewer reading; undefined remain the choice among several FVGs, any offset and timing |
 | SELL stop | At the highest point of the broken M15 structure | Broad placement clear; which swing and buffer unresolved |
 | BUY stop | At the lowest point of the broken M15 structure | Same limitation |
 | Final target | External/next liquidity; also described as the next structure break | Target timeframe, eligible levels and selection priority undefined |
@@ -94,8 +94,8 @@ The answer “forming candle” can be intentional. However, a provisional gap c
 
 Have him mark exact numbers on a BUY and SELL example:
 
-- Entry at which FVG boundary, midpoint or offset?
-- Which swing sets the stop, and what buffer beyond it?
+- (Corrected 2026-10-14: the beginning of the FVG is a client statement, see tasks/T005-entry-sl-tp-plan.md; do not ask again.) Which FVG when several, and is there any offset?
+- (Corrected 2026-10-14: the SL principle, extreme of the broken M15 structure, is a client statement.) Which algorithm identifies the whole broken structure, and is there any buffer?
 - Which price sets final TP? Previous high/low, equal highs/lows, session level, H1/H4 swing or another object?
 - If multiple liquidity levels exist, which wins?
 - Is TP fixed at order creation or updated when new structure appears?
