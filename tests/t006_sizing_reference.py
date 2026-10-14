@@ -60,7 +60,11 @@ STATUSES, first failure wins, in this order (fixed reason tags; INVALID_INPUT re
                        VOLUME_MAX_BELOW_MIN  volume_max < volume_min (equal is allowed)
                        STEP_RANGE            volume_max/step or cap_lots/step non-finite or > MAX_STEPS (1e9)
                        VOLUME_NOT_ON_GRID    volume_min or volume_max is not an integer >= 1 multiple of the step
-                                             (|x - round(x)| <= EPS_STEPS in steps, x = value/step; min checked first)
+                                             (x = value/step, k = floor(x + 0.5), k >= 1 and
+                                             |x - k| <= GRID_ULPS * DBL_EPSILON * max(1, x); min checked first)
+                                             GRID RULE: like the cap, NOT the 1e-6 step EPS_STEPS (~10^9 times larger than binary
+                                             noise): max 0.29999995 / step 0.1 would pass as 3 steps and allow 0.3 ABOVE the maximum,
+                                             min 0.30000005 as 3 steps and allow 0.3 BELOW the minimum. Only a few ulps are tolerated.
                        NUMERIC_OVERFLOW      loss_per_lot, risk_per_step or volume_raw not finite or <= 0, or
                                              risk_budget/risk_per_step > MAX_RAW_STEPS (1e15)
   3 SKIP_BELOW_MIN_VOLUME -> SKIP_ABOVE_MAX_VOLUME -> SKIP_ABOVE_CAP
@@ -85,8 +89,9 @@ SKIP_BELOW_MIN_VOLUME = 'SKIP_BELOW_MIN_VOLUME'
 SKIP_ABOVE_MAX_VOLUME = 'SKIP_ABOVE_MAX_VOLUME'
 SKIP_ABOVE_CAP = 'SKIP_ABOVE_CAP'
 
-EPS_STEPS = 1e-6          # tolerance, in volume steps, for "on the grid" and float noise on an exact fit
+EPS_STEPS = 1e-6          # tolerance, in volume steps, ONLY for float noise on an exact fit in the rounding of n
 DBL_EPSILON = 2.220446049250313e-16   # = MQL5 DBL_EPSILON (2^-52)
+GRID_ULPS = 4.0           # volume_min/volume_max grid tolerance, in ulps of x = value/step relative to max(1, x); NOT EPS_STEPS (see GRID RULE)
 CAP_ULPS = 4.0            # cap tolerance, in ulps of x = cap/step relative to max(1, x); NOT EPS_STEPS (see CAP RULE)
 MAX_STEPS = 1e9           # volume_max/step and cap/step bound (double spacing there is 1.2e-7 < EPS_STEPS)
 MAX_RAW_STEPS = 1e15      # risk_budget/risk_per_step bound; far below 2^53, so the integer n is exact
@@ -132,10 +137,10 @@ def _fail(status, reason, **kw):
 
 
 def _grid_steps(value, step):
-    """Integer number of steps when value is a >= 1 multiple of step within EPS_STEPS, else -1."""
+    """Integer number of steps when value is a >= 1 multiple of step within a few ulps (GRID_ULPS), else -1."""
     x = value / step
     k = math.floor(x + 0.5)
-    if k < 1 or abs(x - k) > EPS_STEPS:
+    if k < 1 or abs(x - k) > GRID_ULPS * DBL_EPSILON * max(1.0, x):
         return -1
     return int(k)
 

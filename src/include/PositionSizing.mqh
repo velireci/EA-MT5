@@ -19,7 +19,7 @@
 //
 // ROUNDING (the only adjustment this module ever makes): the volume is rounded DOWN to a whole number of steps n.
 //  risk_per_step = volume_step * loss_per_lot_at_SL (computed once, double)
-//  n = floor(risk_budget / risk_per_step + EPS_STEPS)                      EPS_STEPS = 1e-6 step (float noise on an exact fit)
+//  n = floor(risk_budget / risk_per_step + EPS_STEPS)                      EPS_STEPS = 1e-6 step (float noise on an exact fit; ONLY here)
 //  while n > 0 and n * risk_per_step > risk_budget: n -= 1                the SAME expression as the reported risk
 //  volume_out = n * volume_step ; risk_realized = n * risk_per_step
 //  So risk_realized <= risk_budget ALWAYS holds for the double expression, identically in Python and MQL5. In exact real
@@ -46,7 +46,9 @@
 //  2 INVALID_INPUT: INVALID_STOP_TICKS (e/s ticks beyond +/-1e13 or |e-s| == 0), INVALID_RISK_BUDGET, INVALID_TICK_VALUE,
 //    INVALID_VOLUME_MIN, INVALID_VOLUME_STEP, INVALID_VOLUME_MAX, INVALID_CAP (each non-finite or <= 0), VOLUME_MAX_BELOW_MIN
 //    (equal allowed), STEP_RANGE (volume_max/step or cap/step non-finite or > 1e9), VOLUME_NOT_ON_GRID (volume_min or
-//    volume_max is not an integer >= 1 multiple of the step within 1e-6 step; min first), NUMERIC_OVERFLOW (loss per lot,
+//    volume_max is not an integer >= 1 multiple of the step: x=value/step, k=floor(x+0.5), k>=1 and
+//    |x-k|<=PS_GRID_ULPS*DBL_EPSILON*max(1,x); min first. NOT the 1e-6 step: it is ~10^9 times larger than binary noise and would
+//    accept max 0.29999995/step 0.1 as 3 steps (0.3 ABOVE the maximum) or min 0.30000005 (0.3 BELOW the minimum)), NUMERIC_OVERFLOW (loss per lot,
 //    risk per step or volume_raw not finite or <= 0, or risk_budget/risk_per_step > 1e15)
 //  3 SKIP_BELOW_MIN_VOLUME -> SKIP_ABOVE_MAX_VOLUME -> SKIP_ABOVE_CAP
 //  4 OK
@@ -62,6 +64,7 @@
 #include "TradeGeometry.mqh"
 
 #define PS_EPS_STEPS 1e-6
+#define PS_GRID_ULPS 4.0
 #define PS_CAP_ULPS 4.0
 #define PS_MAX_STEPS 1e9
 #define PS_MAX_RAW_STEPS 1e15
@@ -142,12 +145,12 @@ bool PS_Fail(SPsResult &r,const ENUM_PS_STATUS status,const string reason)
    return(false);
   }
 
-// Integer number of steps when value is a >= 1 multiple of step within PS_EPS_STEPS, else -1.
+// Integer number of steps when value is a >= 1 multiple of step within a few ulps (PS_GRID_ULPS), else -1.
 long PS_GridSteps(const double value,const double step)
   {
    double x=value/step;
    double k=MathFloor(x+0.5);
-   if(k<1.0 || MathAbs(x-k)>PS_EPS_STEPS) return(-1);
+   if(k<1.0 || MathAbs(x-k)>PS_GRID_ULPS*DBL_EPSILON*MathMax(1.0,x)) return(-1);
    return((long)k);
   }
 

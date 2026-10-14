@@ -123,6 +123,8 @@ neg "reduced_to_limit field added in MQL5" guards $MOD "   double risk_unused;" 
 negpy "round down replaced by ceil in Python" guards "n = int(math.floor(raw_steps + EPS_STEPS))" "n = int(math.ceil(raw_steps + EPS_STEPS))" "sizing expression missing in Python"
 neg "cap tolerance back to the 1e-6 step in MQL5" guards $MOD "long cap_steps=(long)MathFloor(cap_x+PS_CAP_ULPS*DBL_EPSILON*MathMax(1.0,cap_x));" "long cap_steps=(long)MathFloor(cap_x+PS_EPS_STEPS);" "sizing expression missing in MQL5" $REF
 negpy "cap tolerance back to the 1e-6 step in Python" guards "cap_x + CAP_ULPS * DBL_EPSILON * max(1.0, cap_x)" "cap_x + EPS_STEPS" "sizing expression missing in Python"
+neg "grid tolerance back to the 1e-6 step in MQL5" guards $MOD "MathAbs(x-k)>PS_GRID_ULPS*DBL_EPSILON*MathMax(1.0,x)" "MathAbs(x-k)>PS_EPS_STEPS" "sizing expression missing in MQL5" $REF
+negpy "grid tolerance back to the 1e-6 step in Python" guards "abs(x - k) > GRID_ULPS * DBL_EPSILON * max(1.0, x)" "abs(x - k) > EPS_STEPS" "sizing expression missing in Python"
 negpy "cap checked before max in Python" guards "    if n > max_steps:" "    if n > cap_steps:" "limits must be checked min -> max -> cap"
 negpy "Python tolerance constant differs" parity "EPS_STEPS = 1e-6          #" "EPS_STEPS = 1e-5          #" "PS_EPS_STEPS / EPS_STEPS differs"
 # syntax / format / ASCII controls use the shared checkers

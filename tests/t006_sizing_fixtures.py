@@ -122,6 +122,23 @@ case('BUY_CAP_SMALLER_THAN_MAX', GA_BUY, P(vmax=100.0, cap=1.5), ACAP, (625, 625
 case('BUY_BOTH_EXCEEDED', GA_BUY, P(vmax=1.5, cap=1.0), AMAX, (625, 625.0, 197, 0.0, 0.0))
 case('BUY_CAP_BELOW_MIN', GA_BUY, P(vmin=0.10, cap=0.05), ACAP, (625, 625.0, 197, 0.0, 0.0))
 case('BUY_MIN_EQUALS_MAX', GA_BUY, P(vmin=1.97, vmax=1.97), OKS, (625, 625.0, 197, 1.97, 1231.25))
+# --- volume_min / volume_max grid rule: |x - round(x)| <= 4*DBL_EPSILON*max(1, x), x = value/step; NOT the 1e-6 step ----
+# Budget 187.5 on 625 ticks = raw .3 lots = 3 steps of .1. By hand: x = .29999995/.1 = 2.9999995 (5e-7 below 3, the allowed
+# noise is 4*2.2e-16*3 = 2.7e-15) -> off grid -> INVALID_INPUT VOLUME_NOT_ON_GRID; likewise .30000005 (3.0000005).
+# A max of .29999995 would otherwise allow .3 ABOVE the maximum, a min of .30000005 would allow .3 BELOW the minimum.
+case('BUY_MAX_JUST_BELOW_STEP01', GA_BUY, P(budget=187.5, vmin=0.1, step=0.1, vmax=0.29999995), INV, why='VOLUME_NOT_ON_GRID: volume_max')
+case('SELL_MAX_JUST_BELOW_STEP01', GA_SELL, P(budget=187.5, vmin=0.1, step=0.1, vmax=0.29999995), INV, why='VOLUME_NOT_ON_GRID: volume_max')
+case('BUY_MAX_JUST_ABOVE_STEP01', GA_BUY, P(budget=187.5, vmin=0.1, step=0.1, vmax=0.30000005), INV, why='VOLUME_NOT_ON_GRID: volume_max')
+case('BUY_MIN_JUST_ABOVE_STEP01', GA_BUY, P(budget=187.5, step=0.1, vmin=0.30000005, vmax=10.0), INV, why='VOLUME_NOT_ON_GRID: volume_min')
+case('SELL_MIN_JUST_ABOVE_STEP01', GA_SELL, P(budget=187.5, step=0.1, vmin=0.30000005, vmax=10.0), INV, why='VOLUME_NOT_ON_GRID: volume_min')
+case('BUY_MIN_JUST_BELOW_STEP01', GA_BUY, P(budget=187.5, step=0.1, vmin=0.29999995, vmax=10.0), INV, why='VOLUME_NOT_ON_GRID: volume_min')
+# binary noise stays accepted: .3/.1 = 2.9999999999999996, (.1+.2)/.1 = 3.0000000000000004, .7/.1 = 6.999999999999999.
+case('BUY_MAX_ON_GRID_03_NOISE', GA_BUY, P(budget=187.5, vmin=0.1, step=0.1, vmax=0.3), OKS, (625, 625.0, 3, 0.3, 187.5))
+case('SELL_MAX_ON_GRID_03_NOISE', GA_SELL, P(budget=187.5, vmin=0.1, step=0.1, vmax=0.3), OKS, (625, 625.0, 3, 0.3, 187.5))
+case('BUY_MAX_SUM_03', GA_BUY, P(budget=187.5, vmin=0.1, step=0.1, vmax=0.1 + 0.2), OKS, (625, 625.0, 3, 0.3, 187.5))
+case('BUY_MAX_ON_GRID_07_NOISE', GA_BUY, P(budget=437.5, vmin=0.1, step=0.1, vmax=0.7), OKS, (625, 625.0, 7, 0.7, 437.5))
+case('BUY_MIN_ON_GRID_03', GA_BUY, P(budget=187.5, step=0.1, vmin=0.3, vmax=10.0), OKS, (625, 625.0, 3, 0.3, 187.5))
+case('BUY_MIN_EQUALS_MAX_03', GA_BUY, P(budget=187.5, step=0.1, vmin=0.3, vmax=0.3), OKS, (625, 625.0, 3, 0.3, 187.5))
 # --- geometry not OK: nothing is recomputed ------------------------------------------------------------------
 case('GEOMETRY_ZERO_RISK', (BUY, 1950.40, 1950.40, S01), P(), GNO, why='GEOMETRY_NOT_OK')
 case('GEOMETRY_SL_WRONG_SIDE', (BUY, 1950.40, 1955.00, S01), P(), GNO, why='GEOMETRY_NOT_OK')

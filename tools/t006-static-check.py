@@ -27,7 +27,7 @@ TAGS = ['GEOMETRY_NOT_OK', 'INVALID_STOP_TICKS', 'INVALID_RISK_BUDGET', 'INVALID
         'INVALID_VOLUME_STEP', 'INVALID_VOLUME_MAX', 'INVALID_CAP', 'VOLUME_MAX_BELOW_MIN', 'STEP_RANGE',
         'VOLUME_NOT_ON_GRID', 'NUMERIC_OVERFLOW', 'SKIP_BELOW_MIN_VOLUME', 'SKIP_ABOVE_MAX_VOLUME', 'SKIP_ABOVE_CAP']
 STATUSES = {'OK', 'INVALID_INPUT', 'GEOMETRY_NOT_OK', 'SKIP_BELOW_MIN_VOLUME', 'SKIP_ABOVE_MAX_VOLUME', 'SKIP_ABOVE_CAP'}
-CONSTS = (('PS_EPS_STEPS', 'EPS_STEPS'), ('PS_CAP_ULPS', 'CAP_ULPS'), ('PS_MAX_STEPS', 'MAX_STEPS'), ('PS_MAX_RAW_STEPS', 'MAX_RAW_STEPS'),
+CONSTS = (('PS_EPS_STEPS', 'EPS_STEPS'), ('PS_GRID_ULPS', 'GRID_ULPS'), ('PS_CAP_ULPS', 'CAP_ULPS'), ('PS_MAX_STEPS', 'MAX_STEPS'), ('PS_MAX_RAW_STEPS', 'MAX_RAW_STEPS'),
           ('PS_MAX_STOP_TICKS', 'MAX_STOP_TICKS'))
 REQUIRED = ['LINEAR MODEL', 'NOT a guarantee', 'COSTS_NOT_MODELLED', 'does NOT choose the base of the 1%', 'tick_value',
             'ONE tick for ONE LOT in ACCOUNT currency', 'NEVER raised to volume_min', 'reduced_to_limit',
@@ -134,13 +134,13 @@ def check_guards(files):
                 r'raw_steps=risk_budget/risk_per_step', r'risk_per_step=volume_step\*loss_per_lot',
                 r'loss_per_lot=\(double\)stop_ticks\*tick_value', r'cap_steps=\(long\)MathFloor\(cap_x\+PS_CAP_ULPS\*DBL_EPSILON\*MathMax\(1\.0,cap_x\)\)',
                 r'volume_max<volume_min', r'PS_GridSteps\(volume_min,volume_step\)', r'PS_GridSteps\(volume_max,volume_step\)',
-                r'MathAbs\(x-k\)>PS_EPS_STEPS']
+                r'MathAbs\(x-k\)>PS_GRID_ULPS\*DBL_EPSILON\*MathMax\(1\.0,x\)']
     must_py = [r'math\.floor\(raw_steps \+ EPS_STEPS\)', r'while n > 0 and n \* risk_per_step > risk_budget:', r'\n\s+n -= 1',
                r'risk_realized = n \* risk_per_step', r'volume_out = n \* volume_step',
                r'raw_steps = risk_budget / risk_per_step', r'risk_per_step = volume_step \* loss_per_lot',
                r'loss_per_lot = float\(stop_ticks\) \* tick_value', r'cap_steps = int\(math\.floor\(cap_x \+ CAP_ULPS \* DBL_EPSILON \* max\(1\.0, cap_x\)\)\)', r'\nDBL_EPSILON = 2\.220446049250313e-16',
                r'volume_max < volume_min', r'_grid_steps\(volume_min, volume_step\)', r'_grid_steps\(volume_max, volume_step\)',
-               r'abs\(x - k\) > EPS_STEPS']
+               r'abs\(x - k\) > GRID_ULPS \* DBL_EPSILON \* max\(1\.0, x\)']
     for pat in must_mqh:
         if not re.search(pat, mqh):
             print('%s: sizing expression missing in MQL5: %s' % (files[0], pat))

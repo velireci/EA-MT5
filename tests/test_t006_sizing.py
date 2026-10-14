@@ -229,7 +229,9 @@ class ValidationTests(unittest.TestCase):
     def test_grid_tolerance_boundaries(self):
         self.assertEqual(self.go(volume_min=0.3, volume_step=0.1, volume_max=5.0, cap_lots=5.0).status, 'OK')
         self.assertEqual(self.go(volume_min=0.30000000000000004, volume_step=0.1, volume_max=5.0, cap_lots=5.0).status, 'OK')
-        self.assertEqual(self.go(volume_min=0.1 * (1 + 9e-7), volume_step=0.1, volume_max=5.0).status, 'OK')       # 9e-7 step
+        # UPDATED (grid rule changed from 1e-6 step to a few ulps): a 9e-7 step deviation used to be accepted on purpose; it is a
+        # REAL deviation (min above the grid point) and is now rejected, like 2e-6.
+        self.assertTrue(self.go(volume_min=0.1 * (1 + 9e-7), volume_step=0.1, volume_max=5.0).reason.startswith('VOLUME_NOT_ON_GRID'))
         self.assertTrue(self.go(volume_min=0.1 * (1 + 2e-6), volume_step=0.1, volume_max=5.0).reason.startswith('VOLUME_NOT_ON_GRID'))
         self.assertTrue(self.go(volume_min=0.14, volume_step=0.1, volume_max=5.0).reason.startswith('VOLUME_NOT_ON_GRID'))
         self.assertEqual(self.go(volume_min=1.6, volume_max=1.6, cap_lots=10.0).status, 'OK')                      # min == max
@@ -359,6 +361,74 @@ class RoundingTests(unittest.TestCase):
                                 (62.5, 0.1, 1), (6.25, 0.01, 1), (31.25, 0.05, 1)):
             r = p.size(g, budget, 1.0, step, step, 100.0, 100.0)
             self.assertEqual((r.status, r.steps_rounded), ('OK', n), (budget, step))
+
+
+class GridRuleTests(unittest.TestCase):
+    """volume_min / volume_max grid: k = floor(x + 0.5) >= 1 and |x - k| <= 4*DBL_EPSILON*max(1, x); 1e-6 step is NOT used."""
+    GEO = geo_ticks(195040, 194415)          # 625 stop ticks
+
+    def go(self, **kw):
+        a = dict(budget=187.5, vmin=0.1, step=0.1, vmax=10.0, cap=10.0)
+        a.update(kw)
+        return p.size(self.GEO, a['budget'], 1.0, a['vmin'], a['step'], a['vmax'], a['cap'])
+
+    def test_constant_and_rule(self):
+        self.assertEqual(p.GRID_ULPS, 4.0)
+        self.assertEqual(p.DBL_EPSILON, 2.0 ** -52)
+
+    def test_real_deviation_of_5e7_step_is_rejected_both_sides_max_and_min(self):
+        # hand: x = 2.9999995 or 3.0000005, |x - 3| = 5e-7 >> 4*2.2e-16*3 = 2.7e-15 -> INVALID_INPUT VOLUME_NOT_ON_GRID
+        for geo in (geo_ticks(195040, 194415), geo_ticks(231020, 231645)):
+            for kw, who in (({'vmax': 0.29999995}, 'volume_max'), ({'vmax': 0.30000005}, 'volume_max'),
+                            ({'vmin': 0.30000005}, 'volume_min'), ({'vmin': 0.29999995}, 'volume_min')):
+                a = dict(budget=187.5, vmin=0.1, step=0.1, vmax=10.0, cap=10.0)
+                a.update(kw)
+                r = p.size(geo, a['budget'], 1.0, a['vmin'], a['step'], a['vmax'], a['cap'])
+                self.assertEqual(r.status, 'INVALID_INPUT', kw)
+                self.assertTrue(r.reason.startswith('VOLUME_NOT_ON_GRID: ' + who), (kw, r.reason))
+                assert_nothing_reported(self, r)
+
+    def test_normal_decimal_limits_are_accepted(self):
+        for step in (0.1, 0.01, 0.05, 1.0, 0.001, 0.5):
+            r = self.go(vmin=step, step=step, vmax=100.0, cap=100.0, budget=1234.56)
+            self.assertEqual(r.status, 'OK', step)
+            self.assertEqual(r.min_steps, 1, step)
+        for vmax in (0.3, 0.7, 10.0, 100.0, 0.1 + 0.2):
+            r = self.go(vmax=vmax)
+            self.assertEqual(r.status, 'OK', vmax)
+        r = self.go(vmin=0.001, step=0.001, vmax=5000.0, cap=5000.0, budget=1234.56)
+        self.assertEqual((r.status, r.max_steps), ('OK', 5000000))
+        r = self.go(vmin=0.3, vmax=0.3)                                                # min == max on the grid
+        self.assertEqual((r.status, r.steps_rounded, r.min_steps, r.max_steps), ('OK', 3, 3, 3))
+        r = self.go(vmin=0.3, vmax=0.1)                                                # max below min is still its own tag
+        self.assertTrue(r.reason.startswith('VOLUME_MAX_BELOW_MIN'), r.reason)
+
+    def test_sweep_every_on_grid_value_accepted_and_5e7_step_deviation_rejected(self):
+        for step in (0.01, 0.02, 0.05, 0.1, 0.25, 0.001):
+            for k in range(1, 3000):
+                v = k * step
+                if p._grid_steps(v, step) != k:
+                    self.fail('on-grid %r step %r not accepted as %d' % (v, step, k))
+                for d in (-5e-7, 5e-7):
+                    if p._grid_steps((k + d) * step, step) != -1:
+                        self.fail('deviation %g step at k=%d step %r accepted' % (d, k, step))
+        # through size(): a valid limit is never INVALID_INPUT (a SKIP is fine), a 5e-7 step deviation always is
+        for step in (0.01, 0.02, 0.05, 0.1, 0.25, 0.001):
+            for k in (2, 7, 2999):
+                self.assertNotEqual(self.go(step=step, vmin=step, vmax=k * step, cap=3000 * step, budget=1e5).status, 'INVALID_INPUT', (step, k))
+                for d in (-5e-7, 5e-7):
+                    bad = self.go(step=step, vmin=step, vmax=(k + d) * step, cap=3000 * step, budget=1e5)
+                    self.assertTrue(bad.reason.startswith('VOLUME_NOT_ON_GRID: volume_max'), (step, k, d, bad.reason))
+                    bad = self.go(step=step, vmin=(k + d) * step, vmax=4000 * step, cap=3000 * step, budget=1e5)
+                    self.assertTrue(bad.reason.startswith('VOLUME_NOT_ON_GRID: volume_min'), (step, k, d, bad.reason))
+
+    def test_old_1e6_step_tolerance_is_gone(self):
+        for dev in (1e-6, 9e-7, 5e-7, 1e-8):
+            self.assertEqual(p._grid_steps(0.1 * (3 + dev), 0.1), -1, dev)
+        self.assertEqual(p._grid_steps(0.3, 0.1), 3)
+        self.assertEqual(p._grid_steps(0.1 + 0.2, 0.1), 3)
+        self.assertEqual(p._grid_steps(0.7, 0.1), 7)
+        self.assertEqual(p._grid_steps(0.04, 0.1), -1)          # below one step
 
 
 class LimitTests(unittest.TestCase):
@@ -523,6 +593,7 @@ def load_mutant(old, new, count=1):
 ROUND = ("    n = int(math.floor(raw_steps + EPS_STEPS))\n    while n > 0 and n * risk_per_step > risk_budget:\n"
          "        n -= 1\n")
 LIMITS = "    # LIMITS: a conflict is a skip, never a reduction\n"
+GRIDLINE = "    if k < 1 or abs(x - k) > GRID_ULPS * DBL_EPSILON * max(1.0, x):\n"
 CAPLINE = "    cap_steps = int(math.floor(cap_x + CAP_ULPS * DBL_EPSILON * max(1.0, cap_x)))\n"
 MUTANTS = {
     'round UP instead of down': (ROUND, "    n = int(math.ceil(raw_steps))\n"),
@@ -541,6 +612,8 @@ MUTANTS = {
     'no step range guard': ("or max_x > MAX_STEPS or cap_x > MAX_STEPS:", "or False:"),
     'cap tolerance back to the 1e-6 step': (CAPLINE, "    cap_steps = int(math.floor(cap_x + EPS_STEPS))\n"),
     'cap tolerance 1e-6 step relative to x': (CAPLINE, "    cap_steps = int(math.floor(cap_x + EPS_STEPS * max(1.0, cap_x)))\n"),
+    'grid tolerance back to the 1e-6 step': (GRIDLINE, "    if k < 1 or abs(x - k) > EPS_STEPS:\n"),
+    'grid tolerance 1e-6 step relative to x': (GRIDLINE, "    if k < 1 or abs(x - k) > EPS_STEPS * max(1.0, x):\n"),
     'cap floored without tolerance': (CAPLINE, "    cap_steps = int(math.floor(cap_x))\n"),
 }
 
@@ -591,6 +664,10 @@ class MutationTests(unittest.TestCase):
             self.assertIn('BUY_CAP_JUST_BELOW_STEP01', bad, name)
             self.assertIn('SELL_CAP_JUST_BELOW_STEP01', bad, name)
         self.assertIn('BUY_CAP_NOISE_07', table_failures(load_mutant(*MUTANTS['cap floored without tolerance'])))
+        for name in ('grid tolerance back to the 1e-6 step', 'grid tolerance 1e-6 step relative to x'):
+            bad = table_failures(load_mutant(*MUTANTS[name]))
+            for row in ('BUY_MAX_JUST_BELOW_STEP01', 'BUY_MIN_JUST_ABOVE_STEP01'):
+                self.assertIn(row, bad, name)
         self.assertTrue(by)
 
 
