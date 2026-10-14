@@ -5,7 +5,7 @@ NOT a compiler and NOT a runtime test: these read the source text only.
 Usage: t003-visual-check.py CHECK FILE...   (exit 0 = clean, 1 = problems printed)
 
 CHECK names: trading, isolation, flow, nopricefeed, collision, diag, nofrozen, disagree, liquidity, limited, layers,
-             noclock, names, asof
+             noclock, names, asof, compact, resize, labels, baseline, export, since
   trading      no order/trading API in executable code (comments stripped)
   isolation    chart-object deletion and creation are confined to the T003 prefix
   flow         live/historical flow: closed bars only, no live price, baseline cursor
@@ -19,6 +19,12 @@ CHECK names: trading, isolation, flow, nopricefeed, collision, diag, nofrozen, d
   noclock      no live clock in the visual files (everything comes from the closed bars)
   names        object names are short and built from stable parts (no long logic id in a name)
   asof         as-of flow: server time input, historical never reads a quote, Draw reads only the evaluated window
+  compact      panel: compact default (InpShowDetails false), every line has a priority, details after the compact return, Experts log holds the details
+  resize       panel fits the chart (rows/columns/budget), CHARTEVENT_CHART_CHANGE re-lays it out without a new evaluation, font not shrunk
+  labels       chart labels: short text + tooltip, stable slot (not draw order), only the text anchor is offset, level coordinates untouched
+  baseline     the T002 baseline (lookback = InpLookbackBars, same functions as the T002 EA) is computed and named apart from the replay-window structure
+  export       the CSV key includes the bar count and a content hash; the file is rewritten when the set changes
+  since        clear / recovery zeroes the values labelled 'since baseline'; the session log is Experts only
 """
 import re
 import sys
@@ -470,6 +476,8 @@ def check_disagree(paths):
             bad.append('H3LDisagree does not end with return(false)')
     if 'MODEL DISAGREEMENT - client validation pending' not in lcode:
         bad.append('the text "MODEL DISAGREEMENT - client validation pending" is missing from H4BiasLayers.mqh')
+    if 'baseline (lookback ' not in lcode or 'replay-window structure' not in lcode:
+        bad.append('the disagreement text does not name the T002 baseline (lookback N) / the replay-window structure')
     if 'MIXED / UNKNOWN' not in lraw or 'NOT a disagreement' not in lraw:
         bad.append('the definition (MIXED / UNKNOWN is NOT a disagreement) is not stated in the H4BiasLayers.mqh header')
     run = _body_or_fail(lcode, r'\bvoid\s+H3LDisagreeRun\s*\(', 'H3LDisagreeRun', bad)
@@ -479,13 +487,21 @@ def check_disagree(paths):
                 bad.append(f'H3LDisagreeRun lacks {need} (absolute bar times / swings known at the bar / trusted region)')
         if re.search(r'\bnw\s*\+|\blast\s*\+\s*[0-9]|win\[nw\]', run):
             bad.append('H3LDisagreeRun reads beyond the last evaluated bar')
+    rb = _body_or_fail(lcode, r'\bvoid\s+H3LDisagreeRunBase\s*\(', 'H3LDisagreeRunBase', bad)
+    if rb is not None:
+        for need in ('H3LBiasAtBar(events, ne, win[t].time)', 'H3LBaselineDir(win, t + 1, lookback, left, right, period, nb)',
+                     'win[last].time', 'int stop = (warm < last ? warm : last);', 'H3LDisagree(r.t2dir, r.bias)'):
+            if need not in rb:
+                bad.append(f'H3LDisagreeRunBase lacks {need} (baseline at every bar / absolute bar times / trusted region)')
+        if re.search(r'\bnw\s*\+|\blast\s*\+\s*[0-9]|win\[nw\]', rb):
+            bad.append('H3LDisagreeRunBase reads beyond the last evaluated bar')
     ba = _body_or_fail(lcode, r'\bint\s+H3LBiasAtBar\s*\(', 'H3LBiasAtBar', bad)
     if ba is not None and 'events[i].bar_time > bar_open' not in ba:
         bad.append('H3LBiasAtBar does not stop at events after the bar')
     dcode = strip(read(drw[0]))
     dd = _body_or_fail(dcode, r'\bvoid\s+Draw\s*\(', 'Draw', bad)
     if dd is not None:
-        for need in ('H3LDisagreeRun(win, nw, sw, ns, p.right, H3WarmUp(p), events, ev.ne, v.dis)', 'H3LDisagreeText(v.dis, p.period)', 'if(v.dis.active)'):
+        for need in ('H3LDisagreeRunBase(win, nw, p.lookback, p.left, p.right, p.period, H3WarmUp(p), events, ev.ne, v.dis)', 'H3LDisagreeText(v.dis, p.period)', 'if(v.dis.active)'):
             if need not in dd:
                 bad.append(f'Draw lacks {need}')
     ecode = strip(read(ea[0]))
@@ -493,8 +509,8 @@ def check_disagree(paths):
     if rp is not None:
         if 'H3LDisagreeText(g_view.dis, g_params.period)' not in rp:
             bad.append('RenderPanel does not show the MODEL DISAGREEMENT text')
-        if 'T002 BULLISH vs T003 BEAR or T002 BEARISH vs T003 BULL only' not in rp:
-            bad.append('RenderPanel does not state the disagreement definition')
+        if 'T002 baseline BULLISH vs T003 BEAR or T002 baseline BEARISH vs T003 BULL only' not in rp or 'in terms of the T002 BASELINE' not in rp:
+            bad.append('RenderPanel does not state the disagreement definition in terms of the T002 BASELINE')
     ld = _body_or_fail(ecode, r'\bvoid\s+LogDisagreement\s*\(', 'LogDisagreement', bad)
     if ld is not None:
         if 'H3LDisagreeKey(g_view.dis)' not in ld or not re.search(r'if\(key == g_dis_key\)\s*return;', ld):
@@ -719,6 +735,266 @@ def check_asof(paths):
     return bad
 
 
+def check_compact(paths):
+    """compact panel by default; priorities; the details come after the compact return; the Experts log holds the details"""
+    bad = []
+    ea, drw, lay = _split_files(paths)
+    if len(ea) != 1 or len(drw) != 1:
+        return ['compact check needs the EA and H4BiasDrawer.mqh']
+    ecode = strip(read(ea[0]))
+    dcode = strip(read(drw[0]))
+    if not re.search(r'input\s+bool\s+InpShowDetails\s*=\s*false\s*;', ecode):
+        bad.append('input bool InpShowDetails = false (compact view by default) missing')
+    rp = _body_or_fail(ecode, r'\bvoid\s+RenderPanel\s*\(', 'RenderPanel', bad)
+    if rp is not None:
+        lines = [a for pos, a in calls(rp, 'g_panel.Line')]
+        if len(lines) < 25:
+            bad.append(f'vacuous check: only {len(lines)} g_panel.Line calls in RenderPanel')
+        for a in lines:
+            if len(a) != 3 or not re.fullmatch(r'\d+', a[2]):
+                bad.append(f'a panel line without an integer priority as the third argument: {a[:1]}')
+        ess = [a for a in lines if len(a) == 3 and a[2] == '0']
+        if len(ess) < 10:
+            bad.append(f'fewer than 10 essential (priority 0) lines in RenderPanel ({len(ess)})')
+        i_cmp = rp.find('if(!InpShowDetails)')
+        j_ret = rp.find('return;', i_cmp) if i_cmp >= 0 else -1
+        k_det = rp.find('--- STRUCTURE')
+        if i_cmp < 0 or j_ret < 0:
+            bad.append('RenderPanel has no if(!InpShowDetails) ... return; compact exit')
+        elif not (0 <= j_ret < k_det):
+            bad.append('the long view (--- STRUCTURE) is not placed after the compact return')
+        head = rp[:i_cmp] if i_cmp >= 0 else rp
+        for need in ('T003 bias (PROTOTYPE', 'H3LT2Name(g_view.t2_base_look)', 'current level', 'READY', 'FVG: ', 'reliability: ', 'H3LDisagreeText(g_view.dis, g_params.period)'):
+            if need not in head:
+                bad.append(f'the compact view lacks {need}')
+        for pat in ('SETUP %s', '--- SETUP', '--- EVENTS', 'depths:', 'T002 sources'):
+            if pat in head:
+                bad.append(f'the compact view contains the long-view text {pat!r}')
+    if not re.search(r'void\s+Line\s*\(\s*const\s+string\s+text\s*,\s*const\s+color\s+clr\s*,\s*const\s+int\s+prio\s*\)', dcode):
+        bad.append('CH3Panel::Line has no priority parameter')
+    ld = _body_or_fail(ecode, r'\bvoid\s+LogDetails\s*\(', 'LogDetails', bad)
+    if ld is not None:
+        for need in ('T003 SUMMARY', 'T003 DETAIL', 'if(!g_ev.reliable)'):
+            if need not in ld:
+                bad.append(f'LogDetails lacks {need}')
+    ed = _body_or_fail(ecode, r'\bvoid\s+EvaluateAndDraw\s*\(', 'EvaluateAndDraw', bad)
+    if ed is not None and 'LogDetails();' not in ed:
+        bad.append('EvaluateAndDraw does not call LogDetails (the details must reach the Experts log)')
+    return bad
+
+
+def check_resize(paths):
+    bad = []
+    ea, drw, lay = _split_files(paths)
+    if len(ea) != 1 or len(drw) != 1 or len(lay) != 1:
+        return ['resize check needs the EA, H4BiasDrawer.mqh and H4BiasLayers.mqh']
+    ecode = strip(read(ea[0]))
+    dcode = strip(read(drw[0]))
+    lcode = strip(read(lay[0]))
+    oc = _body_or_fail(ecode, r'\bvoid\s+OnChartEvent\s*\(', 'OnChartEvent', bad)
+    if oc is not None:
+        if 'CHARTEVENT_CHART_CHANGE' not in oc or 'g_panel.Relayout()' not in oc:
+            bad.append('OnChartEvent does not lay the panel out again on CHARTEVENT_CHART_CHANGE')
+        if re.search(r'Draw\s*\(|EvaluateAndDraw|RebuildBias|HistoryProbe|H3Evaluate|ClearBiasState', oc):
+            bad.append('OnChartEvent redraws or re-evaluates (a resize must only re-lay out the panel)')
+    rl = _body_or_fail(dcode, r'\bvoid\s+Relayout\s*\(', 'Relayout', bad)
+    if rl is not None:
+        for need in ('CHART_WIDTH_IN_PIXELS', 'CHART_HEIGHT_IN_PIXELS', 'cw == m_last_w && ch == m_last_h', 'End();'):
+            if need not in rl:
+                bad.append(f'Relayout lacks {need}')
+        if 'ObjectDelete' in rl or 'ObjectsDeleteAll' in rl:
+            bad.append('Relayout deletes objects')
+    en = _body_or_fail(dcode, r'\bvoid\s+End\s*\(\s*void\s*\)', 'panel End', bad)
+    if en is not None:
+        for need in ('CHART_WIDTH_IN_PIXELS', 'CHART_HEIGHT_IN_PIXELS', 'H3LPanelRows(', 'H3LPanelCols(', 'H3LWrap(', 'H3LPanelBudget(', 'm_last_w = cw', 'm_last_h = ch'):
+            if need not in en:
+                bad.append(f'panel End() lacks {need} (layout from the chart size and the line budget)')
+    ini = _body_or_fail(dcode, r'\bvoid\s+Init\s*\(\s*const\s+bool\s+enabled', 'panel Init', bad)
+    if ini is not None and not re.search(r'font_size\s*<\s*7\s*\?\s*7', ini):
+        bad.append('panel Init does not keep the font between 7 and 24')
+    if len(re.findall(r'\bm_font\s*=[^=]', dcode)) > 4:
+        bad.append('the font member is assigned in more places than the constructors / Init: the font must not be shrunk to fit')
+    if re.search(r'm_font\s*(-=|\*=|/=)|OBJPROP_FONTSIZE\s*,\s*[^,]*m_font\s*[-*/]', dcode):
+        bad.append('the panel changes the font size to fit')
+    for fn in ('H3LWrap', 'H3LPanelRows', 'H3LPanelCols', 'H3LPanelBudget'):
+        if not re.search(r'\b(int)\s+' + fn + r'\s*\(', lcode):
+            bad.append(f'{fn} missing from H4BiasLayers.mqh')
+    pb = _body_or_fail(lcode, r'\bint\s+H3LPanelBudget\s*\(', 'H3LPanelBudget', bad)
+    if pb is not None:
+        for need in ('prio[j] < prio[best]', 'int budget = rows_avail - 1;', 'if(used + need > budget)'):
+            if need not in pb:
+                bad.append(f'H3LPanelBudget lacks {need}')
+    if not re.search(r'g_panel\.Init\(InpShowPanel,\s*\(int\)InpPanelCorner,\s*InpPanelFontSize,', ecode):
+        bad.append('the panel is not initialised with the configurable InpPanelFontSize')
+    return bad
+
+
+def check_labels(paths):
+    bad = []
+    ea, drw, lay = _split_files(paths)
+    if len(drw) != 1 or len(lay) != 1:
+        return ['labels check needs H4BiasDrawer.mqh and H4BiasLayers.mqh']
+    dcode = strip(read(drw[0]))
+    lcode = strip(read(lay[0]))
+    nt = _body_or_fail(dcode, r'\bvoid\s+Note\s*\(', 'Note', bad)
+    if nt is not None and 'OBJPROP_TOOLTIP' not in nt:
+        bad.append('Note does not set OBJPROP_TOOLTIP (the full text of a short label)')
+    dd = _body_or_fail(dcode, r'\bvoid\s+Draw\s*\(', 'Draw', bad)
+    if dd is not None:
+        n_tip = 0
+        n_note = 0
+        for pos, args in calls(dd, 'Note'):
+            n_note += 1
+            if len(args) >= 8:
+                n_tip += 1
+        if n_note < 10 or n_tip < n_note - 2:
+            bad.append(f'dynamic chart labels without a tooltip: {n_note - n_tip} of {n_note}')
+        if 'H3LLabelSlot(events[e].bar_time, p.period, seq, 3)' not in dd or 'H3VEventShort(' not in dd:
+            bad.append('event labels do not use the stable slot H3LLabelSlot(bar time, rank in the same bar) and the short text')
+        if re.search(r'drawn_bars|\bstack\b', dd):
+            bad.append('event label offsets still depend on the draw order (drawn_bars / stack)')
+        if 'step * (5.0 + slot * 1.0)' not in dd:
+            bad.append('the event label price offset is not a function of the slot')
+        # level coordinates must stay real: price arguments of lines and rectangles never contain an offset
+        for pos, args in calls(dd, 'Segment'):
+            if len(args) >= 5 and re.search(r'"(lvl_|snap_|lint_|liq_)"', args[0]):
+                for ix in (2, 4):
+                    if not re.fullmatch(r'(st\.\w+|sw\[kz\]\.price)', args[ix]):
+                        bad.append(f'level line price argument is not the real level price: {args[ix]}')
+        for pos, args in calls(dd, 'Rect'):
+            if len(args) >= 5:
+                for ix in (2, 4):
+                    if not re.fullmatch(r'fv\[fk\]\.(upper|lower)', args[ix]):
+                        bad.append(f'FVG rectangle price argument is not the real FVG bound: {args[ix]}')
+        # level, snapshot and FVG stay distinguishable
+        if 'STYLE_SOLID' not in dd or 'STYLE_DASH' not in dd or 'STYLE_DOT' not in dd:
+            bad.append('solid / dashed / dotted styles are missing (current level / snapshot / liquidity)')
+        for lab in ('"CURRENT %s"', '"SNAPSHOT %s (ref)%s"', '"FVG %s %s"'):
+            if lab not in dd:
+                bad.append(f'distinct short label {lab} missing')
+    ls = _body_or_fail(lcode, r'\bint\s+H3LLabelSlot\s*\(', 'H3LLabelSlot', bad)
+    if ls is not None and re.search(r'Rand|Tick|Time[A-Z]|GetMicro', ls):
+        bad.append('H3LLabelSlot depends on a clock or a random value')
+    return bad
+
+
+def check_baseline(paths):
+    bad = []
+    ea, drw, lay = _split_files(paths)
+    if len(ea) != 1 or len(drw) != 1 or len(lay) != 1:
+        return ['baseline check needs the EA, H4BiasDrawer.mqh and H4BiasLayers.mqh']
+    ecode = strip(read(ea[0]))
+    dcode = strip(read(drw[0]))
+    lcode = strip(read(lay[0]))
+    if 'g_params.lookback = MathMax(50, MathMin(1000, InpLookbackBars));' not in ecode:
+        bad.append('the T003 EA does not derive the lookback from InpLookbackBars with the T002 clamp (50..1000)')
+    import os
+    t2 = os.path.join(os.path.dirname(ea[0]), 'XauUsdH4Map.mq5')
+    if os.path.exists(t2):
+        tcode = strip(read(t2))
+        if 'g_lookback = MathMax(50, MathMin(1000, InpLookbackBars));' not in tcode:
+            bad.append('the T002 EA clamp changed: the T003 baseline no longer uses the same window')
+        if not re.search(r'CopyRates\(g_symbol, PERIOD_H4, 1, g_lookback, out\)', tcode):
+            bad.append('the T002 EA no longer copies the last g_lookback closed bars: re-check the baseline window')
+    bd = _body_or_fail(lcode, r'\bint\s+H3LBaselineDir\s*\(', 'H3LBaselineDir', bad)
+    if bd is not None:
+        for need in ('int start = n_end - nbars;', 'ArrayCopy(seg, win, 0, start, nbars)', 'H4FindSwings(seg, nbars, left, right, period, sw, amb)', 'H4DeriveDirection(sw, ns)'):
+            if need not in bd:
+                bad.append(f'H3LBaselineDir lacks {need} (same functions and window as the T002 EA)')
+    if 'return("T002 baseline (lookback "' not in lcode or 'return("T002 replay-window structure")' not in lcode:
+        bad.append('H3LT2Name does not give the two distinct names')
+    dd = _body_or_fail(dcode, r'\bvoid\s+Draw\s*\(', 'Draw', bad)
+    if dd is not None:
+        if 'H3LBaselineDir(win, nw, p.lookback, p.left, p.right, p.period, v.t2_base_bars)' not in dd:
+            bad.append('Draw does not compute the T002 baseline with p.lookback (InpLookbackBars)')
+        if 'v.t2_base_look = p.lookback;' not in dd:
+            bad.append('Draw does not record the baseline lookback')
+    rp = _body_or_fail(ecode, r'\bvoid\s+RenderPanel\s*\(', 'RenderPanel', bad)
+    if rp is not None:
+        if 'H3LT2Name(g_view.t2_base_look)' not in rp or 'replay-window structure' not in rp:
+            bad.append('the panel does not label the T002 baseline (lookback N) and the replay-window structure apart')
+        if 'DIFFERS from the T002 baseline' not in rp:
+            bad.append('the panel does not say when the replay-window structure differs from the baseline')
+    for name, code in (('XauUsdH4Bias.mq5', ecode), ('H4BiasDrawer.mqh', dcode)):
+        for m_ in re.finditer(r'"[^"\n]*(?<!replay-window )(?<!REPLAY-WINDOW )T002 (structure|direction|DIRECTION)[^"\n]*"', code):
+            bad.append(f'{name}: an ambiguous T002 label (not baseline / replay-window): {m_.group(0)}')
+    return bad
+
+
+def check_export(paths):
+    bad = []
+    ea, drw, lay = _split_files(paths)
+    if len(ea) != 1 or len(lay) != 1:
+        return ['export check needs the EA and H4BiasLayers.mqh']
+    ecode = strip(read(ea[0]))
+    eraw = read(ea[0])
+    lcode = strip(read(lay[0]))
+    ek = _body_or_fail(lcode, r'\bstring\s+H3LExportKey\s*\(', 'H3LExportKey', bad)
+    if ek is not None:
+        for need in ('IntegerToString(n)', 'H3LBarsHash(rates, n, digits)', 'rates[0].time', 'rates[n - 1].time', 'IntegerToString((long)asof)', 'symbol'):
+            if need not in ek:
+                bad.append(f'H3LExportKey lacks {need} (symbol, as-of, last and first time, count, content hash)')
+    bh = _body_or_fail(lcode, r'\bstring\s+H3LBarsHash\s*\(', 'H3LBarsHash', bad)
+    if bh is not None:
+        for need in ('for(int i = 0; i < n; i++)', 'rates[i].time', 'rates[i].open', 'rates[i].high', 'rates[i].low', 'rates[i].close', 'H3LHashStep('):
+            if need not in bh:
+                bad.append(f'H3LBarsHash lacks {need} (an order-sensitive hash of the whole series)')
+    hs = _body_or_fail(lcode, r'\bulong\s+H3LHashStep\s*\(', 'H3LHashStep', bad)
+    if hs is not None and ('1099511628211' not in hs or '^' not in hs):
+        bad.append('H3LHashStep is not an FNV-1a step')
+    ex = _body_or_fail(ecode, r'\bvoid\s+ExportCandles\s*\(', 'ExportCandles', bad)
+    if ex is not None:
+        if 'string key = H3LExportKey(g_symbol, g_asof, g_bars, g_n, g_snapshot.digits);' not in ex:
+            bad.append('ExportCandles does not build its key with H3LExportKey (count and content hash)')
+        if re.search(r'string\s+key\s*=[^;]*g_bars\[\s*g_n\s*-\s*1\s*\]\.time', ex):
+            bad.append('the export key is built from the last bar time alone')
+        i_set = ex.find('g_export_key = key;')
+        i_wr = ex.find('FileClose(')
+        if i_set < 0 or i_set < i_wr:
+            bad.append('the export key is stored before the file was written completely')
+    if 'OVERWRITTEN' not in eraw:
+        bad.append('the EA header does not document that the CSV is overwritten when the set changes')
+    return bad
+
+
+def check_since(paths):
+    bad = []
+    ea, drw, lay = _split_files(paths)
+    if len(ea) != 1 or len(lay) != 1:
+        return ['since check needs the EA and H4BiasLayers.mqh']
+    ecode = strip(read(ea[0]))
+    lcode = strip(read(lay[0]))
+    cl = _body_or_fail(ecode, r'\bvoid\s+ClearBiasState\s*\(', 'ClearBiasState', bad)
+    if cl is not None:
+        for need in ('H3LSinceClear(g_since)', 'g_nchanges = 0', 'ArrayResize(g_changes, 0)', 'g_cursor = 0', 'ArrayResize(g_new_ids, 0)', 'Experts only'):
+            if need not in cl:
+                bad.append(f'ClearBiasState lacks {need} (the since-baseline values must start again from zero)')
+    if re.search(r'\bg_new_total\b', ecode):
+        bad.append('g_new_total still exists: the NEW count must be g_since.new_total (zeroed by a clear)')
+    ce = _body_or_fail(ecode, r'\bvoid\s+ConsumeEvents\s*\(', 'ConsumeEvents', bad)
+    if ce is not None and 'H3LSinceNew(g_since);' not in ce:
+        bad.append('ConsumeEvents does not count a NEW event through H3LSinceNew')
+    pc = _body_or_fail(ecode, r'\bvoid\s+PushChange\s*\(', 'PushChange', bad)
+    if pc is not None and 'H3LSinceChange(g_since);' not in pc:
+        bad.append('PushChange does not count through H3LSinceChange')
+    rp = _body_or_fail(ecode, r'\bvoid\s+RenderPanel\s*\(', 'RenderPanel', bad)
+    if rp is not None:
+        if 'g_since.new_total' not in rp:
+            bad.append('the panel does not show the NEW count from g_since.new_total')
+        if re.search(r'g_since\.(sess_|baselines)', rp):
+            bad.append('the panel shows the session totals: they belong in the Experts log only')
+    od = _body_or_fail(ecode, r'\bvoid\s+OnDeinit\s*\(', 'OnDeinit', bad)
+    if od is not None and 'SESSION LOG (Experts only)' not in od:
+        bad.append('OnDeinit does not write the session log to the Experts')
+    sc = _body_or_fail(lcode, r'\bvoid\s+H3LSinceClear\s*\(', 'H3LSinceClear', bad)
+    if sc is not None:
+        if 's.new_total = 0;' not in sc or 's.changes   = 0;' not in sc:
+            bad.append('H3LSinceClear does not zero new_total and changes')
+        if re.search(r's\.sess_', sc):
+            bad.append('H3LSinceClear touches the session totals')
+    return bad
+
+
 CHECKS = {
     'trading': check_trading,
     'isolation': check_isolation,
@@ -734,6 +1010,12 @@ CHECKS = {
     'noclock': check_noclock,
     'names': check_names,
     'asof': check_asof,
+    'compact': check_compact,
+    'resize': check_resize,
+    'labels': check_labels,
+    'baseline': check_baseline,
+    'export': check_export,
+    'since': check_since,
 }
 
 

@@ -39,6 +39,12 @@
 //| never a manual object. The panel uses the sub-prefix             |
 //| velo_t003_pnl_, which ClearMap() leaves alone.                   |
 //|                                                                  |
+//| Panel (compact by default): lines carry a priority; the panel is |
+//| wrapped to the chart width and the lowest priority lines are     |
+//| dropped when the chart height does not hold them (H3LPanel*).    |
+//| Chart labels are short (full text in the object tooltip) and use |
+//| a stable slot (H3LLabelSlot); only the text anchor is offset.    |
+//|                                                                  |
 //| Not compiled or run in this environment (no MetaEditor).         |
 //+------------------------------------------------------------------+
 #ifndef VELO_H4_BIAS_DRAWER_MQH
@@ -81,6 +87,11 @@ struct SH3View
    string            setup_text;      // the setup in words (empty when no setup)
    bool              snap_drawn;
    SH3SetupCtx       ctx;             // read-only context of the live setup (H3SetupContext)
+   int               t2_base;         // T002 BASELINE direction: the last `lookback` closed bars (the T002 EA's window)
+   int               t2_base_look;    // the lookback of that baseline (InpLookbackBars, clamped)
+   int               t2_base_bars;    // bars the baseline really used (fewer than the lookback only when fewer exist)
+   SH3LRun           dis_win;         // informational: the same disagreement test with the replay-window structure
+   string            fvg_last;        // the reconfirmation FVG, else the latest eligible FVG, with its status (panel)
   };
 
 void H3VViewInit(SH3View &v)
@@ -106,6 +117,11 @@ void H3VViewInit(SH3View &v)
    v.liq_text      = "";
    v.setup_text    = "";
    v.snap_drawn    = false;
+   v.t2_base       = H4_DIR_UNKNOWN;
+   v.t2_base_look  = 0;
+   v.t2_base_bars  = 0;
+   H3LRunInit(v.dis_win);
+   v.fvg_last      = "";
    SH3State s0;
    H3StateInit(s0);
    SH3Track t0[];
@@ -207,6 +223,39 @@ string H3VEventLabel(const SH3Event &e, const bool is_new)
             if(e.type == H3_EV_SETUP_ENDED)
                s += " " + H3VDetailValue(e.detail, "reason");
    return(s);
+  }
+
+//--- the SHORT chart text of an event (the full event id and detail go to the object tooltip and the Experts log)
+string H3VEventShort(const SH3Event &e, const bool is_new)
+  {
+   string s = (is_new ? "NEW " : "");
+   string dir = H3VDetailValue(e.detail, "dir");
+   string d = (dir == "BULL" ? " bull" : (dir == "BEAR" ? " bear" : ""));
+   if(e.type == H3_EV_FLIP)
+      return(s + "FLIP" + d);
+   if(e.type == H3_EV_BREAK_SET)
+      return(s + "SET" + d);
+   if(e.type == H3_EV_SEED)
+      return(s + "SEED" + d);
+   if(e.type == H3_EV_WICK)
+      return(s + "WICK" + d);
+   if(e.type == H3_EV_NONE_WICK)
+      return(s + "nWICK");
+   if(e.type == H3_EV_CONFLICT)
+      return(s + "CONFL");
+   if(e.type == H3_EV_RECONFIRMED)
+      return(s + "RECONF");
+   if(e.type == H3_EV_RECONF_LOST)
+      return(s + "RECONF-");
+   if(e.type == H3_EV_INT_SWEEP)
+      return(s + "SWEEP" + d);
+   if(e.type == H3_EV_SETUP_ENDED)
+      return(s + "END");
+   if(e.type == H3_EV_SNAP_CROSSED)
+      return(s + "SNAPX");
+   if(e.type == H3_EV_CONTINUATION)
+      return(s + "CONT");
+   return(s + "IBRK");
   }
 
 color H3VEventColor(const int type)
@@ -344,13 +393,16 @@ private:
       ObjectSetInteger(m_chart, name, OBJPROP_BACK, false);
      }
 
+   //--- a text label. Only the TEXT ANCHOR is placed by the caller (the price passed here is the label position,
+   //--- never a level coordinate); `tip` is the full text shown as the object tooltip ("" = same as the text).
    void              Note(const string name, const datetime t, const double p, const string text,
-                          const color clr, const ENUM_ANCHOR_POINT anchor, const int fontsize)
+                          const color clr, const ENUM_ANCHOR_POINT anchor, const int fontsize, const string tip = "")
      {
       if(!Ensure(name, OBJ_TEXT))
          return;
       Put(name, 0, t, p);
       ObjectSetString(m_chart, name, OBJPROP_TEXT, text);
+      ObjectSetString(m_chart, name, OBJPROP_TOOLTIP, (tip != "" ? tip : text));
       ObjectSetString(m_chart, name, OBJPROP_FONT, "Arial");
       ObjectSetInteger(m_chart, name, OBJPROP_FONTSIZE, fontsize);
       ObjectSetInteger(m_chart, name, OBJPROP_COLOR, clr);
@@ -382,26 +434,34 @@ private:
          v.missing += (v.missing != "" ? "; " : "") + tag + " pivot " + H3VTime(pivot_time) + " not among the swings";
          return(tag + " pivot " + H3VTime(pivot_time) + " (swing not found)");
         }
-      string txt = StringFormat("%s %s %s  known %s", tag, (sw[k].is_high ? "SH" : "SL"),
-                                DoubleToString(sw[k].price, _Digits), H3VTime(sw[k].confirm_time));
+      string txt = StringFormat("%s %s", tag, DoubleToString(sw[k].price, _Digits));
+      string full = StringFormat("%s %s %s  pivot %s  known %s", tag, (sw[k].is_high ? "SH" : "SL"),
+                                 DoubleToString(sw[k].price, _Digits), H3VTime(pivot_time), H3VTime(sw[k].confirm_time));
       Note(m_prefix + "pv_" + H3VSanitize(tag) + "_" + H4TimeStamp(pivot_time), pivot_time, sw[k].price, txt, clr,
-           (sw[k].is_high ? ANCHOR_LOWER : ANCHOR_UPPER), m_font);
+           (sw[k].is_high ? ANCHOR_LOWER : ANCHOR_UPPER), m_font, full);
       return(StringFormat("%s %s %s pivot %s known %s", tag, (sw[k].is_high ? "SH" : "SL"),
                           DoubleToString(sw[k].price, _Digits), H3VTime(pivot_time), H3VTime(sw[k].confirm_time)));
      }
 
-   //--- T002 source swing: a text mark near the pivot (shifted away from the bar by `off`) with the price, the
-   //--- pivot time and the confirmation time. Returns the same facts for the panel.
+   string            T2Facts(const SH4Swing &sw[], const int k, const string tag)
+     {
+      if(k < 0)
+         return(tag + " none");
+      return(StringFormat("%s %s %s pivot %s known %s", tag, (sw[k].is_high ? "SH" : "SL"), DoubleToString(sw[k].price, _Digits),
+                          H3VTime(sw[k].pivot_time), H3VTime(sw[k].confirm_time)));
+     }
+
+   //--- T002 source swing: a SHORT text mark near the pivot (the label anchor is shifted away from the bar by `off`;
+   //--- the swing price itself is untouched) with the full facts (price, pivot time, confirmation time) in the
+   //--- tooltip. Returns the same facts for the panel.
    string            T2Mark(const SH4Swing &sw[], const int k, const string tag, const double off, SH3View &v)
      {
       if(k < 0)
          return(tag + " none");
-      string kind = (sw[k].is_high ? "SH" : "SL");
-      string facts = StringFormat("%s %s %s pivot %s known %s", tag, kind, DoubleToString(sw[k].price, _Digits),
-                                  H3VTime(sw[k].pivot_time), H3VTime(sw[k].confirm_time));
+      string facts = T2Facts(sw, k, tag);
       Note(m_prefix + "t2_" + H3VSanitize(tag) + "_" + H4TimeStamp(sw[k].pivot_time), sw[k].pivot_time,
-           sw[k].price + (sw[k].is_high ? off : -off), "T002 " + facts, m_clr_t2,
-           (sw[k].is_high ? ANCHOR_LEFT_LOWER : ANCHOR_LEFT_UPPER), m_font - 1);
+           sw[k].price + (sw[k].is_high ? off : -off), "T2 " + tag + " " + DoubleToString(sw[k].price, _Digits), m_clr_t2,
+           (sw[k].is_high ? ANCHOR_LEFT_LOWER : ANCHOR_LEFT_UPPER), m_font - 1, "T002 source: " + facts);
       return(facts);
      }
 
@@ -470,7 +530,7 @@ public:
                           const string &new_ids[], const int n_new,
                           const int max_events, const int max_fvgs,
                           const bool show_nonmarket, const bool show_invalid,
-                          const bool show_liq, const int liq_max, SH3View &v)
+                          const bool show_liq, const int liq_max, const bool show_t2src, SH3View &v)
      {
       ClearMap();
       H3VViewInit(v);
@@ -500,8 +560,14 @@ public:
       H3SetupContext(st, tracks, ev.nt, v.ctx); // read-only setup context (SH3SetupCtx)
 
       H3VT2Run(win, nw, sw, ns, p.right, H3WarmUp(p), st.t2dir, v);
-      //--- MODEL DISAGREEMENT: derived from the replay events and the T002 swings, by absolute bar times
-      H3LDisagreeRun(win, nw, sw, ns, p.right, H3WarmUp(p), events, ev.ne, v.dis);
+      //--- T002 BASELINE: the direction of the last `lookback` closed bars (the T002 EA's window, same functions).
+      //--- v.t2_cur above is the REPLAY-WINDOW structure (the whole window): a different thing, named so.
+      v.t2_base_look = p.lookback;
+      v.t2_base      = H3LBaselineDir(win, nw, p.lookback, p.left, p.right, p.period, v.t2_base_bars);
+      //--- MODEL DISAGREEMENT in terms of the T002 BASELINE: from the replay events and the baseline at every bar,
+      //--- by absolute bar times. The replay-window test is kept for information only.
+      H3LDisagreeRunBase(win, nw, p.lookback, p.left, p.right, p.period, H3WarmUp(p), events, ev.ne, v.dis);
+      H3LDisagreeRun(win, nw, sw, ns, p.right, H3WarmUp(p), events, ev.ne, v.dis_win);
       v.dis_consistent = (v.dis.bias == st.dir);
 
       //--- the average bar range, used to stack labels
@@ -524,32 +590,44 @@ public:
       int nk = H3KnownCount(sw, ns, p.right, nw - 1);
       int ih2 = -1, ih1 = -1, il2 = -1, il1 = -1;
       H3LT2Sources(sw, nk, ih2, ih1, il2, il1);
-      string s1 = T2Mark(sw, ih2, "H-latest", step * 2.0, v);
-      string s2 = T2Mark(sw, ih1, "H-prev", step * 2.0, v);
-      string s3 = T2Mark(sw, il2, "L-latest", step * 2.0, v);
-      string s4 = T2Mark(sw, il1, "L-prev", step * 2.0, v);
+      string s1 = T2Facts(sw, ih2, "H-latest");
+      string s2 = T2Facts(sw, ih1, "H-prev");
+      string s3 = T2Facts(sw, il2, "L-latest");
+      string s4 = T2Facts(sw, il1, "L-prev");
       v.t2_src_text = s1 + " | " + s2 + " | " + s3 + " | " + s4;
+      if(show_t2src)
+        {
+         T2Mark(sw, ih2, "H-latest", step * 2.0, v);
+         T2Mark(sw, ih1, "H-prev", step * 2.0, v);
+         T2Mark(sw, il2, "L-latest", step * 2.0, v);
+         T2Mark(sw, il1, "L-prev", step * 2.0, v);
+        }
       Note(m_prefix + "t2_now", t_last, win[nw - 1].high + step * 1.2,
-           "T002 structure (proposal 2/2 swings): " + H4DirName(v.t2_cur) + " (" + H3LStructureWords(v.t2_cur) + ")",
-           m_clr_t2, ANCHOR_LOWER, m_font);
+           StringFormat("T002 baseline(%d): %s", v.t2_base_look, H4DirName(v.t2_base)),
+           m_clr_t2, ANCHOR_LOWER, m_font,
+           H3LT2Name(v.t2_base_look) + ": " + H4DirName(v.t2_base) + " (" + H3LStructureWords(v.t2_base) + "), " +
+           IntegerToString(v.t2_base_bars) + " closed bars; the replay-window structure is " + H4DirName(v.t2_cur) +
+           ". Proposal 2/2 swings.");
 
       //--- 1. the CURRENT protecting level (solid) and the pivots it was selected from
       if(st.dir != H3_NONE)
         {
          color bc = (st.dir == H3_BEAR ? m_clr_bear : m_clr_bull);
          Note(m_prefix + "t3_now", t_last, win[nw - 1].low - step * 1.2,
+              "T003 proto " + H3DirName(st.dir) + " " + H3PhaseName(st.phase),
+              bc, ANCHOR_UPPER, m_font,
               "T003 PROTOTYPE bias " + H3DirName(st.dir) + " " + H3PhaseName(st.phase) +
-              " (PROPOSAL, not the client's confirmed direction)",
-              bc, ANCHOR_UPPER, m_font);
+              " (PROPOSAL, not the client's confirmed direction)");
         }
       if(st.dir != H3_NONE && st.has_level)
         {
          color lc = (st.dir == H3_BEAR ? m_clr_bear : m_clr_bull);
          Segment(m_prefix + "lvl_" + H3LShort(st.lv_id), st.lv_pivot, st.lv_price, x_end, st.lv_price, lc, 2, STYLE_SOLID);
          Note(m_prefix + "lvl_lbl_" + H3LShort(st.lv_id), x_end, st.lv_price,
-              StringFormat("CURRENT protecting level (PROPOSAL) %s known %s - decides FLIP", DoubleToString(st.lv_price, _Digits),
-                           H3VTime(st.lv_known)),
-              lc, ANCHOR_RIGHT_LOWER, m_font);
+              StringFormat("CURRENT %s", DoubleToString(st.lv_price, _Digits)),
+              lc, ANCHOR_RIGHT_LOWER, m_font,
+              StringFormat("CURRENT protecting level (PROPOSAL, solid) %s known %s - decides FLIP", DoubleToString(st.lv_price, _Digits),
+                           H3VTime(st.lv_known)));
          string t1 = Pivot(sw, ns, st.lv_pivot, "S", lc, v);
          string t2 = Pivot(sw, ns, st.lv_ext, (st.dir == H3_BEAR ? "LL" : "HH"), m_clr_level, v);
          string t3 = Pivot(sw, ns, st.lv_prev, (st.dir == H3_BEAR ? "prevLL" : "prevHH"), m_clr_level, v);
@@ -564,9 +642,10 @@ public:
          bool same = (st.has_level && st.snap_id == st.lv_id);
          Segment(m_prefix + "snap_" + H3LShort(st.setup_id), ts, st.snap_price, x_end, st.snap_price, m_clr_snap, 1, STYLE_DASH);
          Note(m_prefix + "snap_lbl_" + H3LShort(st.setup_id), x_end, st.snap_price,
-              StringFormat("snapshot (reference only) %s known %s%s", DoubleToString(st.snap_price, _Digits),
-                           H3VTime(st.snap_known), (same ? " = current level" : "")),
-              m_clr_snap, ANCHOR_RIGHT_UPPER, m_font);
+              StringFormat("SNAPSHOT %s (ref)%s", DoubleToString(st.snap_price, _Digits), (same ? " =CURRENT" : "")),
+              m_clr_snap, ANCHOR_RIGHT_UPPER, m_font,
+              StringFormat("SNAPSHOT (dashed, reference only) %s known %s%s", DoubleToString(st.snap_price, _Digits),
+                           H3VTime(st.snap_known), (same ? " = current level" : "")));
          v.snap_drawn = true;
         }
       //--- interior swing candidate (technical proposal P14); the time is part of its ID
@@ -577,9 +656,10 @@ public:
            {
             Segment(m_prefix + "lint_" + H3LShort(st.li_id), ti, st.li_price, x_end, st.li_price, m_clr_dim, 1, STYLE_DOT);
             Note(m_prefix + "lint_lbl_" + H3LShort(st.li_id), x_end, st.li_price,
+                 StringFormat("interior %s%s", DoubleToString(st.li_price, _Digits), (st.li_consumed ? " used" : "")),
+                 m_clr_dim, ANCHOR_RIGHT_UPPER, m_font - 1,
                  StringFormat("interior candidate (P14 proposal, not the historical liquidity layer) %s%s",
-                              DoubleToString(st.li_price, _Digits), (st.li_consumed ? " CONSUMED" : "")),
-                 m_clr_dim, ANCHOR_RIGHT_UPPER, m_font);
+                              DoubleToString(st.li_price, _Digits), (st.li_consumed ? " CONSUMED" : "")));
            }
          else
             v.missing += (v.missing != "" ? "; " : "") + "interior level time not parsable from " + st.li_id;
@@ -593,12 +673,14 @@ public:
            {
             double wp = (st.dir == H3_BEAR ? win[iw].high : win[iw].low);
             Note(m_prefix + "wick_" + H4TimeStamp(st.wk_src), st.wk_src, wp,
+                 (st.wk_retro ? "WICK retro" : "WICK"),
+                 clrOrange, (st.dir == H3_BEAR ? ANCHOR_LOWER : ANCHOR_UPPER), m_font,
                  StringFormat("WICK source_wick_time %s | known %s | detected_at %s%s", H3VTime(st.wk_src),
-                              H3VTime(st.wk_known), H3VTime(st.wk_det), (st.wk_retro ? " RETROACTIVE" : "")),
-                 clrOrange, (st.dir == H3_BEAR ? ANCHOR_LOWER : ANCHOR_UPPER), m_font);
+                              H3VTime(st.wk_known), H3VTime(st.wk_det), (st.wk_retro ? " RETROACTIVE" : "")));
             if(st.wk_det > 0)
                Note(m_prefix + "det_" + H4TimeStamp(st.wk_det), st.wk_det, (st.has_level ? st.lv_price : wp),
-                    "detected_at", clrOrange, (st.dir == H3_BEAR ? ANCHOR_LEFT_LOWER : ANCHOR_LEFT_UPPER), m_font);
+                    "det", clrOrange, (st.dir == H3_BEAR ? ANCHOR_LEFT_LOWER : ANCHOR_LEFT_UPPER), m_font - 1,
+                    "detected_at " + H3VTime(st.wk_det));
            }
          else
             v.missing += (v.missing != "" ? "; " : "") + "wick bar " + H3VTime(st.wk_src) + " not in the examined bars";
@@ -610,9 +692,9 @@ public:
            {
             double sp = (st.dir == H3_BEAR ? win[isw].high : win[isw].low);
             Note(m_prefix + "sweep_" + H4TimeStamp(st.sweep_time), st.sweep_time, sp,
+                 "SWEEP", clrViolet, (st.dir == H3_BEAR ? ANCHOR_LOWER : ANCHOR_UPPER), m_font,
                  StringFormat("INTERNAL SWEEP (proposal) bar %s | wait from %s", H3VTime(st.sweep_time),
-                              H3VTime(st.wait_start)),
-                 clrViolet, (st.dir == H3_BEAR ? ANCHOR_LOWER : ANCHOR_UPPER), m_font);
+                              H3VTime(st.wait_start)));
            }
          else
             v.missing += (v.missing != "" ? "; " : "") + "sweep bar " + H3VTime(st.sweep_time) + " not in the examined bars";
@@ -621,9 +703,10 @@ public:
       if(v.ctx.valid)
         {
          Note(m_prefix + "setup_lbl", t_last, win[nw - 1].low - step * 2.4,
-              StringFormat("SETUP (PROPOSAL) %s %s phase %s ready %s", v.ctx.stype, v.ctx.reason, v.ctx.phase,
-                           (v.ctx.ready ? "YES" : "no")),
-              clrGold, ANCHOR_UPPER, m_font);
+              StringFormat("SETUP %s ready %s", v.ctx.phase, (v.ctx.ready ? "YES" : "no")),
+              clrGold, ANCHOR_UPPER, m_font,
+              StringFormat("SETUP (PROPOSAL) %s %s %s phase %s ready %s", v.ctx.setup_id, v.ctx.stype, v.ctx.reason, v.ctx.phase,
+                           (v.ctx.ready ? "YES" : "no")));
         }
 
       //--- 3. eligible new FVGs (most recent first up to the limit) and the reconfirmation FVG
@@ -648,6 +731,7 @@ public:
          for(int i3 = 0; i3 < nt; i3++)
             if(tracks[i3].id == st.rec_id)
                chosen[i3] = true;
+      bool rec_set = false;
       for(int i4 = 0; i4 < nt; i4++)
         {
          if(!chosen[i4])
@@ -672,17 +756,22 @@ public:
          else
             Rect(m_prefix + "fvg_" + fv[fk].id, fv[fk].time_a, fv[fk].upper, x_end, fv[fk].lower, fc, 1, false,
                  tracks[i4].invalid ? STYLE_DOT : STYLE_SOLID);
-         string lbl = StringFormat("%s eligible FVG (proposal) %s %s%s", (fv[fk].bullish ? "bull" : "bear"), fv[fk].id,
-                                   status, (is_rec ? "  RECONFIRMATION FVG" : ""));
+         string lbl = StringFormat("FVG %s %s", (fv[fk].bullish ? "bull" : "bear"), (is_rec ? "RECONF" : status));
+         string lbl_full = StringFormat("%s eligible FVG (proposal) %s %s [%s - %s]%s", (fv[fk].bullish ? "bull" : "bear"), fv[fk].id,
+                                        status, DoubleToString(fv[fk].lower, _Digits), DoubleToString(fv[fk].upper, _Digits),
+                                        (is_rec ? "  RECONFIRMATION FVG" : ""));
          Note(m_prefix + "fvgt_" + fv[fk].id, fv[fk].time_a, fv[fk].upper, lbl, (is_rec ? clrGold : fc),
-              ANCHOR_LEFT_LOWER, m_font);
+              ANCHOR_LEFT_LOWER, m_font, lbl_full);
+         if(is_rec || !rec_set)
+            v.fvg_last = StringFormat("%s %s [%s - %s]%s", fv[fk].id, status, DoubleToString(fv[fk].lower, _Digits),
+                                      DoubleToString(fv[fk].upper, _Digits), (is_rec ? " RECONFIRMATION" : ""));
+         if(is_rec)
+            rec_set = true;
          v.fvg_shown++;
         }
 
       //--- 4. the most recent events, history versus new
       int drawn = 0;
-      datetime drawn_bars[];
-      ArrayResize(drawn_bars, 0);
       for(int e = ev.ne - 1; e >= 0; e--)
         {
          if(!events[e].market && !show_nonmarket)
@@ -701,17 +790,19 @@ public:
             v.ev_hidden++;
             continue;
            }
-         int stack = 0;
-         for(int s = 0; s < drawn; s++)
-            if(drawn_bars[s] == events[e].bar_time)
-               stack++;
-         ArrayResize(drawn_bars, drawn + 1);
-         drawn_bars[drawn] = events[e].bar_time;
+         //--- STABLE vertical slot: the label's rank among the events of the SAME bar in the logic's own event order
+         //--- (not the draw order, not the number of events drawn) and the bar's position in time. Only the label
+         //--- position is offset; the event bar and every level keep their real coordinates.
+         int seq = 0;
+         for(int q2 = e - 1; q2 >= 0 && events[q2].bar_time == events[e].bar_time; q2--)
+            seq++;
+         int slot = H3LLabelSlot(events[e].bar_time, p.period, seq, 3);
          string eid = H3EventId(events[e].type, events[e].bar_time, events[e].ref);
          bool is_new = H3VIdInList(eid, new_ids, n_new);
          Note(m_prefix + "ev_" + H4TimeStamp(events[e].bar_time) + "_" + H3LShort(eid),
-              events[e].bar_time, win[ib].high + step * (stack + 3), H3VEventLabel(events[e], is_new),
-              (is_new ? clrLime : H3VEventColor(events[e].type)), ANCHOR_LOWER, (is_new ? m_font + 2 : m_font));
+              events[e].bar_time, win[ib].high + step * (5.0 + slot * 1.0), H3VEventShort(events[e], is_new),
+              (is_new ? clrLime : H3VEventColor(events[e].type)), ANCHOR_LOWER, (is_new ? m_font + 1 : m_font),
+              H3VEventLabel(events[e], is_new) + " | bar " + H3VTime(events[e].bar_time) + " | " + H3EventText(events[e]));
          drawn++;
         }
       v.ev_shown = drawn;
@@ -730,9 +821,16 @@ public:
             string one = StringFormat("%s %s pivot %s known %s", kind, DoubleToString(sw[kz].price, _Digits),
                                       H3VTime(sw[kz].pivot_time), H3VTime(sw[kz].confirm_time));
             Segment(m_prefix + "liq_" + sw[kz].id, sw[kz].pivot_time, sw[kz].price, x_end, sw[kz].price, m_clr_liq, 1, STYLE_DOT);
-            Note(m_prefix + "liq_lbl_" + sw[kz].id, sw[kz].pivot_time, sw[kz].price,
-                 StringFormat("liq %s %s (pivot %s)", kind, DoubleToString(sw[kz].price, _Digits), H3VTime(sw[kz].pivot_time)),
-                 m_clr_liq, (sw[kz].is_high ? ANCHOR_LEFT_LOWER : ANCHOR_LEFT_UPPER), m_font - 1);
+            //--- a swing that already carries a level-pivot mark (S / LL / prevLL) keeps its dotted line but gets no
+            //--- second text on the same spot (a rule of the swing, not of the draw order)
+            bool marked = (st.dir != H3_NONE && st.has_level &&
+                           (sw[kz].pivot_time == st.lv_pivot || sw[kz].pivot_time == st.lv_ext || sw[kz].pivot_time == st.lv_prev));
+            if(!marked)
+               Note(m_prefix + "liq_lbl_" + sw[kz].id, sw[kz].pivot_time, sw[kz].price,
+                    StringFormat("liq %s", DoubleToString(sw[kz].price, _Digits)),
+                    m_clr_liq, (sw[kz].is_high ? ANCHOR_LEFT_LOWER : ANCHOR_LEFT_UPPER), m_font - 1,
+                    StringFormat("historical liquidity (proposal) %s %s (pivot %s, known %s)", kind, DoubleToString(sw[kz].price, _Digits),
+                                 H3VTime(sw[kz].pivot_time), H3VTime(sw[kz].confirm_time)));
             v.liq_text += (v.liq_text != "" ? "|" : "") + one;
             v.liq_shown++;
            }
@@ -743,7 +841,8 @@ public:
         {
          Segment(m_prefix + "dis_since", v.dis.since, pmin, v.dis.since, pmax, m_clr_dis, 1, STYLE_DOT);
          Note(m_prefix + "dis_lbl", t_last, win[nw - 1].high + step * 3.0,
-              H3LDisagreeText(v.dis, p.period), m_clr_dis, ANCHOR_RIGHT_LOWER, m_font + 1);
+              H3LDisagreeShort(v.dis),
+              m_clr_dis, ANCHOR_RIGHT_LOWER, m_font, H3LDisagreeText(v.dis, p.period));
         }
       ChartRedraw(m_chart);
      }
@@ -766,25 +865,21 @@ private:
    int               m_pad;
    int               m_margin;
    color             m_bgclr;
-   string            m_lines[];
+   string            m_rt[];       // the lines as given (text, colour, priority); wrapped and budgeted at layout time
+   color             m_rc[];
+   int               m_rp[];
+   int               m_rn;
+   string            m_lines[];    // the rows of the last layout
    color             m_clrs[];
    int               m_n;
    int               m_created;
+   int               m_last_w;     // chart size of the last layout
+   int               m_last_h;
+   int               m_hidden;     // lines dropped by the last layout (lowest priority first)
 
    string            LabelName(const int i) const
      {
       return(StringFormat("%s%03d", m_prefix, i));
-     }
-
-   int               MaxChars(void) const
-     {
-      long w = ChartGetInteger(m_chart, CHART_WIDTH_IN_PIXELS);
-      int mc = (int)((w * 0.5 - 2.0 * m_pad) / m_cw);
-      if(mc < 40)
-         mc = 40;
-      if(mc > 160)
-         mc = 160;
-      return(mc);
      }
 
    void              Push(const string text, const color clr)
@@ -810,75 +905,101 @@ public:
       m_pad     = 6;
       m_margin  = 8;
       m_bgclr   = C'16,20,28';
+      m_rn      = 0;
       m_n       = 0;
       m_created = 0;
+      m_last_w  = 0;
+      m_last_h  = 0;
+      m_hidden  = 0;
      }
 
+   int               Hidden(void) const { return(m_hidden); }
+
+   //--- the configured font is kept (7..24): a panel that does not fit loses its LOWEST priority lines, its font is
+   //--- never shrunk to an unreadable size
    void              Init(const bool enabled, const int corner, const int font_size, const color bg)
      {
       m_chart   = ChartID();
       m_enabled = enabled;
       m_corner  = corner;
-      m_font    = (font_size < 6 ? 6 : (font_size > 24 ? 24 : font_size));
+      m_font    = (font_size < 7 ? 7 : (font_size > 24 ? 24 : font_size));
       m_lh      = (int)(m_font * 1.8);
       m_cw      = m_font * 0.78;
       m_bgclr   = bg;
+      m_rn      = 0;
       m_n       = 0;
       m_created = 0;
+      m_last_w  = 0;
+      m_last_h  = 0;
+      m_hidden  = 0;
       ObjectsDeleteAll(m_chart, m_prefix);        // panel sub-prefix only
      }
 
    void              Begin(void)
      {
-      m_n = 0;
+      m_rn = 0;
      }
 
-   //--- a long line is wrapped at spaces to the panel width; continuation lines are indented
-   void              Line(const string text, const color clr)
+   //--- a line with a priority: 0 = essential (always wanted), higher = dropped first when the chart is too small
+   void              Line(const string text, const color clr, const int prio)
      {
       if(!m_enabled)
          return;
-      int mc = MaxChars();
-      string rest = text;
-      bool first = true;
-      for(int guard = 0; guard < 12; guard++)
-        {
-         int avail = (first ? mc : mc - 2);
-         if(StringLen(rest) <= avail)
-           {
-            Push((first ? "" : "  ") + rest, clr);
-            return;
-           }
-         int cut = -1;
-         for(int i = avail; i > avail / 2; i--)
-            if(StringGetCharacter(rest, i) == ' ')
-              {
-               cut = i;
-               break;
-              }
-         if(cut < 0)
-            cut = avail;
-         Push((first ? "" : "  ") + StringSubstr(rest, 0, cut), clr);
-         rest = StringSubstr(rest, cut);
-         while(StringLen(rest) > 0 && StringGetCharacter(rest, 0) == ' ')
-            rest = StringSubstr(rest, 1);
-         first = false;
-        }
-      Push("  " + rest, clr);
+      ArrayResize(m_rt, m_rn + 1, 32);
+      ArrayResize(m_rc, m_rn + 1, 32);
+      ArrayResize(m_rp, m_rn + 1, 32);
+      m_rt[m_rn] = text;
+      m_rc[m_rn] = clr;
+      m_rp[m_rn] = prio;
+      m_rn++;
      }
 
+   //--- layout (wrap to the chart width, drop the lowest priority lines that do not fit the chart height) and draw
    void              End(void)
      {
       if(!m_enabled)
          return;
+      int cw = (int)ChartGetInteger(m_chart, CHART_WIDTH_IN_PIXELS);
+      int ch = (int)ChartGetInteger(m_chart, CHART_HEIGHT_IN_PIXELS);
+      m_last_w = cw;
+      m_last_h = ch;
+      int mc = H3LPanelCols(cw, m_cw, m_pad, m_margin, 55);
+      int avail = H3LPanelRows(ch, m_lh, m_pad, m_margin);
+      string piece[];
+      string flat[];
+      int owner[];
+      int rows[];
+      ArrayResize(rows, m_rn);
+      int nf = 0;
+      for(int a = 0; a < m_rn; a++)
+        {
+         int np = H3LWrap(m_rt[a], mc, piece);
+         rows[a] = np;
+         for(int b = 0; b < np; b++)
+           {
+            ArrayResize(flat, nf + 1, 64);
+            ArrayResize(owner, nf + 1, 64);
+            flat[nf] = piece[b];
+            owner[nf] = a;
+            nf++;
+           }
+        }
+      bool keep[];
+      int hidden = 0;
+      H3LPanelBudget(avail, m_rp, rows, m_rn, keep, hidden);
+      m_hidden = hidden;
+      m_n = 0;
+      for(int c = 0; c < nf; c++)
+         if(keep[owner[c]])
+            Push(flat[c], m_rc[owner[c]]);
+      if(hidden > 0)
+         Push(StringSubstr(StringFormat("... %d more line(s) hidden: chart too small (Experts log has all)", hidden), 0, mc), clrGold);
       int maxlen = 1;
       for(int i = 0; i < m_n; i++)
          if(StringLen(m_lines[i]) > maxlen)
             maxlen = StringLen(m_lines[i]);
       int w = (int)(maxlen * m_cw) + 2 * m_pad;
       int h = m_n * m_lh + 2 * m_pad;
-      int cw = (int)ChartGetInteger(m_chart, CHART_WIDTH_IN_PIXELS);
-      int ch = (int)ChartGetInteger(m_chart, CHART_HEIGHT_IN_PIXELS);
       int x = m_margin;
       int y = m_margin;
       if(m_corner == H3V_PNL_TOP_RIGHT || m_corner == H3V_PNL_BOTTOM_RIGHT)
@@ -948,10 +1069,26 @@ public:
       ChartRedraw(m_chart);
      }
 
+   //--- chart resized (CHARTEVENT_CHART_CHANGE): lay the SAME lines out again for the new size. The chart objects of the
+   //--- map are not touched and the logic is not re-run; nothing happens while the size is unchanged.
+   void              Relayout(void)
+     {
+      if(!m_enabled || m_rn < 1)
+         return;
+      int cw = (int)ChartGetInteger(m_chart, CHART_WIDTH_IN_PIXELS);
+      int ch = (int)ChartGetInteger(m_chart, CHART_HEIGHT_IN_PIXELS);
+      if(cw <= 0 || ch <= 0)
+         return;
+      if(cw == m_last_w && ch == m_last_h)
+         return;
+      End();
+     }
+
    void              Destroy(void)
      {
       ObjectsDeleteAll(m_chart, m_prefix);        // panel sub-prefix only
       m_n = 0;
+      m_rn = 0;
       m_created = 0;
       ChartRedraw(m_chart);
      }

@@ -5,7 +5,11 @@
 //|  src/include/H4BiasLayers.mqh on synthetic bars (generic units,  |
 //|  no real prices): the MODEL DISAGREEMENT definition and run, the |
 //|  bias timeline rebuilt from the events, the T002 source swings   |
-//|  and the HISTORICAL LIQUIDITY selection.                         |
+//|  and the HISTORICAL LIQUIDITY selection, the T002 BASELINE       |
+//|  (lookback window, equal to the T002 EA on the same bars, differs|
+//|  from the replay window), the panel wrap / size / line budget,   |
+//|  the stable label slot, the CSV export key (partial history that |
+//|  grows with the same last candle) and the since-baseline reset.  |
 //|                                                                  |
 //|  STATUS: written; NOT compiled with MetaEditor and NOT run in    |
 //|  MT5. It was run only through the C++ transliteration of         |
@@ -391,6 +395,406 @@ void TestTimelineAgainstReplay(void)
    PrintFormat("  INFO fixture: %d trusted bars with a bias, %d of them in MODEL DISAGREEMENT (synthetic, not market-like)", bias_bars, dis_bars);
   }
 
+//--- deterministic synthetic random walk (generic units, no real prices); the same generator as the timeline test
+void LWalk(const int n, const long seed0, MqlRates &bars[])
+  {
+   ArrayResize(bars, n);
+   long seed = seed0;
+   double c = 1000.0;
+   for(int i = 0; i < n; i++)
+     {
+      seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+      double r1 = (double)((seed >> 8) % 2001) / 1000.0 - 1.0;
+      seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+      double r2 = (double)((seed >> 8) % 1001) / 1000.0;
+      double o = c;
+      c = c + r1 * 9.0 + (i % 90 < 45 ? 0.6 : -0.6);
+      bars[i].time  = LBase() + (datetime)(i * T3_PERIOD);
+      bars[i].open  = o;
+      bars[i].close = c;
+      bars[i].high  = (o > c ? o : c) + r2 * 3.0;
+      bars[i].low   = (o < c ? o : c) - r2 * 3.0;
+     }
+  }
+
+//--- the T002 EA's result for the last `lookback` bars of rates[0..n_end-1]: H4Analyze on exactly that copy
+int LT2EaDirection(const MqlRates &rates[], const int n_end, const int lookback, const int left, const int right, int &used)
+  {
+   used = (n_end < lookback ? n_end : lookback);
+   MqlRates seg[];
+   ArrayResize(seg, used);
+   for(int i = 0; i < used; i++)
+      seg[i] = rates[n_end - used + i];
+   SH4Swing sw[];
+   SH4Fvg fv[];
+   int ns = 0, nf = 0;
+   SH4Result res;
+   H4Analyze(seg, used, left, right, T3_PERIOD, sw, ns, fv, nf, res);
+   return(res.direction);
+  }
+
+void TestBaseline(void)
+  {
+   Print("--- T002 baseline (lookback N): window selection, equal to the T002 EA on the same bars, differs from the replay window");
+   Check(H3LBaselineBars(500, 300) == 300 && H3LBaselineBars(300, 300) == 300 && H3LBaselineBars(100, 300) == 100 &&
+         H3LBaselineBars(0, 300) == 0 && H3LBaselineBars(10, 0) == 0, "window selection: the last min(N, bars) bars");
+   MqlRates bars[];
+   LBuild(40, bars);
+   int nb = 0;
+   int whole = H3LBaselineDir(bars, 40, 40, 2, 2, T3_PERIOD, nb);
+   Check(whole == H4_DIR_BULLISH && nb == 40, "lookback = window length: BULLISH (same as the replay-window structure)");
+   int short20 = H3LBaselineDir(bars, 40, 20, 2, 2, T3_PERIOD, nb);
+   Check(short20 == H4_DIR_UNKNOWN && nb == 20, "lookback 20 on the same bars: only ONE swing high inside -> UNKNOWN (differs from the longer window)");
+   int sw_ok = 1;
+   int lbs[] = {10, 15, 20, 25, 30, 39, 40, 60};
+   for(int k = 0; k < 8; k++)
+     {
+      int used = 0;
+      int ea = LT2EaDirection(bars, 40, lbs[k], 2, 2, used);
+      int bd = H3LBaselineDir(bars, 40, lbs[k], 2, 2, T3_PERIOD, nb);
+      if(ea != bd || used != nb)
+         sw_ok = 0;
+     }
+   Check(sw_ok == 1, "baseline == the T002 EA (H4Analyze on the last N bars) for 8 lookbacks on the fixture");
+   //--- random walk: equal to the T002 EA at many end positions and lookbacks; and different from the whole window sometimes
+   MqlRates w[];
+   LWalk(420, 777, w);
+   int bad = 0;
+   int differs = 0;
+   int samples = 0;
+   int checked = 0;
+   for(int e = 80; e <= 420; e += 7)
+     {
+      for(int lb = 0; lb < 3; lb++)
+        {
+         int look = (lb == 0 ? 50 : (lb == 1 ? 120 : 300));
+         int used = 0;
+         int ea = LT2EaDirection(w, e, look, 2, 2, used);
+         int bd = H3LBaselineDir(w, e, look, 2, 2, T3_PERIOD, nb);
+         if(ea != bd || used != nb)
+            bad++;
+         checked++;
+        }
+      int nbw = 0;
+      int win_dir = H3LBaselineDir(w, e, e, 2, 2, T3_PERIOD, nbw);
+      int b20 = H3LBaselineDir(w, e, 20, 2, 2, T3_PERIOD, nb);
+      if(win_dir != b20)
+         differs++;
+      samples++;
+     }
+   Check(bad == 0 && checked > 100, "random walk: baseline equals the T002 EA at every sampled end bar (50, 120, 300)");
+   Check(differs > 0, "random walk: the replay-window direction differs from the lookback-20 baseline at some bars (the distinction is real)");
+   PrintFormat("  INFO random walk: replay-window direction differs from the lookback-20 baseline at %d of %d sampled end bars (synthetic)", differs, samples);
+   //--- no future information: bars after n_end are ignored
+   MqlRates bad_tail[];
+   LWalk(420, 777, bad_tail);
+   for(int i = 300; i < 420; i++)
+     {
+      bad_tail[i].high = 9000.0 + i;
+      bad_tail[i].low = -9000.0 - i;
+     }
+   Check(H3LBaselineDir(w, 300, 120, 2, 2, T3_PERIOD, nb) == H3LBaselineDir(bad_tail, 300, 120, 2, 2, T3_PERIOD, nb),
+         "bars after the end position do not change the baseline (no future information)");
+   //--- the disagreement run in terms of the baseline
+   SH4Swing sw[];
+   int amb = 0;
+   int ns = H4FindSwings(bars, 40, 2, 2, T3_PERIOD, sw, amb);
+   SH3Event ev[];
+   int ne = 0;
+   LEv(ev, ne, H3_EV_BREAK_SET, 0, "dir=BEAR;from=NONE");
+   SH3LRun rw;
+   H3LDisagreeRun(bars, 40, sw, ns, 2, 0, ev, ne, rw);
+   SH3LRun r40;
+   H3LDisagreeRunBase(bars, 40, 40, 2, 2, T3_PERIOD, 0, ev, ne, r40);
+   Check(rw.active && r40.active && r40.since == rw.since && r40.bars == rw.bars && r40.t2dir == H4_DIR_BULLISH && r40.lookback == 40,
+         "baseline lookback 40 (= the window): same run as the replay-window structure (since bar 26, 14 bars)");
+   SH3LRun r30;
+   H3LDisagreeRunBase(bars, 40, 30, 2, 2, T3_PERIOD, 0, ev, ne, r30);
+   Check(r30.active && r30.since == LT(26) && r30.bars == 14, "baseline lookback 30: BULLISH from the same bar, 14 bars");
+   SH3LRun r20;
+   H3LDisagreeRunBase(bars, 40, 20, 2, 2, T3_PERIOD, 0, ev, ne, r20);
+   Check(!r20.active && r20.t2dir == H4_DIR_UNKNOWN && rw.active,
+         "baseline lookback 20 is UNKNOWN: NO model disagreement, although the replay-window structure (BULLISH) would be one");
+   string tx = H3LDisagreeText(r40, T3_PERIOD);
+   Check(StringFind(tx, "MODEL DISAGREEMENT - client validation pending: T002 baseline (lookback 40) BULLISH") == 0,
+         "the text names the T002 BASELINE and its lookback");
+   string tw = H3LDisagreeText(rw, T3_PERIOD);
+   Check(StringFind(tw, "T002 replay-window structure BULLISH") > 0 && StringFind(tw, "baseline") < 0,
+         "the replay-window variant is named 'replay-window structure', never 'baseline'");
+   Check(H3LDisagreeShort(r40) == "MODEL DISAGREEMENT: baseline BULLISH vs T003 BEAR, 14 bars" && H3LDisagreeShort(r20) == "" &&
+         StringFind(H3LDisagreeShort(rw), "replay-window BULLISH") > 0, "the short chart text names the baseline / replay-window source");
+   Check(H3LT2Name(300) == "T002 baseline (lookback 300)" && H3LT2Name(0) == "T002 replay-window structure", "the two names are distinct");
+   //--- run in terms of the baseline against independent brute-force counts on the random walk: a SHORT lookback (20,
+   //--- the trusted region starts at 50) so that the baseline differs from the whole-prefix direction
+   SH3Rep full;
+   SH3Track ftr[];
+   SH3Event fev[];
+   string fkeys[];
+   SH3Params p;
+   H3ParamsDefault(p);
+   p.lookback = 50;
+   H3Replay(w, 420, p, full, ftr, fev, fkeys, false);
+   int mism = 0;
+   int total_run = 0;
+   int pre_differs = 0;
+   int ends = 0;
+   for(int en = 120; en <= 420; en += 5)
+     {
+      SH3LRun rb;
+      H3LDisagreeRunBase(w, en, 20, p.left, p.right, p.period, H3WarmUp(p), fev, full.ne, rb);
+      int brute = 0;
+      bool stop1 = false;
+      int brute_pre = 0;
+      bool stop2 = false;
+      for(int t = en - 1; t >= H3WarmUp(p); t--)
+        {
+         int nbb = 0;
+         int bias_t = H3LBiasAtBar(fev, full.ne, w[t].time);
+         if(!stop1)
+           {
+            if(H3LDisagree(H3LBaselineDir(w, t + 1, 20, p.left, p.right, p.period, nbb), bias_t))
+               brute++;
+            else
+               stop1 = true;
+           }
+         if(!stop2)
+           {
+            if(H3LDisagree(H3LBaselineDir(w, t + 1, t + 1, p.left, p.right, p.period, nbb), bias_t))
+               brute_pre++;
+            else
+               stop2 = true;
+           }
+        }
+      if((rb.active ? rb.bars : 0) != brute)
+         mism++;
+      if(brute != brute_pre)
+         pre_differs++;
+      total_run += brute;
+      ends++;
+     }
+   Check(mism == 0 && ends > 50, "baseline run length equals an independent count at every sampled end bar (lookback 20)");
+   Check(total_run > 0 && pre_differs > 0, "the check is not vacuous: runs exist and the whole-prefix direction would give other run lengths at some end bars");
+   PrintFormat("  INFO random walk: %d end bars, summed baseline run length %d, whole-prefix run length differs at %d (synthetic)", ends, total_run, pre_differs);
+  }
+
+void TestPanelBudget(void)
+  {
+   Print("--- panel: wrap, size and line budget (the lowest priority lines are dropped, the font is never shrunk)");
+   string pieces[];
+   int np = H3LWrap("short text", 40, pieces);
+   Check(np == 1 && pieces[0] == "short text", "a short line is one piece");
+   string longt = "T003 PROTOTYPE bias BEAR phase SWEEP_WAIT origin BREAK since 2026.10.01 12:00 and a long tail of words that must wrap";
+   np = H3LWrap(longt, 40, pieces);
+   int okw = 1;
+   string joined = "";
+   for(int i = 0; i < np; i++)
+     {
+      if(StringLen(pieces[i]) > 40)
+         okw = 0;
+      if(i > 0 && StringSubstr(pieces[i], 0, 2) != "  ")
+         okw = 0;
+      string pc = (i > 0 ? StringSubstr(pieces[i], 2) : pieces[i]);
+      joined += (joined != "" ? " " : "") + pc;
+     }
+   Check(np > 1 && okw == 1 && joined == longt, "a long line wraps at spaces, continuation rows are indented and no word is lost");
+   Check(H3LPanelRows(300, 16, 6, 8) == 17 && H3LPanelRows(120, 16, 6, 8) == 5 && H3LPanelRows(10, 16, 6, 8) == 1,
+         "rows from the chart height: 300 px -> 17, 120 px -> 5, tiny chart -> at least 1");
+   int c_wide = H3LPanelCols(1600, 7.0, 6, 8, 50);
+   int c_mid = H3LPanelCols(800, 7.0, 6, 8, 50);
+   int c_tiny = H3LPanelCols(200, 7.0, 6, 8, 50);
+   Check(c_wide > c_mid && c_mid > c_tiny && c_tiny >= 20 && c_wide <= 140, "columns follow the chart width (20..140) and shrink with it");
+   Check((c_mid + 2) * 7 <= 800 - 16, "the columns never need more width than the chart has left after the margins");
+   //--- budget
+   int pr[] = {0, 0, 1, 2, 3, 3};
+   int rw[] = {1, 1, 1, 2, 1, 1};
+   bool keep[];
+   int hid = 0;
+   int kept = H3LPanelBudget(100, pr, rw, 6, keep, hid);
+   Check(kept == 6 && hid == 0, "everything fits: nothing is dropped, no marker");
+   kept = H3LPanelBudget(5, pr, rw, 6, keep, hid);
+   Check(kept == 3 && hid == 3 && keep[0] && keep[1] && keep[2] && !keep[3] && !keep[4] && !keep[5],
+         "5 rows for 7: one row is kept for the marker, the priority 0 and 1 lines stay, the lowest priorities go");
+   kept = H3LPanelBudget(1, pr, rw, 6, keep, hid);
+   Check(kept == 0 && hid == 6, "a one-row panel keeps only the marker");
+   //--- property: kept lines are never less important than a dropped line; the kept rows plus the marker fit
+   long seed = 4242;
+   int viol = 0;
+   int cases = 0;
+   for(int cs = 0; cs < 300; cs++)
+     {
+      int n = 3 + cs % 12;
+      int pp[];
+      int rr[];
+      ArrayResize(pp, n);
+      ArrayResize(rr, n);
+      int tot = 0;
+      for(int i = 0; i < n; i++)
+        {
+         seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+         pp[i] = (int)((seed >> 8) % 5);
+         seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+         rr[i] = 1 + (int)((seed >> 8) % 3);
+         tot += rr[i];
+        }
+      int avail = 1 + (cs * 7) % (tot + 3);
+      bool kp[];
+      int hd = 0;
+      int kc = H3LPanelBudget(avail, pp, rr, n, kp, hd);
+      int usedr = 0;
+      int maxk = -1;
+      int mind = 99;
+      int cnt = 0;
+      for(int j = 0; j < n; j++)
+        {
+         if(kp[j])
+           {
+            usedr += rr[j];
+            cnt++;
+            if(pp[j] > maxk)
+               maxk = pp[j];
+           }
+         else
+            if(pp[j] < mind)
+               mind = pp[j];
+        }
+      if(cnt != kc || hd != n - kc)
+         viol++;
+      if(hd > 0 && (usedr + 1 > avail || (maxk >= 0 && mind < 99 && maxk > mind)))
+         viol++;
+      if(hd == 0 && tot > avail)
+         viol++;
+      cases++;
+     }
+   Check(viol == 0 && cases == 300, "300 random cases: the kept rows fit, the dropped lines are always the least important");
+   //--- the compact default fits a small chart: 10 essential rows need a 240 px chart at font 9
+   Check(H3LPanelRows(240, 16, 6, 8) >= 10, "a 240 px high chart holds the 10 rows of the compact view at font 9 (line height 16)");
+  }
+
+void TestLabelSlot(void)
+  {
+   Print("--- chart labels: the slot is stable (time and rank in the same bar only)");
+   datetime t0 = LT(10);
+   int a = H3LLabelSlot(t0, T3_PERIOD, 0, 3);
+   int b = H3LLabelSlot(t0, T3_PERIOD, 0, 3);
+   Check(a == b, "the same bar and rank give the same slot (deterministic, not random)");
+   int distinct = 1;
+   for(int i = 0; i < 3; i++)
+      if(H3LLabelSlot(LT(10 + i), T3_PERIOD, 0, 3) == H3LLabelSlot(LT(10 + (i + 1) % 3), T3_PERIOD, 0, 3))
+         distinct = 0;
+   Check(distinct == 1, "three neighbouring bars use three different lanes");
+   Check(H3LLabelSlot(t0, T3_PERIOD, 0, 3) != H3LLabelSlot(t0, T3_PERIOD, 1, 3) &&
+         H3LLabelSlot(t0, T3_PERIOD, 1, 3) != H3LLabelSlot(t0, T3_PERIOD, 2, 3), "events of the same bar get different slots by their rank");
+   int mx = 0;
+   for(int k = 0; k < 40; k++)
+      for(int s = 0; s < 9; s++)
+        {
+         int v = H3LLabelSlot(LT(k), T3_PERIOD, s, 3);
+         if(v > mx)
+            mx = v;
+        }
+   Check(mx <= 8 && H3LLabelSlot(LT(5), T3_PERIOD, -4, 3) >= 0 && H3LLabelSlot(LT(5), T3_PERIOD, 2, 0) >= 0,
+         "slots stay within 0..8 (3 lanes x 3 ranks); bad arguments are tolerated");
+  }
+
+void TestExportKey(void)
+  {
+   Print("--- CSV export key: a change of the analysed set is detected even when the last candle is the same");
+   MqlRates full[];
+   LBuild(60, full);
+   //--- PARTIAL history that grows: 40 bars -> 60 bars, the last candle is identical
+   MqlRates p40[];
+   ArrayResize(p40, 40);
+   for(int j = 0; j < 40; j++)
+      p40[j] = full[20 + j];
+   MqlRates p60[];
+   ArrayResize(p60, 60);
+   for(int j2 = 0; j2 < 60; j2++)
+      p60[j2] = full[j2];
+   string k40 = H3LExportKey("XAUUSD", 0, p40, 40, 2);
+   string k60 = H3LExportKey("XAUUSD", 0, p60, 60, 2);
+   Check(p40[39].time == p60[59].time && k40 != k60, "history grows with the same last candle: the key changes");
+   Check(StringFind(k40, "|40|") > 0 && StringFind(k60, "|60|") > 0, "the key carries the bar count");
+   Check(H3LBarsHash(p40, 40, 2) != H3LBarsHash(p60, 60, 2) && StringLen(H3LBarsHash(p40, 40, 2)) == 16, "the content hash differs (16 hex digits)");
+   //--- same count and last candle, one OLDER bar corrected
+   MqlRates fixed[];
+   ArrayResize(fixed, 40);
+   for(int j3 = 0; j3 < 40; j3++)
+      fixed[j3] = p40[j3];
+   fixed[7].high = fixed[7].high + 0.25;
+   Check(H3LExportKey("XAUUSD", 0, fixed, 40, 2) != k40, "one older bar corrected (same count, same first and last time): the key changes");
+   //--- the last bar's own values change (the candle closed differently after a data fix)
+   MqlRates lastfix[];
+   ArrayResize(lastfix, 40);
+   for(int j4 = 0; j4 < 40; j4++)
+      lastfix[j4] = p40[j4];
+   lastfix[39].close = lastfix[39].close - 0.5;
+   Check(H3LExportKey("XAUUSD", 0, lastfix, 40, 2) != k40, "the last candle's values corrected: the key changes");
+   //--- order sensitive: two bars swapped
+   MqlRates swapped[];
+   ArrayResize(swapped, 40);
+   for(int j5 = 0; j5 < 40; j5++)
+      swapped[j5] = p40[j5];
+   MqlRates tmp = swapped[10];
+   swapped[10] = swapped[11];
+   swapped[11] = tmp;
+   Check(H3LBarsHash(swapped, 40, 2) != H3LBarsHash(p40, 40, 2), "the hash is order sensitive");
+   //--- identical set: same key; other as-of / symbol: other key
+   MqlRates same[];
+   ArrayResize(same, 40);
+   for(int j6 = 0; j6 < 40; j6++)
+      same[j6] = p40[j6];
+   Check(H3LExportKey("XAUUSD", 0, same, 40, 2) == k40, "an identical set gives the identical key (no rewrite)");
+   Check(H3LExportKey("XAUUSD", LT(30), same, 40, 2) != k40 && H3LExportKey("XAUUSD.r", 0, same, 40, 2) != k40, "as-of and symbol are part of the key");
+   //--- a change below the exported precision is not content
+   same[5].high = same[5].high + 0.0004;
+   Check(H3LExportKey("XAUUSD", 0, same, 40, 2) == k40, "a change below the exported decimals (2) does not rewrite the file");
+   same[5].high = same[5].high + 0.01;
+   Check(H3LExportKey("XAUUSD", 0, same, 40, 2) != k40, "a change of one exported unit (0.01) does");
+   Check(StringFind(H3LExportKey("XAUUSD", 0, same, 0, 2), "empty") > 0, "an empty set has an explicit key");
+  }
+
+void TestSince(void)
+  {
+   Print("--- since-baseline values: a clear / recovery zeroes them and reports no history as NEW");
+   SH3LSince s;
+   H3LSinceInit(s);
+   H3LSinceNew(s);
+   H3LSinceNew(s);
+   H3LSinceNew(s);
+   H3LSinceChange(s);
+   H3LSinceChange(s);
+   Check(s.new_total == 3 && s.changes == 2 && s.sess_new == 3 && s.sess_changes == 2 && s.baselines == 0, "counted since the baseline and for the session");
+   H3LSinceClear(s);
+   Check(s.new_total == 0 && s.changes == 0, "clear / recovery: the values labelled 'since baseline' are zero");
+   Check(s.sess_new == 3 && s.sess_changes == 2 && s.baselines == 1, "the session totals stay (Experts log only)");
+   H3LSinceNew(s);
+   Check(s.new_total == 1 && s.sess_new == 4, "counting restarts from the new baseline");
+   //--- the consumer after a recovery: the history of the first evaluation is the baseline, nothing is NEW
+   MqlRates w[];
+   LWalk(420, 12345, w);
+   SH3Params p;
+   H3ParamsDefault(p);
+   p.lookback = 50;
+   SH3Eval ev;
+   SH3Track tr[];
+   SH3Event evs[];
+   H3EvaluateLatest(w, 420, p, ev, tr, evs);
+   Check(ev.ne > 3, "fixture is not vacuous: the evaluation holds history events");
+   SH3Event nev[];
+   int nn = 0;
+   datetime cursor = 0;
+   int st = H3ConsumeNew(ev, evs, cursor, p.period, nev, nn);
+   Check(ev.reliable == false || (st == H3_C_GAP && nn == 0), "no baseline yet (cursor 0): the history events are NOT delivered as new (GAP, re-baseline)");
+   if(ev.reliable)
+     {
+      cursor = H3BaselineCursor(ev);
+      st = H3ConsumeNew(ev, evs, cursor, p.period, nev, nn);
+      Check(st == H3_C_NOTHING_NEW && nn == 0, "after the baseline at the last closed bar: nothing is NEW although the history has events");
+     }
+   else
+      PrintFormat("  INFO the fixture evaluation is not reliable (%s): the baseline step is not exercised here", ev.reason);
+  }
+
 void OnStart(void)
   {
    Print("T003 LAYERS TEST (PROPOSAL helpers; model/helper check, NOT a strategy validation)");
@@ -402,5 +806,10 @@ void OnStart(void)
    TestReasons();
    TestShortNames();
    TestTimelineAgainstReplay();
+   TestBaseline();
+   TestPanelBudget();
+   TestLabelSlot();
+   TestExportKey();
+   TestSince();
    PrintFormat("T003 LAYERS TEST finished: %d passed, %d failed", g_pass, g_fail);
   }

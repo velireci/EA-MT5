@@ -4,7 +4,8 @@
 # transliterated H4Bias.mqh / H4Structure.mqh agree with the Python model on the controlled cases and
 # that the hand-written MQL5 test checks pass in that setting. Compilation in MetaEditor stays UNVERIFIED.
 # It runs two test scripts: T003_LogicTest.mq5 (H4Bias.mqh) and T003_LayersTest.mq5 (the pure helpers of the visual
-# layers, src/include/H4BiasLayers.mqh: disagreement definition, bias timeline, T002 sources, historical liquidity).
+# layers, src/include/H4BiasLayers.mqh: disagreement definition, bias timeline, T002 sources, historical liquidity, T002 baseline,
+# panel wrap / line budget, label slot, export key / hash, since-baseline reset).
 # Usage: bash tools/t003-xlate-check.sh   (exit 0 = both transliterated test scripts passed, failures 0)
 set -u
 cd "$(dirname "$0")/.."
@@ -33,6 +34,10 @@ build_run mut; rcm=$?
 [ $rcm -eq 1 ] && echo "NEG PASS: the mutated logic fails the transliterated test script (exit $rcm = test failures, not a build error)" || { echo "NEG FAIL: mutation not detected or the build failed (exit $rcm)"; exit 6; }
 
 # ---- the pure helpers of the visual layers (model/helper check; NOT MetaEditor, NOT MT5)
+# The ratchet mutation above was applied to $D/H4Bias.hpp: translate the UNMUTATED header again, otherwise the layers test
+# would run against the mutated logic (found in round 4: the earlier layers run used the mutated header).
+python3 $X/mql2cpp.py src/include/H4Bias.mqh "$D/H4Bias.hpp" || exit 1
+cmp -s "$D/H4Bias.hpp" <(python3 $X/mql2cpp.py src/include/H4Bias.mqh /dev/stdout) && echo "layers run uses the unmutated H4Bias header (re-translated)" || { echo "the header for the layers run differs from a fresh translation"; exit 5; }
 python3 $X/mql2cpp.py src/include/H4BiasLayers.mqh "$D/H4BiasLayers.hpp" || exit 1
 python3 $X/mql2cpp.py src/tests/T003_LayersTest.mq5 "$D/layers_test.cpp" --test || exit 1
 build_layers() { # build_layers NAME -> compiles layers_test.cpp against the (possibly mutated) $D/H4BiasLayers.hpp
@@ -70,6 +75,17 @@ negl "bias timeline reads events after the bar" 'if(events[i].bar_time > bar_ope
          break;' 'if(events[i].bar_time > bar_open + 4 * 14400)
          break;' || negs=1
 negl "run ignores the trusted region" 'int stop = (warm < last ? warm : last);' 'int stop = 0;' || negs=1
+negl "baseline window is not the last N bars" 'int start = n_end - nbars;' 'int start = 0;' || negs=1
+negl "baseline run uses the whole prefix instead of the lookback" 'int d2 = H3LBaselineDir(win, t + 1, lookback, left, right, period, nb);' 'int d2 = H3LBaselineDir(win, t + 1, t + 1, left, right, period, nb);' || negs=1
+negl "panel budget drops the MOST important line first" 'if(best < 0 || prio[j] < prio[best])' 'if(best < 0 || prio[j] > prio[best])' || negs=1
+negl "label slot ignores the rank in the bar" 'return((s % 3) * ln + lane);' 'return(lane);' || negs=1
+negl "export key without the bar count" 'IntegerToString(n) + S("|") + IntegerToString((long)rates[0].time)' 'IntegerToString((long)rates[0].time)' || negs=1
+negl "export hash ignores the close" '      h = H3LHashStep(h, H3LScaled(rates[i].close, scale));
+' '' || negs=1
+negl "clear keeps the since-baseline values" '   s.new_total = 0;
+   s.changes   = 0;
+   s.baselines++;' '   s.baselines++;' || negs=1
+negl "wrap drops the continuation indent" 'out[n] = (first ? S("") : S("  ")) + StringSubstr(rest, 0, cut);' 'out[n] = StringSubstr(rest, 0, cut);' || negs=1
 [ $negs -eq 0 ] || exit 6
 [ $rc -ne 0 ] && exit $rc
 exit $rcl

@@ -192,6 +192,34 @@ out=$($CHK noclock $VIS) && echo "  PASS no TimeCurrent / TimeLocal / TimeGMT / 
 out=$($CHK names $VIS) && echo "  PASS object names use short stable parts (times, H3LShort of long ids); no raw long id in a name" || { echo "$out"; echo "  FAIL object names"; FAIL=1; }
 out=$($CHK asof $VIS) && echo "  PASS as-of flow: InpAsOfTime = 0 default documented as BROKER/SERVER time, g_hist from g_asof, Draw reads the bars only through the single ArrayCopy into the evaluated window, the layers hold no full bars array" || { echo "$out"; echo "  FAIL as-of flow"; FAIL=1; }
 
+echo "=== V13: compact panel, resize, chart labels, T002 baseline, CSV export key, since-baseline reset (source reading) ==="
+out=$($CHK compact $VIS) && echo "  PASS compact view by default (InpShowDetails = false): every panel line has an integer priority, >= 10 essential lines, the compact view holds T003 bias / T002 baseline / disagreement / current level + snapshot / phase + READY / FVG / reliability, the long view comes only after the compact return, LogDetails writes the details to the Experts log" || { echo "$out"; echo "  FAIL compact panel"; FAIL=1; }
+out=$($CHK resize $VIS) && echo "  PASS the panel is laid out from CHART_WIDTH_IN_PIXELS / CHART_HEIGHT_IN_PIXELS (rows, columns, line budget that drops the lowest priority lines), CHARTEVENT_CHART_CHANGE calls only Relayout (no evaluation, no redraw of the map, no deletion), the font is kept (7..24) and never shrunk" || { echo "$out"; echo "  FAIL panel resize"; FAIL=1; }
+out=$($CHK labels $VIS) && echo "  PASS chart labels: short text with OBJPROP_TOOLTIP, event slot from H3LLabelSlot (bar time and rank in the same bar, not draw order), only the label anchor is offset (level and FVG prices untouched), CURRENT / SNAPSHOT / FVG labels and solid / dashed / dotted styles stay distinct" || { echo "$out"; echo "  FAIL chart labels"; FAIL=1; }
+out=$($CHK baseline $VIS) && echo "  PASS T002 baseline: lookback from InpLookbackBars with the T002 clamp, H3LBaselineDir = last N bars + H4FindSwings + H4DeriveDirection (the T002 EA's window and functions), labelled 'T002 baseline (lookback N)', apart from 'replay-window structure'; the disagreement is stated and computed in terms of the baseline" || { echo "$out"; echo "  FAIL T002 baseline"; FAIL=1; }
+out=$($CHK export $VIS) && echo "  PASS CSV export key = symbol, as-of, last and first bar time, bar count and an order-sensitive FNV-1a hash of times + OHLC; the key is stored only after a complete write; the file is documented as OVERWRITTEN when the set changes" || { echo "$out"; echo "  FAIL export key"; FAIL=1; }
+out=$($CHK since $VIS) && echo "  PASS clear / recovery zeroes the since-baseline values (H3LSinceClear, observed changes, NEW ids); the NEW count is g_since.new_total; the session totals go to the Experts log only" || { echo "$out"; echo "  FAIL since-baseline reset"; FAIL=1; }
+for tn in TestBaseline TestPanelBudget TestLabelSlot TestExportKey TestSince; do
+  grep -q "^void $tn(void)" $LTEST && grep -q "^   $tn();" $LTEST && echo "  PASS $LTEST defines and runs $tn" || { echo "  FAIL $LTEST lacks $tn"; FAIL=1; }
+done
+
+echo "=== V14: the T003 logic, the structure header and T001/T002 files are byte-identical to e2c1fa6 (this round did not touch them) ==="
+E2=e2c1fa6
+if git cat-file -e "$E2^{commit}" 2>/dev/null; then
+  for f in src/include/H4Bias.mqh src/include/H4Structure.mqh tests/t003_reference_test.py tools/t003-static-checks.sh src/XauUsdH4Map.mq5 src/include/H4MapDrawer.mqh src/XauUsdFoundation.mq5 src/include/StatusPanel.mqh src/include/SymbolSnapshot.mqh src/include/TimeframeWatcher.mqh tests/t002_reference_test.py tools/t001-static-checks.sh tools/t002-static-checks.sh tools/t001-check-balance.py tools/t001-check-format-strings.py; do
+    git diff --quiet "$E2" -- "$f" 2>/dev/null && echo "  PASS $f identical to $E2" || { echo "  FAIL $f differs from $E2"; FAIL=1; }
+  done
+  git show "$E2:src/tests/T003_LogicTest.mq5" | sed -n '/BEGIN GENERATED CASE DATA/,/END GENERATED CASE DATA/p' > "$NEG/blk_e2.txt"
+  if [ -s "$NEG/blk_e2.txt" ] && cmp -s "$NEG/blk_e2.txt" "$NEG/blk_now.txt"; then
+    echo "  PASS the generated case-data block of T003_LogicTest.mq5 is identical to $E2 ($(wc -l < "$NEG/blk_e2.txt") lines)"
+  else
+    echo "  FAIL the generated case-data block differs from $E2 or is empty"; FAIL=1
+  fi
+  git diff --quiet "$E2" -- src/tests/T003_LogicTest.mq5 && echo "  PASS the whole T003_LogicTest.mq5 is identical to $E2" || { echo "  FAIL T003_LogicTest.mq5 differs from $E2"; FAIL=1; }
+else
+  echo "  INFO: commit $E2 not available here; the parent must verify that these files are unchanged"
+fi
+
 echo "=== V7: negative controls (every checker must detect its problem, for the intended reason) ==="
 # trading API
 cp $EA "$NEG/ea1.mq5"; printf 'void F(){ MqlTradeRequest r; OrderSend(r, res); }\n' >> "$NEG/ea1.mq5"
@@ -286,13 +314,13 @@ neg "N39 the consumer status is not recorded" diag EA '   g_cons_status = cs;' '
 
 # --- integration round: negative controls of the new checks (each must fail for the intended reason)
 neg "N40 FROZEN comment in the EA" nofrozen EA 'Print("================ T003 H4 bias (visual) ================");' 'Print("================ T003 H4 bias (visual) ================"); // frozen protecting level' "obsolete FROZEN"
-neg "N41 FROZEN text in the drawer" nofrozen DRW 'snapshot (reference only)' 'FROZEN snapshot (reference only)' "obsolete FROZEN"
+neg "N41 FROZEN text in the drawer" nofrozen DRW 'SNAPSHOT (dashed, reference only)' 'FROZEN SNAPSHOT (dashed, reference only)' "obsolete FROZEN"
 neg "N42 MIXED counted as a disagreement" disagree LAY 'if(t2dir == H4_DIR_BULLISH && bias == H3_BEAR)' 'if(t2dir != H4_DIR_BEARISH && bias == H3_BEAR)' "lacks the case T002 BULLISH against T003 BEAR"
 neg "N43 the disagreement text lost its wording" disagree LAY 'MODEL DISAGREEMENT - client validation pending: T002 ' 'DISAGREEMENT: T002 ' "client validation pending"
 neg "N44 the disagreement is logged at every evaluation" disagree EA 'if(key == g_dis_key)
       return;' 'if(false)
       return;' "not once-per-change"
-neg "N45 the panel does not state the definition" disagree EA 'T002 BULLISH vs T003 BEAR or T002 BEARISH vs T003 BULL only' 'T002 and T003 differ' "does not state the disagreement definition"
+neg "N45 the panel does not state the definition" disagree EA 'T002 baseline BULLISH vs T003 BEAR or T002 baseline BEARISH vs T003 BULL only' 'T002 and T003 differ' "does not state the disagreement definition"
 neg "N46 the run uses the last bar's bias at every bar" disagree LAY 'H3LBiasAtBar(events, ne, win[t].time)' 'H3LBiasAtBar(events, ne, win[last].time)' "absolute bar times"
 neg "N47 a rebuild difference logged as a market change" disagree EA 'historical; NOT reported as a market change)' 'historical; a market change)' "does not separate a real change"
 neg "N48 liquidity exceed test on the close" liquidity LAY 'win[j].high > sw[i].price' 'win[j].close > sw[i].price' "lacks win[j].high"
@@ -311,10 +339,10 @@ neg "N58 the panel continues after the unreliable block" limited EA '      g_pan
       return;
      }
 
-   //--- STRUCTURE' '      g_panel.End();
+   SH3State st;' '      g_panel.End();
      }
 
-   //--- STRUCTURE' "no early return for an unreliable evaluation"
+   SH3State st;' "inside / before the unreliable block"
 neg "N59 ConsumeEvents does not leave when unreliable" limited EA 'if(!g_ev.reliable)
      {
       g_cons_text = "NOT_RELIABLE: "' 'if(false)
@@ -333,6 +361,58 @@ neg "N64 a live clock in the EA" noclock EA 'void OnTick(void)  { Poll(); }' 'vo
 neg "N65 a long id in an object name" names DRW 'Segment(m_prefix + "snap_" + H3LShort(st.setup_id),' 'Segment(m_prefix + "snap_" + H3VSanitize(st.setup_id),' "long logic id"
 neg "N66 Draw reads the full bars array" asof DRW 'H3StateCopy(ev.st, st);' 'H3StateCopy(ev.st, st); double zz = bars[n - 1].close;' "Draw reads the bars array"
 neg "N67 the as-of input default changed" asof EA 'input datetime         InpAsOfTime      = 0;' 'input datetime         InpAsOfTime      = 1;' "InpAsOfTime = 0 missing"
+# --- round 4: compact panel, resize, labels, T002 baseline, export key, since-baseline reset (each must fail for the intended reason)
+neg "N70 the details view is the default" compact EA 'input bool             InpShowDetails   = false;' 'input bool             InpShowDetails   = true;' "InpShowDetails = false"
+neg "N71 no compact exit before the long view" compact EA 'if(!InpShowDetails)
+     {
+      g_panel.Line("compact view.' 'if(false)
+     {
+      g_panel.Line("compact view.' "compact exit"
+neg "N72 a panel line without a priority" compact EA 'g_panel.Line("FVG: " + (g_view.fvg_last != "" ? g_view.fvg_last : "none eligible"), clrGold, 0);' 'g_panel.Line("FVG: " + (g_view.fvg_last != "" ? g_view.fvg_last : "none eligible"), clrGold);' "without an integer priority"
+neg "N73 long-view text inside the compact view" compact EA 'g_panel.Line("T003 H4 BIAS - PROPOSAL (client validation pending), visual only, NO TRADING", clrGold, 0);' 'g_panel.Line("T003 H4 BIAS - PROPOSAL (client validation pending), visual only, NO TRADING", clrGold, 0); g_panel.Line("depths: x", clrGold, 0);' "long-view text"
+neg "N74 the details are not logged" compact EA '   LogEvaluation();
+   LogDetails();' '   LogEvaluation();' "does not call LogDetails"
+neg "N75 the chart-change handler does nothing" resize EA '      g_panel.Relayout();
+  }' '      g_chart_changed_unused = true;
+  }' "does not lay the panel out again"
+neg "N76 the chart-change handler re-evaluates" resize EA '      g_panel.Relayout();
+  }' '      { g_panel.Relayout(); EvaluateAndDraw(""); }
+  }' "redraws or re-evaluates"
+neg "N77 Relayout without the size comparison" resize DRW 'if(cw == m_last_w && ch == m_last_h)' 'if(false)' "Relayout lacks"
+neg "N78 the panel ignores the line budget" resize DRW 'H3LPanelBudget(avail, m_rp, rows, m_rn, keep, hidden);' 'ArrayResize(keep, m_rn);' "panel End() lacks H3LPanelBudget("
+neg "N79 the font is shrunk to fit" resize DRW 'ObjectSetInteger(m_chart, name, OBJPROP_FONTSIZE, m_font);' 'ObjectSetInteger(m_chart, name, OBJPROP_FONTSIZE, m_font - 2);' "changes the font size"
+neg "N80 the minimum font is lowered" resize DRW 'm_font    = (font_size < 7 ? 7 : (font_size > 24 ? 24 : font_size));' 'm_font    = (font_size < 6 ? 6 : (font_size > 24 ? 24 : font_size));' "between 7 and 24"
+neg "N81 labels without a tooltip" labels DRW 'ObjectSetString(m_chart, name, OBJPROP_TOOLTIP, (tip != "" ? tip : text));' '' "OBJPROP_TOOLTIP"
+neg "N82 the event offset depends on the draw order" labels DRW 'H3LLabelSlot(events[e].bar_time, p.period, seq, 3)' 'drawn' "stable slot"
+neg "N83 a level line moved to make room for text" labels DRW 'Segment(m_prefix + "lvl_" + H3LShort(st.lv_id), st.lv_pivot, st.lv_price, x_end, st.lv_price,' 'Segment(m_prefix + "lvl_" + H3LShort(st.lv_id), st.lv_pivot, st.lv_price + step, x_end, st.lv_price + step,' "not the real level price"
+neg "N84 an FVG bound moved" labels DRW 'Rect(m_prefix + "fvg_" + fv[fk].id, fv[fk].time_a, fv[fk].upper, x_end, fv[fk].lower, fc, 1, false,' 'Rect(m_prefix + "fvg_" + fv[fk].id, fv[fk].time_a, fv[fk].upper + step, x_end, fv[fk].lower, fc, 1, false,' "not the real FVG bound"
+neg "N85 the label slot uses a random value" labels LAY 'int ln = (lanes < 1 ? 1 : lanes);' 'int ln = (lanes < 1 ? 1 : lanes) + MathRand() % 1;' "clock or a random value"
+neg "N86 the snapshot label lost its name" labels DRW '"SNAPSHOT %s (ref)%s"' '"%s (ref)%s"' "distinct short label"
+neg "N87 the baseline ignores the lookback input" baseline DRW 'H3LBaselineDir(win, nw, p.lookback, p.left, p.right, p.period, v.t2_base_bars)' 'H3LBaselineDir(win, nw, nw, p.left, p.right, p.period, v.t2_base_bars)' "p.lookback"
+neg "N88 the lookback is not taken from the input" baseline EA 'g_params.lookback = MathMax(50, MathMin(1000, InpLookbackBars));' 'g_params.lookback = 300;' "InpLookbackBars"
+neg "N89 the baseline window is the whole replay window" baseline LAY 'int start = n_end - nbars;' 'int start = 0;' "same functions and window as the T002 EA"
+neg "N90 the T002 line carries an ambiguous name" baseline EA '"%s: %s (%s)", H3LT2Name(g_view.t2_base_look)' '"T002 structure: %s (%s)", H3LT2Name(g_view.t2_base_look)' "ambiguous T002 label"
+neg "N91 the disagreement uses the replay window" disagree DRW 'H3LDisagreeRunBase(win, nw, p.lookback, p.left, p.right, p.period, H3WarmUp(p), events, ev.ne, v.dis);' 'H3LDisagreeRun(win, nw, sw, ns, p.right, H3WarmUp(p), events, ev.ne, v.dis);' "Draw lacks H3LDisagreeRunBase"
+neg "N92 the definition is not stated for the baseline" disagree EA '(proposal) is stated in terms of the T002 BASELINE:' '(proposal) is stated:' "T002 BASELINE"
+neg "N93 the replay-window difference is not reported" baseline EA 'DIFFERS from the T002 baseline' 'differs' "does not say when the replay-window structure differs"
+neg "N94 the export key is the last bar time alone" export EA 'string key = H3LExportKey(g_symbol, g_asof, g_bars, g_n, g_snapshot.digits);' 'string key = g_symbol + "|" + IntegerToString((long)g_asof) + "|" + IntegerToString((long)g_bars[g_n - 1].time);' "does not build its key with H3LExportKey"
+neg "N95 the export key has no bar count" export LAY 'IntegerToString(n) + "|" + IntegerToString((long)rates[0].time)' 'IntegerToString((long)rates[0].time)' "IntegerToString(n)"
+neg "N96 the export key has no content hash" export LAY '+ "|" + H3LBarsHash(rates, n, digits));' ');' "H3LBarsHash(rates, n, digits)"
+neg "N97 the hash ignores a field" export LAY '      h = H3LHashStep(h, H3LScaled(rates[i].high, scale));
+' '' "rates[i].high"
+neg "N98 the export key is stored before the write" export EA '   g_export_key = key;
+   g_export_text' '   g_export_text' "stored before the file"
+neg "N99 a clear keeps the NEW count" since EA '   H3LSinceClear(g_since);
+   g_nchanges = 0;' '   g_nchanges = 0;' "H3LSinceClear"
+neg "N100 a clear keeps the observed changes" since EA '   H3LSinceClear(g_since);
+   g_nchanges = 0;
+' '   H3LSinceClear(g_since);
+' "g_nchanges = 0"
+neg "N101 the NEW count bypasses the since-baseline counter" since EA 'g_since.new_total, g_cons_text), clrSilver, 4);' 'g_n_new, g_cons_text), clrSilver, 4);' "g_since.new_total"
+neg "N102 the panel shows the session totals" since EA 'g_since.new_total, g_cons_text), clrSilver, 4);' 'g_since.new_total + g_since.sess_new, g_cons_text), clrSilver, 4);' "session totals"
+neg "N103 the since-clear touches the session totals" since LAY 's.changes   = 0;
+   s.baselines++;' 's.changes   = 0; s.sess_new = 0;
+   s.baselines++;' "touches the session totals"
 # the bias must not depend on the visual layer: a copy of H4Bias.mqh that includes it is detected
 mkdir -p "$NEG/dep/include"; cp $EA "$NEG/dep/XauUsdH4Bias.mq5"; cp $DRW "$NEG/dep/include/H4BiasDrawer.mqh"; cp $LAY "$NEG/dep/include/H4BiasLayers.mqh"
 cp src/include/H4Bias.mqh "$NEG/dep/include/H4Bias.mqh"; printf '#include "H4BiasLayers.mqh"\n' >> "$NEG/dep/include/H4Bias.mqh"
