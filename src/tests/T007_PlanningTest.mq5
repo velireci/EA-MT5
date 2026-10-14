@@ -280,6 +280,7 @@ void Sequences()
    TestLimits(l);
    string reg[];
    ArrayResize(reg,4);
+   for(int init=0;init<ArraySize(reg);init++) reg[init]="";
    int count=0;
    STpPermit r;
    bool a1=TP_Authorize(p1,s,l,reg,count,r);
@@ -291,22 +292,29 @@ void Sequences()
    // a BLOCKed attempt does not consume the id
    string reg2[];
    ArrayResize(reg2,4);
+   for(int init=0;init<ArraySize(reg2);init++) reg2[init]="";
    int c2=0;
    STpSnapshot bad=s;
    bad.data_state=TP_DATA_NOT_READY;
+   string before2[];
+   ArrayCopy(before2,reg2);
    bool b1=TP_Authorize(p1,bad,l,reg2,c2,r);
-   Check(!b1 && c2==0 && reg2[0]=="" && r.primary_reason=="DATA_NOT_READY","a blocked attempt does not register the id");
+   bool same2=(ArraySize(before2)==ArraySize(reg2));
+   for(int k=0;same2 && k<ArraySize(reg2);k++) if(reg2[k]!=before2[k]) same2=false;
+   Check(!b1 && !r.allow && !r.registered && c2==0 && same2 && r.primary_reason=="DATA_NOT_READY","a blocked attempt does not register the id");
    bool b2=TP_Authorize(p1,s,l,reg2,c2,r);
    Check(b2 && c2==1,"the same id is allowed later because the blocked attempt did not consume it");
    // overflow blocks, never drops
    string reg3[];
    ArrayResize(reg3,1);
+   for(int init=0;init<ArraySize(reg3);init++) reg3[init]="";
    int c3=0;
    TP_Authorize(p1,s,l,reg3,c3,r);
    bool o=TP_Authorize(p2,s,l,reg3,c3,r);
    Check(!o && r.primary_reason=="REGISTRY_FULL" && c3==1 && reg3[0]=="SIG-1","registry at capacity: BLOCK REGISTRY_FULL, nothing dropped or overwritten");
    string reg0[];
    ArrayResize(reg0,0);
+   for(int init=0;init<ArraySize(reg0);init++) reg0[init]="";
    int c0=0;
    Check(!TP_Authorize(p1,s,l,reg0,c0,r) && r.primary_reason=="REGISTRY_FULL" && c0==0 && ArraySize(reg0)==0,"capacity 0: BLOCK REGISTRY_FULL, no write");
    STpPlan zero;
@@ -316,8 +324,14 @@ void Sequences()
    Check(!TP_Authorize(zero,s,l,reg0,c0,r) && !r.allow && c0==0 && ArraySize(reg0)==0,"zero plan with empty signal id and capacity 0: BLOCK, no write");
    string regz[];
    ArrayResize(regz,2);
+   for(int init=0;init<ArraySize(regz);init++) regz[init]="";
    int cz=0;
-   Check(!TP_Authorize(zero,s,l,regz,cz,r) && cz==0 && regz[0]=="" && regz[1]=="","zero plan: BLOCK, registry unchanged");
+   string beforez[];
+   ArrayCopy(beforez,regz);
+   bool az=TP_Authorize(zero,s,l,regz,cz,r);
+   bool samez=(ArraySize(beforez)==ArraySize(regz));
+   for(int k=0;samez && k<ArraySize(regz);k++) if(regz[k]!=beforez[k]) samez=false;
+   Check(!az && !r.allow && !r.registered && r.primary_reason=="PLAN_NOT_OK" && cz==0 && samez,"zero plan: BLOCK, registry unchanged");
    int badcount=5;
    Check(!TP_CheckPermit(p1,s,l,reg3,badcount,r) && r.primary_reason=="REGISTRY_INVALID","count above capacity: REGISTRY_INVALID");
    badcount=-1;
@@ -328,6 +342,7 @@ void Sequences()
    TP_BuildPlan(P_SID[gi],P_SETUP[gi],P_DIR[gi],P_E[gi],P_S[gi],false,0.0,P_BUDGET[gi],P_TV[gi],P_TICK[gi],P_DIG[gi],P_POINT[gi],P_STOPS[gi],false,0.0,0.0,P_VMIN[gi],P_STEP[gi],P_VMAX[gi],P_CAP[gi],rp);
    string reg4[];
    ArrayResize(reg4,2);
+   for(int init=0;init<ArraySize(reg4);init++) reg4[init]="";
    int c4=0;
    Check(!TP_Authorize(rp,s,l,reg4,c4,r) && r.primary_reason=="PLAN_NOT_OK" && c4==0,"a refused plan is PLAN_NOT_OK and never registers");
   }
@@ -341,6 +356,7 @@ void Numeric()
    TestLimits(l);
    string reg[];
    ArrayResize(reg,2);
+   for(int init=0;init<ArraySize(reg);init++) reg[init]="";
    STpPermit r;
    double nan=MathSqrt(-1.0);
    double inf=MathExp(1000.0);
@@ -414,6 +430,7 @@ void Integration()
       Check(p.status==TP_OK && Near(p.tp,tps[k]) && Near(p.volume_out,1.97) && Near(p.risk_model,1231.25),names[k]+": geometry -> sizing -> plan");
       string reg[];
       ArrayResize(reg,4);
+      for(int init=0;init<ArraySize(reg);init++) reg[init]="";
       int count=0;
       STpPermit r;
       Check(TP_Authorize(p,s,l,reg,count,r) && r.registered && reg[0]==p.signal_id,names[k]+": permit ALLOW and registered");
@@ -434,3 +451,4 @@ void OnStart()
    Integration();
    PrintFormat("T007 PLANNING TEST finished: %d passed, %d failed",g_pass,g_fail);
   }
+

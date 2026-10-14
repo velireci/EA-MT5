@@ -42,3 +42,6 @@ See tasks/T007-trade-planning.md, section "Conventions needing review": inclusiv
 
 ## Still open (not decided by this module)
 Base of the 1%; costs; combined 2% numbers and pending reservation; 2 vs 3 trades; win/loss counting; manual-trade ownership; session/news/spread sources and thresholds; time/DST; broker order check and placement; 80/20 split; expiry, cooldown, re-entry; restart recovery; EA wiring.
+
+## Codex MT5 fixture correction, 2026-10-14
+Owner ran d992258: 1090 passed, 2 failed (blocked/zero-plan registry unchanged assertions). Diagnostic script showed newly resized string cells were not equal to empty strings before authorization; the zero-plan result was BLOCK PLAN_NOT_OK with count0 and both cells unchanged. The test incorrectly assumed blank initialization. Codex explicitly initializes local registry fixtures and checks full before/after contents for the two assertions, retaining refusal/count/reason checks. TradePlanning and T005/T006 are unchanged. Python T007 43/0; MetaEditor corrected script 0 errors, 0 warnings (3043 ms). Actual corrected MT5 run is PENDING; the earlier failed result is not a PASS.
