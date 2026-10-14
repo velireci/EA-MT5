@@ -462,3 +462,43 @@ Compilation errors in the new MQL5 code (never compiled): the optional parameter
 
 ### 17.7 Not verified, next action
 Not verified: MetaEditor compilation of `XauUsdH4Bias.mq5` and of the extended `T003_LayersTest.mq5`; any MT5 run; the picture on a chart; the resize behaviour; the CSV overwrite on a real terminal; the comparison with the client's examples. Next action: Codex compiles both files and sends the log; the owner runs the extended `T003_LayersTest`, then attaches the EA (historical 2026.10.06 00:00, Rebuild 2000 / Lookback 300 as before) and sends what `docs/T003-visual-ea.md` section 7 item 8 lists.
+
+## 18. Which swing is the protecting level? Synthetic diagnostic of mechanism A versus a diagnostic variant B (2026-10-14; model only; product logic NOT changed; PROPOSAL SP1 in tasks/T003-h4-bias-change.md section 14)
+
+### 18.1 Evidence by source (kept apart)
+- RELAYED owner observation of OUR model output (not my run, not a client validation): AsOfTime 2026.10.06 00:00, T002 highs 4226.45 -> 4170.32, lows 4133.49 -> 4103.67, BEARISH; T003 level 4226.45 (the high between the two lows of the leg that produced the LL); 4170.32 is a later LH not yet in a P2 pair.
+- CLIENT statements already in the repository (docs/DECISIONS.md, tasks section 13.1): S1, S2, N1-N3, E6. They do not define which swing is structural.
+- MY RUNS (this section): `tests/t003_structural_level_diag.py` (new, imports `tests/t003_reference_test.py` without modifying it). Generic synthetic units; no real price, candle or photo value; BUY cases are the exact mirror (price -> 200 - price). Not MetaEditor, not MT5.
+- NOT used: the private CSV, the videos, the photos.
+
+### 18.2 What was built
+Mechanism A = `replay` of the current model (P2 + ratchet), per-bar state from `rep.hist` and events from `rep.events`. Mechanism B = diagnostic variant, NOT product, only in the diagnostic file: level = latest confirmed 2/2 LH (bearish) / HL (bullish) not closed through; same seed bar as A; a close strictly beyond the level known after bar t-1 flips, a high/low beyond with the close inside is a WICK. A rule text function (`sp1_verdict`) explains for each swing at a given bar why it is STRUCTURAL or LOCAL (rule SP1, tasks 14.4). Run: `python3 tests/t003_structural_level_diag.py` (full timelines) or `--quiet` (table and checks).
+
+### 18.3 Cases, bar by bar at the key bars (SELL; absolute bar i = open 2026-01-05 00:00 + 4h x i in the model's synthetic clock; a swing at bar i is confirmed at the close of bar i+2 and usable from bar i+3)
+Common prefix of K1-K5b: H 135 (bar 8), L 75 (bar 21), H 125 (bar 31), L 55 (bar 46, a LL, confirmed at the close of bar 48 = SEED of A and B, T002 LH/LL from bar 48), A takes H125@31 as the P2 pair level (lows 75 -> 55; usable from bar 49), LH 95 (bar 54, confirmed at the close of bar 56, usable from bar 57): B takes 95 at bar 56; SP1 says LOCAL ('no confirmed low after it yet'). A keeps 125.
+| Case | Key bars (close, high) | Known points | Level A | Level B | T002 | Flip A | Flip B | Accept/reject (SP1 text) |
+|---|---|---|---|---|---|---|---|---|
+| K1 owner-mirror, as-of bar 59 | none crossed | swings above | 125 | 95 | LH/LL | none | none | 125 STRUCTURAL (highest high between lows 75 and 55, second a LL); 95 LOCAL |
+| K2 | bar 64 high 97 > 95; bar 65 close 96 > 95; later closes up to 112, highs <= 117 | HL 67@59 confirmed at the close of bar 61 | 125 (bar 64 INTERNAL_SWEEP, bar 65 INTERNAL_BREAK) | 95; after the flip HL 67 | MIXED from bar 61 | none to bar 75 | bar 65 BULL | 95 consumed by the close; 125 never touched |
+| K3 | as K2, bar 72 high 128.19 close 123.19 (wick), bar 73 close 127.12 | as K2 | 125; bar 72 WICK (HOLD), bar 73 FLIP, then no level | as K2 | MIXED | bar 73 BULL | bar 65 BULL | 125 flips only on the body close; the higher high 135 stays unbroken (S1) |
+| K4 | bar 58 (high 99, close 90): wick over 95 only | H99@58 confirmed at the close of bar 60 | 125; INTERNAL_SWEEP -> SWEEP_WAIT | 95; WICK | LH/LL, MIXED at 59, HH/HL from bar 60 | none | none | 95 LOCAL; a local sweep is observation only for A, B treats it as its level |
+| K5 | bar 58 (high 130, close 85): wick over 125 | H130@58 | 125; WICK (HOLD) | 95; WICK | HH/HL from bar 60 | none | none | 125 STRUCTURAL: wick = HOLD, bias kept |
+| K5b | bar 58 wick (130/85), bar 59 close 128 | L73@57 | 125 -> FLIP bar 59, no level | 95 -> FLIP bar 59, HL 73 | MIXED | bar 59 | bar 59 | body close beyond: the same bar for both |
+| K6c | bounce LH 105 (bar 37) confirmed at the close of bar 39; LL1 80 (bar 33, seed bar 35) known; LL2 not yet | highs 135, 125, 105; lows 90, 80 | 125 | 105 | LH/LL | none | none | 105 LOCAL: no confirmed low after it |
+| K6a | bar 44 high 109 > 105; bar 45 close 108 > 105; HL 83@40 (confirmed bar 42); HH 113@45; bar 52 close below 83 | | 125; INTERNAL_SWEEP/BREAK only | 105; bar 45 BULL (HL 83); bar 52 BEAR, no level | MIXED bar 42, HH/HL from bar 47 | none | bars 45, 52 | 105 consumed by the close, never structural |
+| K6b | LL2 55@47 confirmed at the close of bar 49 | lows 90, 80, 55 | 125 until bar 49; 105 from bar 50 | 105 from bar 40 | LH/LL | none | none | 105 becomes STRUCTURAL at bar 49 (highest high between lows 80 and 55, a LL) and passes the ratchet |
+| K7a | LH 110@58 (confirmed at the close of bar 60); HL 65@67 (bar 69); bar 77 high 112.5 > 110; bar 78 close 111.25 | | 125; bar 77 INTERNAL_SWEEP, bar 78 INTERNAL_BREAK | 110; after the flip HL 65 | LH/LL, MIXED from bar 69 | none | bar 78 BULL | 110 LOCAL until a LL follows |
+| K7b | K7a, then bar 105 high 128.53 close 123.53 (wick), bar 106 close 127.35 | HH 120@79, L 65@91 equal to 65@67 | 125; bar 105 WICK, bar 106 FLIP; BULL level 65 | as K7a | HH/HL at bar 81, MIXED from 93 | bar 106 | bar 78 | 125 flips on the body close, 28 bars after B |
+| K7c | LL2 45@72 confirmed at the close of bar 74; bar 87 high 113.12 close 108.12 (wick); bar 88 close 112 | | 110 from bar 75; bar 87 WICK; bar 88 FLIP | 110; bar 87 WICK; bar 88 FLIP | LH/LL at bar 88 | bar 88 | bar 88 | 110 STRUCTURAL after the LL (bar 74); both flip while T002 still reads LH/LL (S1) |
+BUY cases (mirror): identical bar numbers and events with directions swapped; checked in the script for all 12 cases (A/B flips, wicks, seed bar).
+
+### 18.4 Comparison with the client's statements
+See tasks section 14.3 (statement | case | A | B | which agrees | note). Result: the wick/close statements (S2, N3) agree with both mechanisms; the owner's observed level and the E6 wording on a grabbed internal level agree with A; N1/N2 read literally lean toward B or toward a structure that leads, but both leave the choice of the swing open; S1 fits both. The examples do not decide the flip timing in K2, K6a, K7a.
+
+### 18.5 Real results of this round (runs in this environment)
+- `python3 tests/t003_structural_level_diag.py`: 28 passed, 0 failed (12 BUY-mirror checks, (A) prefix causality, (B) prefix causality, 13 designed-property checks, SP1 versus A at 15 moments of taking). Expectations in this script were written from the definitions of A and B BEFORE the final run; two first-run failures were construction errors of my series (K6b ended without a confirmed LL2; an SP1 clause that required a LH label which P2 does not require) and the series/clause were corrected, never the expectation of an existing test.
+- `python3 tests/t003_reference_test.py`: 394 passed, 0 failed, 5 deferred (unchanged). `python3 tests/t002_reference_test.py`: 197 passed, 0 failed.
+- `tools/t003-static-checks.sh`: exit 0, 95 PASS, 0 FAIL. `tools/t003-visual-static-checks.sh`: exit 0, 199 PASS, 0 FAIL. `tools/t002-static-checks.sh`: exit 0, 60 PASS, 0 FAIL. `tools/t001-static-checks.sh`: exit 0, 26 PASS, 0 FAIL. No product file changed (only the new diagnostic file and three documents).
+
+### 18.6 Not verified
+MetaEditor compilation and MT5 (not available and not involved); real candles; the client's agreement with any of A, B or SP1; equivalence of SP1 with A beyond the 12 SELL cases; behaviour on random or real series (B was not run there); that the case shapes resemble the client's pictures (they do not use them). B is a diagnostic, not a candidate. Next action: Codex reviews tasks section 14 and this section before any algorithm change.

@@ -519,3 +519,53 @@ Classification: it is a property of the proposal (single trigger, hysteresis, ra
 
 ### 13.8 Updates of earlier open lists
 F2: M5 part closed by N5. F3: answered in principle by N6; definitions later. S6 history preserved in section 1. Section 8 F1, F4, F5, F6, F7, F8 unchanged. Section 7 criterion 9 ('no M15/M5 code') stands; the M5 mention is now only historical.
+
+## 14. Revision 12 PROPOSAL (2026-10-14): which swing is the protecting level? (DOCUMENTS + a diagnostic script; the product logic is NOT changed; awaiting Codex's review and the client)
+Provenance, kept apart. (a) RELAYED owner observation of OUR model output (not a client statement, not a validation): at AsOfTime 2026.10.06 00:00 T002 shows highs 4226.45 -> 4170.32, lows 4133.49 -> 4103.67, BEARISH; the T003 protecting level is 4226.45 because it is the high between the two lows of the leg that produced the LL; 4170.32 is a later LH that is not yet part of a new P2 pair. (b) CLIENT statements already recorded (S1, S2, N1-N3, E6; sections 1 and 13.1). (c) MY synthetic runs (generic units, model only): `tests/t003_structural_level_diag.py`, results in reports/T003-verification.md section 18. No photo, video or real candle was used. Nothing below is a client rule.
+
+### 14.1 The two mechanisms compared
+- A = the CURRENT model (P2 pair level + revision 10 ratchet), called through `replay`; not modified.
+- B = 'diagnostic variant, not product', implemented only in the diagnostic file: protecting level = the LATEST confirmed 2/2 LH (bearish bias) / HL (bullish bias) not closed through; same start bar as A; same body-close flip and wick rules.
+- Cases (generic units; SELL, BUY by exact mirror): K1 owner-mirror (lows 75 -> 55, high 125 between them, later LH 95); K2/K3 a rally closing between 95 and 125 / beyond 125; K4/K5/K5b wick over the local LH only / over the structural level only / wick then body close; K6a/K6b/K6c a small bounce inside the structure (closed through before the next low / followed by LL2 / just confirmed); K7a/K7b/K7c a structural correction (LL -> LH 110 -> HL 65 -> rally) closing 115 / 135 / after a new LL 45.
+
+### 14.2 What differs, in short (full per-bar tables: report 18.3)
+| Situation (SELL; BUY mirrors) | Level A | Level B | Flip A | Flip B |
+|---|---|---|---|---|
+| K1 as-of, LH 95 confirmed, no LL after it | 125 (high between the lows) | 95 (latest LH) | none | none |
+| K2 close 96 > 95 (bar 65), 125 never exceeded | 125 | 95 -> HL 67 | none (INTERNAL_BREAK only) | bar 65 |
+| K3 closes beyond 125 (bar 73) | 125 | as above | bar 73 | bar 65 |
+| K4 wick over 95 only | 125 (INTERNAL_SWEEP) | 95 (WICK) | none | none |
+| K5 wick over 125 only | 125 (WICK, HOLD) | 95 (WICK) | none | none |
+| K5b wick then body close 128 | 125 | 95 | bar 59 | bar 59 (same bar) |
+| K6a small bounce 105 closed through (bar 45) before LL2 | 125 | 105 -> HL 83 | none | bar 45 BULL, bar 52 back BEAR |
+| K6b bounce 105 then LL2 55 confirmed (bar 49) | 125 -> 105 from bar 50 (P2 pair + ratchet) | 105 since bar 40 | none | none |
+| K7a counter-leg LH 110, HL 65, close 111.25 (bar 78) | 125 | 110 -> HL 65 | none | bar 78 |
+| K7c counter-leg LH 110 followed by LL 45 (confirmed bar 74), close 112 (bar 88) | 110 | 110 | bar 88 | bar 88 (same bar) |
+
+### 14.3 Comparison with the client's recorded statements (the examples do NOT decide A versus B on flip timing)
+| Statement / note | Case | A | B | Agrees | Note |
+|---|---|---|---|---|---|
+| S1 first marked level is enough; the higher high (135 here) need not be broken | K3 | flips at the first close above 125 (bar 73), 135 untouched | flips earlier, at 95 | both | which level is 'first marked' is not given |
+| S2/N3 body, not wick | K4, K5, K5b | wick -> no flip; body -> flip | same | both | identical bar for the body flip (K5b) |
+| N1 direction = HH+HL / LH+LL | K4, K5 as-of | T002 HH/HL, bias still BEAR | same | neither literally | both hold the bias by design (hysteresis, section 13.6) |
+| N2 an old level is not a reason to keep the direction frozen | K2, K7a, K7b | holds BEAR for 28 bars after B has flipped (K7b, bars 78-105) while T002 reads MIXED or HH+HL | flips at the first close above the latest LH | closer to B, undecided | the separation structural/local swing is not given |
+| N3 circled parts = grabs, the previous direction continued | K6a | no flip | flips BULL and back BEAR (bars 45, 52) | closer to A if K6a is read as a grab; undecided | the client did not say which swing |
+| E6 / DECISIONS: a grabbed internal low is not assumed to be the protecting low | K4 | INTERNAL_SWEEP, level stays 125 | the grabbed LH IS the level (WICK) | A | E6 is BUY-side wording; here mirrored |
+| Owner observation (model output) 4226.45 not 4170.32 | K1 | 125 | 95 | A matches the observed model output | not a client validation |
+
+### 14.4 PROPOSAL SP1 (not a client rule): promotion of a local swing to a structural level, causal
+BUY is the mirror (lows <-> highs, LL <-> HH, LH <-> HL). Known at the close of closed bar t: confirmed 2/2 swings (a swing at bar i is confirmed at the close of bar i+2, `confirm_time = open(i+2) + 4h`, usable from bar i+3) and closed bars. A confirmed swing high h (pivot bar ih) is STRUCTURAL for a bearish bias from the first closed bar t* at which ALL of these are known, in this order, and is usable as the level from bar t*+1:
+1. h is confirmed (t* >= ih+2);
+2. pe = the last confirmed swing low with pivot before ih exists;
+3. e = the first confirmed swing low with pivot after ih is confirmed (t* >= ie+2) and strictly lower than pe (a LL);
+4. h is the highest confirmed swing high with pivot strictly between pe and e (equal: the earliest);
+5. no closed bar in (ih, t*] closed above h (a body close is a break already judged; a bar that only exceeded h with its high is a retroactive wick, P2, not a rejection);
+6. ratchet (unchanged, revision 10): h replaces the current level only if the pivot of e is later than that of the current level's LL and h is strictly lower; without a current level, 1-5 suffice.
+Every other confirmed swing high is LOCAL at t. LOCAL: observation only (INTERNAL_SWEEP on a wick, INTERNAL_BREAK on a body close, both exist), cannot flip the bias, cannot start a WICK/HOLD setup. It can become STRUCTURAL later, never before steps 1-4 (K6b: the bounce 105 becomes structural at bar 49 when LL2 is confirmed). Wick versus close: for a STRUCTURAL level a high beyond with the close inside = WICK (P4, HOLD, bias kept), a close beyond = FLIP; for a LOCAL swing neither changes the bias.
+Compatibility: SP1 is steps (i)-(iv) of `accept_candidate` plus the pair condition of `derive_level` stated as the promotion rule. It REPLACES NOTHING and is compatible with P2 and the ratchet. In my 12 SELL cases every level A takes was classified STRUCTURAL by SP1 at the bar it was taken (15 moments; a consistency check, not a proof of equivalence). Minimal product change: none for the level choice. Optional, not implemented: label the existing interior candidate (`derive_level` third result, `li_*` fields; it is the HIGHEST local high after the last LL, not the latest) as 'LOCAL' in the panel. A B-like behaviour would need a new function (latest LH/HL) and a new flip source in `bias_step`; it is NOT proposed here.
+
+### 14.5 Where the examples still allow two interpretations (concrete)
+Bars of K2/K7a (generic): after LL 55 and a LH 95 (K7a: 110) a rally closes above that LH (K2 bar 65, close 96; K7a bar 78, close 111.25) while 125 is not exceeded. SP1/A: no flip (INTERNAL_BREAK), the flip comes at the first close above 125 (K3 bar 73; K7b bar 106). B: flip at that close (8 bars earlier in K3, 28 bars earlier in K7b), and for a small bounce (K6a bar 45) a flip and a flip back 7 bars later. The statements S1, N2 and N3 fit both readings of 'the first respective high'. Once a new LL follows the LH (K7c) both readings flip on the same bar. SP1 cannot separate a minor sole bounce from a structural reaction by size (K6b): no size criterion is given and none is invented.
+
+### 14.6 Not verified
+Python model and a diagnostic script only: no MetaEditor, no MT5, no real candle, no client confirmation. T002 directions quoted are from the T002 model on synthetic bars. B is not a candidate for implementation. Next action: Codex reviews 14.2-14.5 and report 18; no algorithm change before that review and the owner's decision.
