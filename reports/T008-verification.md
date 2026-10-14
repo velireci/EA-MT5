@@ -11,3 +11,7 @@ Independent review found combined cap previously checked lower model loss while 
 Actual MT5 helper test and EA default/input/live broker observations: PENDING. No broker prices/account identifiers saved here. No automatic signal selection, calendar, session inference, risk-base choice, orders, actual cancellation, persistence or partial management. No claim of strategy/client validation, broker execution acceptance, margin adequacy or profitability.
 
 T007 relayed owner evidence: 2026.10.14 19:36:11.672 T007_PlanningTest-40fede0 (XAUUSD,M15), 1092 passed, 0 failed. Earlier1090/2 at d992258 was test-fixture initialization and remains a failed historical observation; corrected run is separate.
+
+## v1.01 broker-probe correction
+Owner helper da2a24c MT5:19/0 at2026.10.14 19:47:38.012. Owner defaultEA read real MetaQuotes-Demo XAUUSD/EUR/hedging properties and blocked INPUT_UNSET as intended. Manual hypothetical E4000/SL3990/budget10EUR preview gave model10 vs broker89.79 for volume.1, BUDGET_EXCEEDED and all unknown policies blocked; no orders. This proves the protection, not accuracy of reported LOSS tick property. No new raw broker data added.
+Codex changed adapter to derive candidate-specific average tick loss from minimum-volume OrderCalcProfit, with no property fallback. Final proposed-volume check retained. Python10 pass; MetaEditor EA0/0 (1462ms), test0/0 (684ms). Test now25 assertions: expected count only, owner run pending. Independent review no material findings. New helper/EA actual broker run pending.

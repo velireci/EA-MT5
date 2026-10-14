@@ -26,5 +26,11 @@ void OnStart()
    Check(PB_PermitRisk(-9.95,10)==10,"lower broker loss never lowers cap risk");
    Check(!TP_RiskExceeded(90,PB_PermitRisk(-10,10),100),"exact combined cap");
    Check(PB_PermitRisk(1,10)==0,"invalid permit risk");
+   Check(MathAbs(PB_ProbeTickValue(true,-8.98,.01,1000)-.898)<1e-12,"broker probe effective tick");
+   Check(MathAbs(PB_ProbeTickValue(true,-89.79,.1,1000)-.8979)<1e-12,"reported mismatch reproduction");
+   Check(PB_ProbeTickValue(false,-10,.01,1000)==0,"failed probe no fallback");
+   Check(PB_ProbeTickValue(true,1,.01,1000)==0,"positive probe rejected");
+   Check(PB_ProbeTickValue(true,-10,0,1000)==0,"zero probe volume");
+   Check(PB_ProbeTickValue(true,-10,.01,0)==0,"zero stop ticks");
    PrintFormat("T008 BROKER LOSS TEST finished: %d passed, %d failed",passed,failed);
   }

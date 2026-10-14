@@ -162,6 +162,9 @@ Një kuti shënohet vetëm me provë konkrete. Për testin ruaj versionin, rezul
 - [x] Kandidat manual me E/SL/target dhe risk monetar të furnizuar; ripërdor T005–T007.
 - [x] Parametrat realë të simbolit dhe kontrolli me OrderCalcProfit; politikat e panjohura bllokojnë.
 - [x] Codex Python8 të reja; T006/T007/T008 së bashku98 kalojnë; EA/test kompilim0/0.
-- [ ] Pronari: T008_BrokerLossTest në MT5.
+- [x] Pronari: T008 helper v1.00 te da2a24c,19/0; v1.01 i përditësuar në pritje.
 - [ ] Pronari: EA default INPUT_UNSET dhe preview me kandidat manual në broker.
 Status: integrim vetëm për kontroll, jo sinjal ose urdhër; risku dhe ekspozimi i jashtëm nuk lexohen automatikisht.
+
+- [x] T008 v1.01 korrigjim: vlera efektive e loss tick nga broker probe, Python10pass, kompilim EA/test0/0.
+- [ ] Pronari: helper dhe preview v1.01 pas mospërputhjes property/model.

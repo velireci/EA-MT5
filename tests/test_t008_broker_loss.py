@@ -1,6 +1,6 @@
 import math
 import unittest
-from t008_broker_loss import check, permit_risk
+from t008_broker_loss import check, permit_risk, probe_tick_value
 from t007_planning_reference import _risk_exceeded
 
 
@@ -40,6 +40,15 @@ class BrokerLossTests(unittest.TestCase):
     def test_invalid_permit_risk(self):
         for p, model in [(math.nan, 1), (1, 1), (-1, 0)]:
             self.assertEqual(permit_risk(p, model), 0)
+
+    def test_tick_estimate_from_broker_probe(self):
+        self.assertAlmostEqual(probe_tick_value(True, -8.98, .01, 1000), .898)
+        self.assertAlmostEqual(probe_tick_value(True, -89.79, .1, 1000), .8979)
+
+    def test_failed_or_invalid_probe_never_falls_back(self):
+        for args in [(False,-10,.01,1000),(True,1,.01,1000),(True,-10,0,1000),
+                     (True,-10,.01,0),(True,math.nan,.01,1000)]:
+            self.assertEqual(probe_tick_value(*args), 0)
 
 if __name__ == '__main__':
     unittest.main()

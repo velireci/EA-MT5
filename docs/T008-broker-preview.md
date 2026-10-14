@@ -14,3 +14,6 @@ EA: src/XauUsdTradePreview.mq5. Test: src/tests/T008_BrokerLossTest.mq5. Kërkon
 Loget: T008 SYMBOL, T008 BROKER LOSS, T008 PREVIEW RESULT/BLOCK. PREVIEW CHECKS PASS nuk është urdhër dhe nuk konfirmon strategjinë.
 
 Dokumentacioni i API-ve: [OrderCalcProfit](https://www.mql5.com/en/docs/trading/ordercalcprofit), [SymbolInfoTick](https://www.mql5.com/en/docs/marketinformation/symbolinfotick), [Symbol properties](https://www.mql5.com/en/docs/constants/environment_state/marketinfoconstants).
+
+## v1.01 — probe i brokerit
+Prova reale da2a24c tregoi model10 EUR kundrejt broker89.79 EUR për .1 lot, E4000/SL3990. Mbrojtja e buxhetit bllokoi saktë. Tani EA normalizon përmes TG, llogarit humbjen me OrderCalcProfit në volume_min dhe nxjerr vlerën efektive për tick/lot për këtë kandidat. Vlera e simbolit ruhet vetëm në diagnostikë, pa fallback. T005/T006/T007 nuk ndryshojnë. Prova përfundimtare te volumi i propozuar ruhet: diferenca tani kontrollon shkallëzimin e vlerësimit të brokerit, jo përputhjen me property. Nëse probe nuk është i vlefshëm, bllokon. Nuk shtohet përshtatje automatike ose urdhër. Log i ri T008 BROKER PROBE.

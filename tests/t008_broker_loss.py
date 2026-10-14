@@ -3,6 +3,15 @@ import math
 from t007_planning_reference import _risk_exceeded
 
 
+def probe_tick_value(calc_ok, profit, volume, stop_ticks):
+    if not calc_ok or not all(math.isfinite(x) for x in (profit, volume, stop_ticks)):
+        return 0
+    if profit >= 0 or volume <= 0 or stop_ticks <= 0:
+        return 0
+    value = (-profit / volume) / stop_ticks
+    return value if math.isfinite(value) and value > 0 else 0
+
+
 def permit_risk(profit, model_loss):
     if not all(math.isfinite(x) for x in (profit, model_loss)) or profit >= 0 or model_loss <= 0:
         return 0

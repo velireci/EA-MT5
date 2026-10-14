@@ -2,6 +2,7 @@
 Updated: 2026-10-14 (Europe/Tirane). Snapshot, not a transcript.
 
 ## Resume here
+- T008 v1.01: derive candidate-specific loss tick from read-only OrderCalcProfit at minimum volume; reported property diagnostic only. Owner v1.00 helper19/0 and defaults INPUT_UNSET observed, but manual model10EUR vs broker89.79EUR correctly blocked budget. New Python10pass, EA/testcompile0/0; actual v1.01 terminal rerun pending. Existing pure T005–T007 unchanged.
 - Branch codex/t004-m15-confirmation, PR #4. Codex is sole writer during Claude rate limit; T008 adds a read-only manually supplied broker preview on base40fede0. No existing production logic changed; no merge or trading activation.
 - Read PROJECT_CHECKLIST.md and the relevant STRATEGY_SPEC.md sections before directives. New task tasks/T008-broker-preview.md; usage docs/T008-broker-preview.md; evidence reports/T008-verification.md.
 - T008 XauUsdTradePreview reads actual symbol/quote/loss tick value, calls tested T005–T007, compares read-only OrderCalcProfit with supplied risk budget, and checks externally supplied policy snapshot. Unknown policies block. No automatic signal selection, risk base, exposure/history reconstruction or order APIs.

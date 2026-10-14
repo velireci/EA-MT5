@@ -17,3 +17,5 @@ Implementation steps:
 Acceptance: pure test pass, MetaEditor0/0, owner script and real broker preview separately recorded. PREVIEW_ONLY is never execution permission. A synthetic test cannot validate actual broker settings.
 
 References: https://www.mql5.com/en/docs/trading/ordercalcprofit ; https://www.mql5.com/en/docs/marketinformation/symbolinfotick ; https://www.mql5.com/en/docs/constants/environment_state/marketinfoconstants
+
+Adapter update v1.01: reported LOSS tick property failed actual comparison. Derive candidate-specific average loss tick from minimum-volume OrderCalcProfit after TG normalization; final-volume independent estimate still enforces budget and scaling tolerance. No fallback when probe fails; no T005–T007 changes.

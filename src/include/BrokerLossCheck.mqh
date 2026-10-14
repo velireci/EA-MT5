@@ -3,6 +3,13 @@
 #ifndef VELO_BROKER_LOSS_CHECK_MQH
 #define VELO_BROKER_LOSS_CHECK_MQH
 #include "TradePlanning.mqh"
+// Average loss per tick/lot at this specific candidate, not a universal symbol property.
+double PB_ProbeTickValue(const bool calc_ok,const double profit,const double volume,const long stop_ticks)
+  {
+   if(!calc_ok || !TG_Finite(profit) || !TG_Finite(volume) || profit>=0 || volume<=0 || stop_ticks<=0) return(0);
+   double value=(-profit/volume)/(double)stop_ticks;
+   return(TG_Finite(value) && value>0 ? value : 0);
+  }
 double PB_PermitRisk(const double profit,const double model_loss)
   {
    if(!TG_Finite(profit) || !TG_Finite(model_loss) || profit>=0 || model_loss<=0) return(0);

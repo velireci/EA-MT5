@@ -1,6 +1,6 @@
 // T008 manually supplied candidate + real broker parameters. NEVER sends orders.
 #property strict
-#property version "1.00"
+#property version "1.01"
 #include "include/SymbolSnapshot.mqh"
 #include "include/BrokerLossCheck.mqh"
 enum PREVIEW_SIDE {PREVIEW_UNSET=0,PREVIEW_BUY=1,PREVIEW_SELL=-1};
@@ -63,9 +63,24 @@ void Evaluate()
    datetime now=TimeTradeServer();
    long age=(long)now-(long)quote.time;
    if(now<=0 || age<0 || age>InpMaxQuoteAgeSeconds) {StopPreview("QUOTE_STALE");return;}
-   double tick_value=0;
-   if(!SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_VALUE_LOSS,tick_value) || !TG_Finite(tick_value) || tick_value<=0)
-     {StopPreview("LOSS_TICK_VALUE_UNAVAILABLE");return;}
+   // Symbol tick values can be inconsistent with the broker's account-currency calculation.
+   // Normalize through the existing geometry first, then calibrate this candidate with a
+   // valid minimum-volume read-only profit estimate. No fallback to the reported property.
+   STgResult geometry;
+   TG_Compute((int)InpDirection,InpEntry,InpStopLoss,InpHasTarget,InpTarget,symbol.tick_size,symbol.digits,
+              symbol.point,(int)symbol.stops_level,true,quote.bid,quote.ask,geometry);
+   if(geometry.status!=TG_OK) {StopPreview("GEOMETRY: "+geometry.reason);return;}
+   double property_tick=0;
+   bool property_ok=SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_VALUE_LOSS,property_tick);
+   double probe_profit=0;
+   ResetLastError();
+   bool probe_ok=OrderCalcProfit(InpDirection==PREVIEW_BUY ? ORDER_TYPE_BUY : ORDER_TYPE_SELL,
+                                 _Symbol,symbol.volume_min,geometry.e_out,geometry.s_out,probe_profit);
+   int probe_error=GetLastError();
+   double tick_value=PB_ProbeTickValue(probe_ok,probe_profit,symbol.volume_min,geometry.r_ticks);
+   PrintFormat("T008 BROKER PROBE calc=%d error=%d volume=%.8f profit=%.8f effective_tick=%.10f reported_tick=%.10f reported_ok=%d currency=%s",
+               (int)probe_ok,probe_error,symbol.volume_min,probe_profit,tick_value,property_tick,(int)property_ok,symbol.account_currency);
+   if(tick_value<=0) {StopPreview("BROKER_PROBE_FAILED: no reliable loss estimate; no property fallback");return;}
    STpPlan plan;
    TP_BuildPlan(InpSignalId,InpSetupId,(int)InpDirection,InpEntry,InpStopLoss,InpHasTarget,InpTarget,
                 InpRiskBudget,tick_value,symbol.tick_size,symbol.digits,symbol.point,(int)symbol.stops_level,
