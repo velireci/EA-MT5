@@ -33,6 +33,8 @@ echo "=== S3: contract labels in the module, status parity with the Python refer
 out=$($CHK contract $MOD) && echo "  PASS header keeps the contract; labels are returned by code" || { echo "$out"; echo "  FAIL contract text"; FAIL=1; }
 out=$($CHK parity $MOD $REF) && echo "  PASS MQL5 status enum and labels equal the reference" || { echo "$out"; echo "  FAIL parity"; FAIL=1; }
 
+out=$($CHK guards $MOD $REF) && echo "  PASS validation guards (tick/digits, positivity, finite, same MAX_TICKS) exist in MQL5 and Python" || { echo "$out"; echo "  FAIL validation guards"; FAIL=1; }
+
 echo "=== S4: balance, format strings, includes, ASCII ==="
 python3 tools/t001-check-balance.py $ALL || FAIL=1
 python3 - $ALL <<'PYEOF' || FAIL=1
@@ -82,7 +84,7 @@ neg() {  # neg LABEL CHECK SRC OLD NEW SUBSTRING [EXTRA_ARG]
   local label="$1" chk="$2" src="$3" old="$4" new="$5" sub="$6" extra="${7:-}" f="$NEG/$(basename "$3")"
   if ! mut "$src" "$f" "$old" "$new"; then echo "  FAIL $label: mutation target absent (vacuous control)"; FAIL=1; return; fi
   local out rc
-  if [ "$chk" = "parity" ]; then out=$($CHK parity "$f" "$extra" 2>&1); rc=$?; else out=$($CHK "$chk" "$f" 2>&1); rc=$?; fi
+  if [ "$chk" = "parity" ] || [ "$chk" = "guards" ]; then out=$($CHK "$chk" "$f" "$extra" 2>&1); rc=$?; else out=$($CHK "$chk" "$f" 2>&1); rc=$?; fi
   if [ $rc -ne 0 ] && echo "$out" | grep -qF -- "$sub"; then echo "  PASS $label (detected: $sub)"
   else echo "  FAIL $label: rc=$rc output: $out"; FAIL=1; fi
 }
@@ -103,6 +105,9 @@ neg "unenforced note removed from code" contract $MOD "limit NOT enforced (unit 
 neg "status dropped from the MQL5 enum" parity $MOD "   TG_PENDING_TOO_CLOSE
   };" "  };" "status enum differs" $REF
 neg "target label changed in the MQL5 module" parity $MOD 'return("EQUAL_TO_2R");' 'return("EQUAL");' "EQUAL_TO_2R" $REF
+neg "tick/digits compatibility removed from MQL5" guards $MOD "MathAbs(q-qr)>TG_EPS_TICKS" "false" "guard missing in MQL5" $REF
+neg "positivity test removed from MQL5" guards $MOD "lvl_px<=0.0" "false" "guard missing in MQL5" $REF
+neg "MQL5 MAX_TICKS differs from Python" guards $MOD "#define TG_MAX_TICKS 1e12" "#define TG_MAX_TICKS 1e13" "MAX_TICKS differs" $REF
 # syntax / format / ASCII controls use the shared checkers
 cp $MOD "$NEG/Unbalanced.mqh"; echo "void x(){" >> "$NEG/Unbalanced.mqh"
 python3 tools/t001-check-balance.py "$NEG/Unbalanced.mqh" >/dev/null 2>&1 && { echo "  FAIL unbalanced brace not detected"; FAIL=1; } || echo "  PASS unbalanced brace detected"

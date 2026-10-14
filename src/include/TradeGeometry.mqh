@@ -5,7 +5,7 @@
 // caller's point of view). This module does NOT select entry, SL, FVG or target and does not read T004 facts.
 //
 // CONTRACT (conventions marked PROPOSAL are for review, they are not client answers):
-//  1. Validate inputs.
+//  1. Validate inputs (see VALIDATION below).
 //  2. E and S go to integer ticks FIRST: nearest tick, an exact half tick goes UP (PROPOSAL; applies to E and S
 //     for BUY and SELL alike, so BUY/SELL are not mirror images at an exact half tick; tolerance 1e-6 tick).
 //  3. Everything else is computed from those integer ticks: R_geom = |E_out - S_out|,
@@ -23,6 +23,18 @@
 //  target not strictly beyond E_out), BELOW_STOPS_LEVEL (SL or TP distance < stops_level*point; TP distance
 //  cannot be the first failure because TP >= 2R >= R), PENDING_TOO_CLOSE (only when bid/ask are supplied:
 //  BUY limit must be below Ask, SELL limit above Bid, by > 0 and >= stops_level*point; else NOT_CHECKED).
+// VALIDATION (all failures are INVALID_INPUT, the reason starts with a fixed tag, first failure wins, in order):
+//  direction (INVALID_DIRECTION) -> finite/numeric, tick_size/point > 0, digits 0..8, stops_level >= 0 ->
+//  tick/digits compatibility [INCOMPATIBLE_TICK_DIGITS: q = tick_size * 10^digits must be finite, floor(q+0.5) >= 1
+//  and |q - floor(q+0.5)| <= 1e-6, i.e. tick_size is a >= 10^-digits integer multiple of 10^-digits; accepted:
+//  (0.01,2) (0.05,2) (0.25,2) (1,0) (0.5,1); rejected: (0.001,2) (0.015,2); `point` stays independent of digits] ->
+//  prices > 0, bid <= ask -> range [NUMERIC_OVERFLOW: max(E,S,T,bid,ask)/tick_size <= TG_MAX_TICKS = 1e12, so every
+//  derived tick count (<= 3e12) stays far below 2^53 and integer tick arithmetic is exact] -> normalization ->
+//  E_out/S_out finite [NUMERIC_OVERFLOW] and > 0 [NONPOSITIVE_PRICE] -> ZERO_RISK -> SL_WRONG_SIDE -> level_2R/R_geom
+//  finite and level_2R > 0 -> target price finite and > 0 -> TARGET_WRONG_SIDE -> TP/partial finite and > 0 ->
+//  BELOW_STOPS_LEVEL (distances must be finite) -> PENDING_TOO_CLOSE (gap must be finite).
+//  On the new positivity/overflow failures NO geometry is reported: computed=false and every numeric/tick field is
+//  0 (only direction and the raw inputs are echoed). ZERO_RISK/SL_WRONG_SIDE keep E_out/S_out/E,S ticks (as before).
 // NOT enforced (open): the "50 stop-distance" limit (unit unconfirmed), freeze level, spread limit, volume.
 // Only trust numeric fields when status == TG_OK; geometry fields are filled once `computed` is true so that a
 // failed check can be explained.
@@ -213,22 +225,33 @@ bool TG_Compute(const int direction,const double e_raw,const double s_raw,
       return(TG_Fail(out,TG_INVALID_INPUT,"digits must be 0..8"));
    if(stops_level<0)
       return(TG_Fail(out,TG_INVALID_INPUT,"stops_level must be >= 0"));
+   double q=tick_size*MathPow(10.0,digits);
+   double qr=(TG_Finite(q) ? MathFloor(q+0.5) : 0.0);
+   if(!TG_Finite(q) || qr<1.0 || MathAbs(q-qr)>TG_EPS_TICKS)
+      return(TG_Fail(out,TG_INVALID_INPUT,StringFormat("INCOMPATIBLE_TICK_DIGITS: tick_size %.10g is not an integer multiple of 10^-%d",tick_size,digits)));
    if(e_raw<=0.0 || s_raw<=0.0 || (has_target && t_raw<=0.0) || (has_quote && (bid<=0.0 || ask<=0.0)))
       return(TG_Fail(out,TG_INVALID_INPUT,"prices must be > 0"));
    if(has_quote && bid>ask)
       return(TG_Fail(out,TG_INVALID_INPUT,"bid is above ask"));
    double big=MathMax(MathAbs(e_raw),MathAbs(s_raw));
    if(has_target) big=MathMax(big,MathAbs(t_raw));
+   if(has_quote) big=MathMax(big,MathMax(MathAbs(bid),MathAbs(ask)));
    if(big/tick_size>TG_MAX_TICKS)
-      return(TG_Fail(out,TG_INVALID_INPUT,"price/tick_size is out of range"));
+      return(TG_Fail(out,TG_INVALID_INPUT,"NUMERIC_OVERFLOW: price/tick_size is out of range (> 1e12 ticks)"));
 
    int sign=(direction==TG_BUY ? 1 : -1);
    long e_t=TG_NearestTicks(e_raw,tick_size);
    long s_t=TG_NearestTicks(s_raw,tick_size);
+   double e_px=TG_TicksToPrice(e_t,tick_size,digits);
+   double s_px=TG_TicksToPrice(s_t,tick_size,digits);
+   if(!TG_Finite(e_px) || !TG_Finite(s_px))
+      return(TG_Fail(out,TG_INVALID_INPUT,"NUMERIC_OVERFLOW: normalized E or S is not finite"));
+   if(e_px<=0.0 || s_px<=0.0)
+      return(TG_Fail(out,TG_INVALID_INPUT,StringFormat("NONPOSITIVE_PRICE: normalized E_out=%.10g or S_out=%.10g is not > 0",e_px,s_px)));
    out.e_ticks=e_t;
    out.s_ticks=s_t;
-   out.e_out=TG_TicksToPrice(e_t,tick_size,digits);
-   out.s_out=TG_TicksToPrice(s_t,tick_size,digits);
+   out.e_out=e_px;
+   out.s_out=s_px;
    if(e_t==s_t)
       return(TG_Fail(out,TG_ZERO_RISK,"E_out equals S_out after normalization"));
    if(sign*(s_t-e_t)>0)
@@ -236,11 +259,23 @@ bool TG_Compute(const int direction,const double e_raw,const double s_raw,
 
    long r_t=(e_t>s_t ? e_t-s_t : s_t-e_t);
    long two_r_t=e_t+sign*2*r_t;
+   double r_px=TG_TicksToPrice(r_t,tick_size,digits);
+   double lvl_px=TG_TicksToPrice(two_r_t,tick_size,digits);
+   if(!TG_Finite(r_px) || !TG_Finite(lvl_px))
+     {
+      TG_Reset(out,direction,e_raw,s_raw,has_target,t_raw);
+      return(TG_Fail(out,TG_INVALID_INPUT,"NUMERIC_OVERFLOW: R_geom or level_2R is not finite"));
+     }
+   if(lvl_px<=0.0)
+     {
+      TG_Reset(out,direction,e_raw,s_raw,has_target,t_raw);
+      return(TG_Fail(out,TG_INVALID_INPUT,StringFormat("NONPOSITIVE_PRICE: level_2R=%.10g is not > 0",lvl_px)));
+     }
    out.computed=true;
    out.r_ticks=r_t;
    out.two_r_ticks=two_r_t;
-   out.r_geom=TG_TicksToPrice(r_t,tick_size,digits);
-   out.level_2r=TG_TicksToPrice(two_r_t,tick_size,digits);
+   out.r_geom=r_px;
+   out.level_2r=lvl_px;
    out.partial_price=out.level_2r;
    out.min_distance=stops_level*point;
 
@@ -248,6 +283,13 @@ bool TG_Compute(const int direction,const double e_raw,const double s_raw,
    if(has_target)
      {
       long tn=TG_AwayTicks(t_raw,tick_size,direction);
+      double t_px=TG_TicksToPrice(tn,tick_size,digits);
+      if(!TG_Finite(t_px) || t_px<=0.0)
+        {
+         TG_Reset(out,direction,e_raw,s_raw,has_target,t_raw);
+         return(TG_Fail(out,TG_INVALID_INPUT,(TG_Finite(t_px) ? StringFormat("NONPOSITIVE_PRICE: normalized target=%.10g is not > 0",t_px)
+                                                              : "NUMERIC_OVERFLOW: normalized target is not finite")));
+        }
       out.t_ticks=tn;
       if(sign*(tn-e_t)<=0)
         {
@@ -264,13 +306,25 @@ bool TG_Compute(const int direction,const double e_raw,const double s_raw,
       else
          out.target_case=(tn==two_r_t ? TG_TARGET_EQUAL : TG_TARGET_NEARER);
      }
+   double tp_px=TG_TicksToPrice(tp_t,tick_size,digits);
+   if(!TG_Finite(tp_px) || tp_px<=0.0 || out.level_2r<=0.0)
+     {
+      TG_Reset(out,direction,e_raw,s_raw,has_target,t_raw);
+      return(TG_Fail(out,TG_INVALID_INPUT,(TG_Finite(tp_px) ? StringFormat("NONPOSITIVE_PRICE: TP=%.10g or partial_price is not > 0",tp_px)
+                                                           : "NUMERIC_OVERFLOW: TP is not finite")));
+     }
    out.tp_ticks=tp_t;
-   out.tp=TG_TicksToPrice(tp_t,tick_size,digits);
+   out.tp=tp_px;
    out.tp_equals_2r=(tp_t==two_r_t);
 
    double sl_points=(double)r_t*tick_size/point;
    long tp_dist=(tp_t>e_t ? tp_t-e_t : e_t-tp_t);
    double tp_points=(double)tp_dist*tick_size/point;
+   if(!TG_Finite(sl_points) || !TG_Finite(tp_points))
+     {
+      TG_Reset(out,direction,e_raw,s_raw,has_target,t_raw);
+      return(TG_Fail(out,TG_INVALID_INPUT,"NUMERIC_OVERFLOW: SL/TP distance in points is not finite"));
+     }
    if(sl_points<stops_level-TG_EPS_POINTS)
       return(TG_Fail(out,TG_BELOW_STOPS_LEVEL,StringFormat("SL distance %.10g points < stops level %d",sl_points,stops_level)));
    if(tp_points<stops_level-TG_EPS_POINTS)   // unreachable while the SL check passes; kept as a guard
@@ -279,6 +333,11 @@ bool TG_Compute(const int direction,const double e_raw,const double s_raw,
    if(has_quote)
      {
       double gap=((direction==TG_BUY ? ask-out.e_out : out.e_out-bid))/point;
+      if(!TG_Finite(gap))
+        {
+         TG_Reset(out,direction,e_raw,s_raw,has_target,t_raw);
+         return(TG_Fail(out,TG_INVALID_INPUT,"NUMERIC_OVERFLOW: pending gap in points is not finite"));
+        }
       if(gap<=TG_EPS_POINTS || gap<stops_level-TG_EPS_POINTS)
         {
          out.pending_check=TG_PEND_TOO_CLOSE;

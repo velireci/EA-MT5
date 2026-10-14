@@ -32,8 +32,8 @@ N, NEAR, EQ, FAR = 'NONE', 'NEARER_THAN_2R', 'EQUAL_TO_2R', 'FARTHER_THAN_2R'
 CASES = []
 
 
-def case(name, d, e, s, t, sym, status, exp=None, quote=None, pend='NOT_CHECKED'):
-    CASES.append(dict(name=name, d=d, e=e, s=s, t=t, sym=sym, quote=quote, status=status, exp=exp, pend=pend))
+def case(name, d, e, s, t, sym, status, exp=None, quote=None, pend='NOT_CHECKED', why=''):
+    CASES.append(dict(name=name, d=d, e=e, s=s, t=t, sym=sym, quote=quote, status=status, exp=exp, pend=pend, why=why))
 
 
 # --- BUY and SELL, tick .01, target farther / nearer / equal / none -------------------------------------
@@ -94,6 +94,23 @@ case('POINT_ZERO', BUY, 2000.00, 1995.00, None, (0.01, 2, 0.0, 0), 'INVALID_INPU
 case('STOPS_NEGATIVE', BUY, 2000.00, 1995.00, None, (0.01, 2, 0.01, -1), 'INVALID_INPUT')
 case('ENTRY_ZERO', BUY, 0.0, -5.0, None, S01, 'INVALID_INPUT')
 case('TARGET_NEGATIVE', BUY, 2000.00, 1995.00, -1.0, S01, 'INVALID_INPUT')
+# --- validation of tick/digits compatibility, non-positive and overflowing results (INVALID_INPUT + tag) --
+TD, NP, OV = 'INCOMPATIBLE_TICK_DIGITS', 'NONPOSITIVE_PRICE', 'NUMERIC_OVERFLOW'
+I = 'INVALID_INPUT'
+case('BUY_TICK_DIGITS_MISMATCH', BUY, 1.004, 1.003, None, (0.001, 2, 0.01, 0), I, why=TD)       # was OK with R=0
+case('SELL_TICK_DIGITS_MISMATCH', SELL, 1.003, 1.004, None, (0.001, 2, 0.01, 0), I, why=TD)
+case('TICK_015_DIGITS_2', BUY, 2000.00, 1995.00, None, (0.015, 2, 0.01, 0), I, why=TD)         # not a multiple of 0.01
+case('TICK_FINER_THAN_DIGITS_0', BUY, 2000.0, 1995.0, None, (0.5, 0, 1.0, 0), I, why=TD)
+case('TICK_025_DIGITS_2_OK', BUY, 2000.00, 1995.00, None, (0.25, 2, 0.01, 0), 'OK', (2000.00, 1995.00, 5.00, 2010.00, 2010.00, N, True))
+case('SELL_2R_NEGATIVE', SELL, 100.00, 160.00, None, S01, I, why=NP)                           # 2R level -20
+case('BUY_SL_ROUNDS_TO_ZERO', BUY, 0.6, 0.4, None, S_COARSE1, I, why=NP)                       # S_out = 0
+case('SELL_ENTRY_ROUNDS_TO_ZERO', SELL, 0.4, 0.2, None, S_COARSE1, I, why=NP)                  # E_out = 0
+case('SELL_TARGET_ROUNDS_TO_ZERO', SELL, 5.0, 7.0, 0.4, S_COARSE1, I, why=NP)                  # T_out = 0, 2R = 3 > 0
+case('SELL_2R_EXACTLY_ZERO', SELL, 100.00, 150.00, None, S01, I, why=NP)                       # 2R level = 0
+case('SELL_2R_JUST_POSITIVE', SELL, 100.00, 149.99, None, S01, 'OK', (100.00, 149.99, 49.99, 0.02, 0.02, N, True))
+case('BUY_HUGE_TINY_TICK', BUY, 1e300, 1e299, None, S01, I, why=OV)
+case('BUY_RANGE_AT_LIMIT_PLUS', BUY, 1.0e10 + 1.0, 1.0e10, None, S01, I, why=OV)               # 1e12 + 100 ticks
+case('BUY_2R_OVERFLOW_TO_INF', BUY, 1.5e308, 1.0e308, None, (1e308, 0, 1.0, 0), I, why=OV)     # E_out = 2e308 = inf
 
 SIGN = {BUY: 1, SELL: -1, HOLD: 0}
 
@@ -124,6 +141,7 @@ def emit_mql():
     arr('double', 'C_BID', [_num(0.0 if c['quote'] is None else c['quote'][0]) for c in CASES])
     arr('double', 'C_ASK', [_num(0.0 if c['quote'] is None else c['quote'][1]) for c in CASES])
     arr('string', 'X_STATUS', ['"%s"' % c['status'] for c in CASES])
+    arr('string', 'X_WHY', ['"%s"' % c['why'] for c in CASES])
     arr('string', 'X_PEND', ['"%s"' % c['pend'] for c in CASES])
     arr('int', 'X_HASNUM', ['0' if c['exp'] is None else '1' for c in CASES])
     ex = [c['exp'] if c['exp'] is not None else (0.0, 0.0, 0.0, 0.0, 0.0, 'NONE', False) for c in CASES]

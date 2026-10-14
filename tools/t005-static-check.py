@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """Pattern checks for tools/t005-static-checks.sh (comments and string literals are stripped first).
 
-Usage: t005-static-check.py trading|nofeed|novolume|contract|parity FILE...
+Usage: t005-static-check.py trading|nofeed|novolume|contract|parity|guards FILE...
   trading  : no order / position / trade-class API
   nofeed   : no quote, tick, indicator, series or clock access (the module takes every price as an argument)
   novolume : no volume / lot / sizing identifier in code
   contract : the module header and strings keep the required labels (costs, partial, unenforced, proposals)
   parity   : status / target / pending names in the .mqh equal those of tests/t005_geometry_reference.py
              (FILE... = the .mqh followed by the reference .py)
+  guards   : the validation guards exist in BOTH languages (FILE... = the .mqh followed by the reference .py): the
+             three reason tags, the tick/digits compatibility test, positivity tests and the same MAX_TICKS value
 Exit 0 = pass, 1 = findings printed.
 """
 import re
@@ -131,13 +133,46 @@ def check_parity(files):
     return bad
 
 
+def check_guards(files):
+    mqh = strip(open(files[0], encoding='ascii').read(), keep_strings=True)
+    ref = strip_py(open(files[1], encoding='ascii').read())
+    bad = 0
+    for tag in ('INCOMPATIBLE_TICK_DIGITS', 'NONPOSITIVE_PRICE', 'NUMERIC_OVERFLOW'):
+        for name, text in (('mqh', mqh), ('py', ref)):
+            if tag not in text:
+                print('%s: reason tag %s missing in %s code' % (files[0], tag, name))
+                bad = 1
+    must_mqh = [r'MathPow\(10\.0,digits\)', r'MathAbs\(q-qr\)>TG_EPS_TICKS', r'qr<1\.0', r'e_px<=0\.0 \|\| s_px<=0\.0',
+                r'lvl_px<=0\.0', r't_px<=0\.0', r'tp_px<=0\.0', r'!TG_Finite\(e_px\)', r'!TG_Finite\(lvl_px\)']
+    must_py = [r'10\.0 \*\* digits', r'abs\(q - qr\) > EPS_TICKS', r'qr < 1', r'e_out <= 0 or s_out <= 0',
+               r'level_2r <= 0', r't_price <= 0', r'tp <= 0', r'isfinite\(e_out\)', r'isfinite\(level_2r\)']
+    for pat in must_mqh:
+        if not re.search(pat, mqh):
+            print('%s: guard missing in MQL5: %s' % (files[0], pat))
+            bad = 1
+    for pat in must_py:
+        if not re.search(pat, ref):
+            print('%s: guard missing in Python: %s' % (files[1], pat))
+            bad = 1
+    a = re.search(r'#define\s+TG_MAX_TICKS\s+(\S+)', mqh)
+    b = re.search(r'^MAX_TICKS\s*=\s*(\S+)', ref, re.M)
+    if not a or not b or float(a.group(1)) != float(b.group(1)):
+        print('MAX_TICKS differs or is missing: mqh=%s py=%s' % (a and a.group(1), b and b.group(1)))
+        bad = 1
+    return bad
+
+
+def strip_py(text):
+    return re.sub(r'(?s)\"\"\".*?\"\"\"|#[^\n]*', '', text)
+
+
 def main(argv):
     if len(argv) < 3:
         print(__doc__)
         return 2
     kind, files = argv[1], argv[2:]
     fn = {'trading': check_trading, 'nofeed': check_nofeed, 'novolume': check_novolume,
-          'contract': check_contract, 'parity': check_parity}.get(kind)
+          'contract': check_contract, 'parity': check_parity, 'guards': check_guards}.get(kind)
     if fn is None:
         print('unknown check', kind)
         return 2
