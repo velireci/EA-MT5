@@ -83,6 +83,37 @@ class Scenarios(unittest.TestCase):
                 o = dl.check(fx.BASE['utc'], 20260715, bal, res, 1, 0, 0, 3, True)
                 self.assertEqual(dl.R_LOSS in o.reasons, blocked, (bal, res))
 
+    def test_zero_or_positive_result_never_a_daily_loss_for_any_balance(self):
+        balances = [5e-324, 1e-320, 1e-310, 1e-307, 3e-308, 2.2250738585072014e-308, 1e-300, 1e-200, 1e-100, 1e-30, 1e-15, 1e-9, 1e-3, 0.01, 0.5, 1.0,
+                    49.0, 50.0, 51.0, 100.0, 12345.67, 1e6, 1e15, 1e100, 1e300, 1.7e308]
+        for bal in balances:
+            for res in (0.0, 1e-300, 1e-30, 0.5, 1.0, 1e6, 1e300):
+                o = dl.check(fx.BASE['utc'], 20260715, bal, res, 0, 0, 0, 2, True)
+                self.assertNotIn(dl.R_LOSS, o.reasons, (bal, res))
+                self.assertFalse(o.cancel_pending_due, (bal, res))
+        rnd = random.Random(1234)
+        for _ in range(20000):
+            bal = 10 ** rnd.uniform(-320, 308)
+            res = rnd.choice([0.0, 10 ** rnd.uniform(-320, 300)])
+            o = dl.check(fx.BASE['utc'], 20260715, bal, res, 0, 0, 0, 2, True)
+            self.assertNotIn(dl.R_LOSS, o.reasons, (bal, res))
+
+    def test_underflowing_threshold_is_refused_not_turned_into_a_limit(self):
+        for bal in (5e-324, 1e-320, 1e-310, 1e-307, 3e-308, 2.2250738585072014e-308):
+            o = dl.check(fx.BASE['utc'], 20260715, bal, -1.0, 0, 0, 0, 2, True)
+            self.assertEqual(o.reasons, ['INVALID_SNAPSHOT:balance_start'], bal)
+            self.assertFalse(o.cancel_pending_due or o.daily_limit_reached)
+        o = dl.check(fx.BASE['utc'], 20260715, 1.2e-306, 0.0, 0, 0, 0, 2, True)
+        self.assertTrue(o.entry_allowed)
+
+    def test_tolerance_is_smaller_than_the_threshold_and_equality_still_blocks(self):
+        for bal in (1e-15, 0.01, 1.0, 1234.56, 10000.0, 12345.67, 1e9, 1e300):
+            threshold = bal / dl.LOSS_FRACTION_DIVISOR
+            self.assertLess(4 * dl.DBL_EPSILON * threshold, threshold)
+            self.assertIn(dl.R_LOSS, dl.check(fx.BASE['utc'], 20260715, bal, -threshold, 1, 0, 0, 3, True).reasons, bal)
+            self.assertIn(dl.R_LOSS, dl.check(fx.BASE['utc'], 20260715, bal, -(threshold * (1 - 1e-16)), 1, 0, 0, 3, True).reasons, bal)   # 1 ulp of noise
+            self.assertNotIn(dl.R_LOSS, dl.check(fx.BASE['utc'], 20260715, bal, -(threshold * (1 - 1e-9)), 1, 0, 0, 3, True).reasons, bal)   # a real shortfall
+
     def test_no_cancel_flag_without_a_proven_limit(self):
         for r in fx.ROWS:
             o = dl.check(r['utc'], r['snap'], r['bal'], r['res'], r['trades'], r['wins'], r['loss'], r['mtr'], bool(r['mset']))
@@ -169,8 +200,10 @@ class Mutants(unittest.TestCase):
             ('win stop needs 2 wins', "WIN_STOP_AT = 1", "WIN_STOP_AT = 2"),
             ('streak stop needs 3', "CONSECUTIVE_LOSS_STOP_AT = 2", "CONSECUTIVE_LOSS_STOP_AT = 3"),
             ('loss limit is 3 percent', "LOSS_FRACTION_DIVISOR = 50.0", "LOSS_FRACTION_DIVISOR = 33.0"),
-            ('loss limit exclusive', "closed_result <= -threshold + 4 * DBL_EPSILON * max(1.0, threshold)", "closed_result < -threshold"),
-            ('loss compared on the wrong sign', "closed_result <= -threshold + 4", "closed_result >= threshold + 4"),
+            ('tolerance absolute instead of relative', "4 * DBL_EPSILON * threshold:", "4 * DBL_EPSILON * max(1.0, threshold):"),
+            ('underflowing threshold accepted', " or balance_start / LOSS_FRACTION_DIVISOR < DBL_MIN", ""),
+            ('loss limit exclusive', "if closed_result < 0 and closed_result <= -threshold + 4 * DBL_EPSILON * threshold:", "if closed_result < -threshold:"),
+            ('loss compared on the wrong sign', "if closed_result < 0 and closed_result <= -threshold + 4", "if closed_result < 0 and closed_result >= threshold + 4"),
             ('trade limit exclusive', "trades_today >= max_trades", "trades_today > max_trades"),
             ('trade limit ignored when set', "if max_trades_set and trades_today >= max_trades:", "if False:"),
             ('missing policy allowed', "    if not max_trades_set:\n        reasons.append(R_UNSET)", "    if False:\n        reasons.append(R_UNSET)"),
@@ -182,7 +215,7 @@ class Mutants(unittest.TestCase):
             ('streak may exceed trades', "    if t_ok and l_ok and consecutive_losses > trades_today:", "    if False:"),
             ('wins plus streak unchecked', "wins_today + consecutive_losses > trades_today:", "wins_today + consecutive_losses > trades_today + 99:"),
             ('negative counter accepted', "0 <= x <= MAX_COUNT", "x <= MAX_COUNT"),
-            ('balance zero accepted', "if not _num(balance_start) or balance_start <= 0:", "if not _num(balance_start):"),
+            ('balance zero accepted', " or balance_start <= 0 or balance_start / LOSS_FRACTION_DIVISOR < DBL_MIN:", ":"),
             ('reasons in another order', "    reasons = list(limits)\n    if not max_trades_set:\n        reasons.append(R_UNSET)", "    reasons = list(reversed(limits))\n    if not max_trades_set:\n        reasons.append(R_UNSET)"),
             ('bool accepted as a count', "return isinstance(x, int) and not isinstance(x, bool) and 0 <= x <= MAX_COUNT", "return isinstance(x, int) and 0 <= x <= MAX_COUNT"),
         ]

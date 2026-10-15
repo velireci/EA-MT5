@@ -15,6 +15,10 @@ already classified), floating results (only the closed result of the robot is an
 INPUTS: utc (int seconds), snapshot_day (int yyyymmdd, the Tirane day the figures belong to), balance_start (> 0), closed_result (monetary, any
 sign), trades_today (int >= 0), wins_today (int >= 0), consecutive_losses (int >= 0), max_trades (int >= 1) and max_trades_set (bool).
 Unknown = None / non-finite / negative counter / wrong type -> INVALID_SNAPSHOT:<name>.
+LOSS LINE: threshold = balance_start / 50; the loss limit needs closed_result < 0 AND closed_result <= -threshold + 4*eps*threshold. The tolerance is
+RELATIVE to the threshold (4 ulp), so it can never exceed it: a zero or positive result never triggers it, whatever the balance. Equality blocks and
+binary noise at normal balances is absorbed as before. If the threshold would underflow (balance_start / 50 < DBL_MIN) the balance is refused as
+INVALID_SNAPSHOT:balance_start instead of inventing a limit from a number that has lost its meaning.
 
 CONSISTENCY CHECKS (counting identities only; no new definition of a trade is invented):
   wins <= trades;  consecutive_losses <= trades;  wins + consecutive_losses <= trades  (a trade in the loss streak is not a win).
@@ -40,6 +44,7 @@ WIN_STOP_AT = 1
 CONSECUTIVE_LOSS_STOP_AT = 2
 LOSS_FRACTION_DIVISOR = 50.0            # 2% = 1/50 of the balance at the start of the day
 DBL_EPSILON = 2.220446049250313e-16
+DBL_MIN = 2.2250738585072014e-308
 MAX_COUNT = 100000
 
 R_WIN, R_STREAK, R_LOSS, R_TRADES, R_UNSET = ('DAILY_WIN_STOP', 'CONSECUTIVE_LOSSES_STOP', 'DAILY_LOSS_LIMIT', 'MAX_TRADES_REACHED',
@@ -78,8 +83,8 @@ def check(utc, snapshot_day, balance_start, closed_result, trades_today, wins_to
         bad.append('INVALID_SNAPSHOT:snapshot_day')
     elif day and snapshot_day != day:
         bad.append('STALE_SNAPSHOT_DAY')
-    if not _num(balance_start) or balance_start <= 0:
-        bad.append('INVALID_SNAPSHOT:balance_start')
+    if not _num(balance_start) or balance_start <= 0 or balance_start / LOSS_FRACTION_DIVISOR < DBL_MIN:
+        bad.append('INVALID_SNAPSHOT:balance_start')           # also when the 2% threshold would underflow: no limit is invented from it
     if not _num(closed_result):
         bad.append('INVALID_SNAPSHOT:closed_result')
     t_ok, w_ok, l_ok = _count(trades_today), _count(wins_today), _count(consecutive_losses)
@@ -107,7 +112,7 @@ def check(utc, snapshot_day, balance_start, closed_result, trades_today, wins_to
     if consecutive_losses >= CONSECUTIVE_LOSS_STOP_AT:
         limits.append(R_STREAK)
     threshold = balance_start / LOSS_FRACTION_DIVISOR
-    if closed_result <= -threshold + 4 * DBL_EPSILON * max(1.0, threshold):
+    if closed_result < 0 and closed_result <= -threshold + 4 * DBL_EPSILON * threshold:     # tolerance RELATIVE to the threshold: always smaller than it
         limits.append(R_LOSS)
     if max_trades_set and trades_today >= max_trades:
         limits.append(R_TRADES)

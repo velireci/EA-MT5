@@ -26,11 +26,13 @@ done
 echo "=== S3: T009 reused (no DST copy), rules present ==="
 grep -q 'SP_Evaluate(' $HDR && grep -q '#include "SessionPolicy.mqh"' $HDR && ! grep -qE 'SP_Edge|SP_Offset|StructToTime|TimeToStruct|7200|3600' $HDR \
   && echo "  PASS the Tirane day comes from SP_Evaluate; no DST rule, offset or time conversion of its own" || { echo "  FAIL T009 reuse"; FAIL=1; }
-for pat in 'DL_WIN_STOP_AT 1' 'DL_CONSECUTIVE_LOSS_STOP_AT 2' 'DL_LOSS_DIVISOR 50.0' 'in.snapshot_day!=day' 'POLICY_UNSET:max_trades_per_day' 'DAILY_WIN_STOP' 'CONSECUTIVE_LOSSES_STOP' 'DAILY_LOSS_LIMIT' 'MAX_TRADES_REACHED' 'STALE_SNAPSHOT_DAY' 'INCONSISTENT_COUNTERS:wins_plus_losses_exceed_trades' 'r.cancel_pending_due=limit;'; do
+for pat in 'DL_WIN_STOP_AT 1' 'DL_CONSECUTIVE_LOSS_STOP_AT 2' 'DL_LOSS_DIVISOR 50.0' 'in.snapshot_day!=day' 'POLICY_UNSET:max_trades_per_day' 'DAILY_WIN_STOP' 'CONSECUTIVE_LOSSES_STOP' 'DAILY_LOSS_LIMIT' 'MAX_TRADES_REACHED' 'STALE_SNAPSHOT_DAY' 'INCONSISTENT_COUNTERS:wins_plus_losses_exceed_trades' 'r.cancel_pending_due=limit;' 'in.balance_start/DL_LOSS_DIVISOR<DBL_MIN' 'in.closed_result<0.0 && in.closed_result<=-threshold+4.0*DBL_EPSILON*threshold'; do
   grep -qF -- "$pat" $HDR && echo "  PASS header has: $pat" || { echo "  FAIL header lacks: $pat"; FAIL=1; }
 done
 [ "$(grep -c 'cancel_pending_due=' $HDR)" = "2" ] && echo "  PASS cancel_pending_due is assigned only to false (reset) and to the proven-limit flag" || { echo "  FAIL cancel_pending_due assignments"; FAIL=1; }
 grep -qE 'cancel_pending_due=(true|!|r\.n_reasons)' $HDR && { echo "  FAIL cancel_pending_due derived from reasons or true"; FAIL=1; } || echo "  PASS cancel_pending_due is not derived from the reason count"
+
+if grep -qF 'MathMax(1.0,threshold)' $HDR; then echo "  FAIL the loss tolerance has an absolute floor again (it exceeded the threshold of a tiny balance at 43fc94a)"; FAIL=1; else echo "  PASS the loss tolerance is relative to the threshold, with no absolute floor"; fi
 
 echo "=== S4: balance, format strings, includes, ASCII ==="
 python3 tools/t001-check-balance.py $HDR $TST || FAIL=1
@@ -85,6 +87,8 @@ cp $HDR "$NEG/Dst.mqh"; echo 'int zz = 7200;' >> "$NEG/Dst.mqh"
 grep -qE 'SP_Edge|SP_Offset|StructToTime|TimeToStruct|7200|3600' "$NEG/Dst.mqh" && echo "  PASS a DST offset of its own is detected" || { echo "  FAIL DST copy not detected"; FAIL=1; }
 cp $HDR "$NEG/Cancel.mqh"; sed -i 's/r.cancel_pending_due=limit;/r.cancel_pending_due=(r.n_reasons>0);/' "$NEG/Cancel.mqh"
 grep -qF 'r.cancel_pending_due=limit;' "$NEG/Cancel.mqh" && { echo "  FAIL cancel mutation did not apply"; FAIL=1; } || echo "  PASS a cancel flag derived from the reason count is detected (pin lost)"
+cp $HDR "$NEG/Floor.mqh"; sed -i 's/4.0\*DBL_EPSILON\*threshold)/4.0*DBL_EPSILON*MathMax(1.0,threshold))/' "$NEG/Floor.mqh"
+grep -qF 'MathMax(1.0,threshold)' "$NEG/Floor.mqh" && echo "  PASS the absolute-floor tolerance (the 43fc94a defect) is detected" || { echo "  FAIL floor control did not apply"; FAIL=1; }
 cp $HDR "$NEG/Unbalanced.mqh"; echo "void x(){" >> "$NEG/Unbalanced.mqh"
 python3 tools/t001-check-balance.py "$NEG/Unbalanced.mqh" >/dev/null 2>&1 && { echo "  FAIL unbalanced brace not detected"; FAIL=1; } || echo "  PASS unbalanced brace detected"
 cp $HDR "$NEG/NonAscii.mqh"; printf '// caf\xc3\xa9\n' >> "$NEG/NonAscii.mqh"

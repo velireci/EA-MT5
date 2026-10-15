@@ -88,8 +88,8 @@ bool DL_Check(const SDlInput &in,SDlResult &r)
    else
       if(day!=0 && in.snapshot_day!=day)
          DL_Add(r,"STALE_SNAPSHOT_DAY");
-   if(!DL_Finite(in.balance_start) || in.balance_start<=0.0)
-      DL_Add(r,"INVALID_SNAPSHOT:balance_start");
+   if(!DL_Finite(in.balance_start) || in.balance_start<=0.0 || in.balance_start/DL_LOSS_DIVISOR<DBL_MIN)
+      DL_Add(r,"INVALID_SNAPSHOT:balance_start");      // also when the 2% threshold would underflow: no limit is invented from it
    if(!DL_Finite(in.closed_result))
       DL_Add(r,"INVALID_SNAPSHOT:closed_result");
    bool t_ok=DL_Count(in.trades_today),w_ok=DL_Count(in.wins_today),l_ok=DL_Count(in.consecutive_losses);
@@ -124,7 +124,7 @@ bool DL_Check(const SDlInput &in,SDlResult &r)
       limit=true;
      }
    double threshold=in.balance_start/DL_LOSS_DIVISOR;
-   if(in.closed_result<=-threshold+4.0*DBL_EPSILON*MathMax(1.0,threshold))
+   if(in.closed_result<0.0 && in.closed_result<=-threshold+4.0*DBL_EPSILON*threshold)      // tolerance RELATIVE to the threshold: always smaller than it
      {
       DL_Add(r,"DAILY_LOSS_LIMIT");
       limit=true;
