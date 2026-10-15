@@ -60,7 +60,7 @@ echo "  INFO ASCII-only checked for every T012 file"
 
 echo "=== S5: the verified modules are identical to $BASE ==="
 if git cat-file -e "$BASE^{commit}" 2>/dev/null; then
-  for p in src/include/SessionPolicy.mqh tests/t009_session_reference.py src/include/TradePlanning.mqh src/include/ExitSplit.mqh src/include/ExitActivation.mqh src/include/ExitReconciliation.mqh src/include/ExitSnapshotAdapter.mqh src/include/PositionSizing.mqh src/include/TradeGeometry.mqh; do
+  for p in src/include/SessionPolicy.mqh tests/t009_session_reference.py src/include/TradePlanning.mqh src/include/ExitSplit.mqh src/include/ExitActivation.mqh src/include/PositionSizing.mqh src/include/TradeGeometry.mqh; do
     git diff --quiet "$BASE" -- "$p" && echo "  PASS $p identical to $BASE" || { echo "  FAIL $p differs from $BASE"; FAIL=1; }
   done
 else

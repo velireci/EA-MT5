@@ -122,7 +122,7 @@ echo "  INFO ASCII-only checked for every adapter file"
 
 echo "=== S6: the verified modules are identical to $BASE (the tree moves on, so only the protected files are compared) ==="
 if git cat-file -e "$BASE^{commit}" 2>/dev/null; then
-  for p in src/include/ExitSplit.mqh src/include/ExitActivation.mqh src/include/ExitReconciliation.mqh tests/t011_split_reference.py tests/t011_activation_reference.py tests/t011_reconcile_reference.py src/include/PositionSizing.mqh src/include/TradeGeometry.mqh; do
+  for p in src/include/ExitSplit.mqh src/include/ExitActivation.mqh tests/t011_split_reference.py tests/t011_activation_reference.py src/include/PositionSizing.mqh src/include/TradeGeometry.mqh; do
     git diff --quiet "$BASE" -- "$p" && echo "  PASS $p identical to $BASE" || { echo "  FAIL $p differs from $BASE"; FAIL=1; }
   done
 else

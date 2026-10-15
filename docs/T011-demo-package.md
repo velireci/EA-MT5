@@ -9,7 +9,7 @@ Relayed evidence (not my runs) at 0356f39: owner MT5 Persist 395/0, Flow 261/0, 
 | `src/include/DemoHarness.mqh` | harness core `DM_Run` (steps NONE / STATUS / REGISTER / ACTIVATE / RECONCILE) over `ExitExecutor.mqh`; no transport, no trading call, no deletion |
 | `src/XauUsdT011DemoHarness.mq5` | the script: inputs, live quote, the REAL transport (only here and in the compile stub); **disabled by default (`InpStep = NONE`)** |
 | `src/include/ExitInstanceLock.mqh` | instance lock (temporary terminal global variable) |
-| `src/include/DemoOpenGuard.mqh`, `src/tests/T011_DemoOpenGuardTest.mq5` | the locked decision sequence of the open-position step (lock → intent → position → order → pre-check → intent write → ONE send) behind a small port, and its fake-port test (not general infrastructure) |
+| `src/include/DemoOpenGuard.mqh`, `src/tests/T011_DemoOpenGuardTest.mq5` | the locked decision sequence of the open-position step (lock -> intent -> position -> order -> pre-check -> intent write -> ONE send) behind a small port, and its fake-port test (not general infrastructure) |
 | `src/XauUsdT011DemoOpenPosition.mq5` | **separate, disabled** demo-only step that opens ONE owned test position (explicit volume, SL/TP distances, magic); the only `OrderSend` besides the real transport |
 | `src/tests/T011_DemoHarnessTest.mq5` | MQL5 test, FAKE transport only (also exercises the lock) |
 | `tests/t011_demo_reference.py`, `tests/test_t011_demo.py` | Python mirror and tests; `tools/t011-demo-static-checks.sh` static checks |

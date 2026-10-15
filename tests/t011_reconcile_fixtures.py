@@ -15,7 +15,7 @@ def scenario(name):
 
 def _blank():
     return dict(scn=_scn[0], kind='', pos=0, d=0, level=0.0, bid=0.0, ask=0.0, vinit=0.0, vcur=0.0, vmin=0.0, step=0.01, vmax=0.0,
-                rid='', rkind=0, rvol=0.0, found=1, comp=0, ex=[], dec='', st='', lk=0, dup=0, unl=0, chg=0, conf=-1)
+                rid='', rkind=0, rvol=0.0, found=1, comp=0, closed=0, ex=[], dec='', st='', lk=0, dup=0, unl=0, chg=0, conf=-1)
 
 
 def Q(d=a.BUY, level=2000.0, bid=2000.0, ask=2000.3, vinit=0.5, vcur=0.5, st=a.REQUEST_PENDING, pos=7, vmin=0.01, step=0.01, conf=-1):
@@ -30,11 +30,11 @@ def R(kind, vol=0.0, st=a.NEEDS_RECONCILIATION, rid=RID, step=0.01, conf=-1):
     ROWS.append(r)
 
 
-def S(dec, st, ex=(), vcur=0.1, comp=None, found=1, pos=7, rid=RID, step=0.01, lk=0, dup=0, unl=0, chg=0, conf=-1):
+def S(dec, st, ex=(), vcur=0.1, comp=None, found=1, pos=7, rid=RID, step=0.01, lk=0, dup=0, unl=0, chg=0, conf=-1, closed=0):
     if comp is None:                    # only a complete list can be CONFIRMED (round of 7ac7f4b review)
         comp = 1 if dec == 'CONFIRMED' else 0
     r = _blank()
-    r.update(kind='S', found=found, pos=pos, rid=rid, step=step, vcur=vcur, comp=comp, ex=list(ex), dec=dec, st=st, lk=lk, dup=dup,
+    r.update(kind='S', found=found, pos=pos, rid=rid, step=step, vcur=vcur, comp=comp, closed=closed, ex=list(ex), dec=dec, st=st, lk=lk, dup=dup,
              unl=unl, chg=chg, conf=(0 if conf == -1 else conf))
     ROWS.append(r)
 
@@ -116,6 +116,44 @@ scenario('BUY_STEP_CHANGED'); Q(); S('BLOCK', BLK, [E('e1', 0.04)], step=0.001, 
 scenario('SELL_STEP_CHANGED_SAME_VOLUME'); Q(**QSELL); S('BLOCK', BLK, [E('e1', 0.4)], step=0.001, chg=1)
 scenario('BUY_POSITION_MISSING'); Q(); S('BLOCK', BLK, [E('e1', 0.4)], found=0, chg=1)
 scenario('BUY_POSITION_MISSING_NO_PROOF'); Q(); R(a.TIMEOUT); S('BLOCK', BLK, [], found=0, comp=0, chg=1)
+# ---- a FINISHED position (Part 11): history proves the position is closed; only an existing DONE with its linked executions answers ALREADY_DONE, unchanged
+FIN = dict(found=0, vcur=0.0, comp=1, closed=1)
+scenario('BUY_DONE_THEN_CLOSED_PROVEN_IS_ALREADY_DONE'); Q(); S('CONFIRMED', DONE, [E('e1', 0.4)], lk=40, chg=1, conf=1); S('CONFIRMED', DONE, [E('e1', 0.4)], lk=40, chg=0, conf=1, **FIN)
+scenario('SELL_DONE_THEN_CLOSED_PROVEN_IS_ALREADY_DONE'); Q(**QSELL); S('CONFIRMED', DONE, [E('e1', 0.4)], lk=40, chg=1, conf=1); S('CONFIRMED', DONE, [E('e1', 0.4)], lk=40, chg=0, conf=1, **FIN)
+scenario('BUY_DONE_THEN_CLOSED_PROVEN_TWICE_IS_IDEMPOTENT')
+Q(); S('CONFIRMED', DONE, [E('e1', 0.4)], lk=40, chg=1, conf=1); S('CONFIRMED', DONE, [E('e1', 0.4)], lk=40, chg=0, conf=1, **FIN); S('CONFIRMED', DONE, [E('e1', 0.4)], lk=40, chg=0, conf=1, **FIN)
+scenario('BUY_DONE_THEN_CLOSED_PROVEN_IDENTICAL_DUPLICATE_COUNTED_ONCE')
+Q(); S('CONFIRMED', DONE, [E('e1', 0.4)], lk=40, chg=1, conf=1); S('CONFIRMED', DONE, [E('e1', 0.4), E('e1', 0.4)], lk=40, dup=1, chg=0, conf=1, **FIN)
+scenario('BUY_DONE_THEN_CLOSED_PROVEN_TWO_EXECUTIONS_AND_AN_UNLINKED_ONE')
+Q(); S('CONFIRMED', DONE, [E('e1', 0.25), E('e2', 0.15)], lk=40, chg=1, conf=1)
+S('CONFIRMED', DONE, [E('e1', 0.25), E('e2', 0.15), E('m1', 0.1, rid='MANUAL')], lk=40, unl=1, chg=0, conf=1, **FIN)
+scenario('BUY_DONE_THEN_MISSING_WITHOUT_PROOF_STAYS_BLOCK')
+Q(); S('CONFIRMED', DONE, [E('e1', 0.4)], lk=40, chg=1, conf=1); S('BLOCK', BLK, [E('e1', 0.4)], found=0, vcur=0.0, comp=1, closed=0, chg=1, conf=1)
+scenario('BUY_DONE_THEN_MISSING_INCOMPLETE_LIST_STAYS_BLOCK_EVEN_IF_FLAGGED_CLOSED')
+Q(); S('CONFIRMED', DONE, [E('e1', 0.4)], lk=40, chg=1, conf=1); S('BLOCK', BLK, [E('e1', 0.4)], found=0, vcur=0.0, comp=0, closed=1, chg=1, conf=1)
+scenario('BUY_DONE_THEN_CLOSED_BUT_NO_LINKED_EXECUTION_IS_BLOCK')
+Q(); S('CONFIRMED', DONE, [E('e1', 0.4)], lk=40, chg=1, conf=1); S('BLOCK', BLK, [], chg=1, conf=1, **FIN)
+scenario('BUY_DONE_THEN_CLOSED_BUT_ONLY_A_PARTIAL_LINKED_IS_BLOCK')
+Q(); S('CONFIRMED', DONE, [E('e1', 0.4)], lk=40, chg=1, conf=1); S('BLOCK', BLK, [E('e1', 0.3)], chg=1, conf=1, **FIN)
+scenario('BUY_DONE_THEN_CLOSED_BUT_OVERFILL_IS_BLOCK')
+Q(); S('CONFIRMED', DONE, [E('e1', 0.4)], lk=40, chg=1, conf=1); S('BLOCK', BLK, [E('e1', 0.4), E('e2', 0.1)], chg=1, conf=1, **FIN)
+scenario('BUY_DONE_THEN_CLOSED_BUT_EXEC_ID_CONFLICT_IS_BLOCK')
+Q(); S('CONFIRMED', DONE, [E('e1', 0.4)], lk=40, chg=1, conf=1); S('BLOCK', BLK, [E('e1', 0.4), E('e1', 0.3)], chg=1, conf=1, **FIN)
+scenario('BUY_DONE_THEN_CLOSED_BUT_EXECUTION_OFF_GRID_IS_BLOCK')
+Q(); S('CONFIRMED', DONE, [E('e1', 0.4)], lk=40, chg=1, conf=1); S('BLOCK', BLK, [E('e1', 0.405)], chg=1, conf=1, **FIN)
+scenario('BUY_DONE_THEN_CLOSED_BUT_WRONG_REQUEST_ID_IS_BLOCK')
+Q(); S('CONFIRMED', DONE, [E('e1', 0.4)], lk=40, chg=1, conf=1); S('BLOCK', BLK, [E('e1', 0.4, rid='X2R80-9')], rid='X2R80-9', chg=1, conf=1, **FIN)
+scenario('BUY_DONE_THEN_CLOSED_BUT_STEP_CHANGED_IS_BLOCK')
+Q(); S('CONFIRMED', DONE, [E('e1', 0.4)], lk=40, chg=1, conf=1); S('BLOCK', BLK, [E('e1', 0.4)], step=0.001, chg=1, conf=1, **FIN)
+scenario('BUY_PENDING_THEN_CLOSED_PROVEN_IS_NOT_PROMOTED'); Q(); S('BLOCK', BLK, [E('e1', 0.4)], chg=1, **FIN)
+scenario('BUY_NEEDS_RECONCILIATION_THEN_CLOSED_PROVEN_IS_NOT_PROMOTED'); Q(); R(a.TIMEOUT); S('BLOCK', BLK, [E('e1', 0.4)], chg=1, **FIN)
+scenario('BUY_PARTIAL_THEN_CLOSED_PROVEN_IS_NOT_PROMOTED'); Q(); S('PARTIAL', REC, [E('e1', 0.1)], vcur=0.4, lk=10, chg=1); S('BLOCK', BLK, [E('e1', 0.1)], chg=1, **FIN)
+scenario('BUY_DONE_LOST_THEN_CLOSED_PROVEN_IS_NOT_PROMOTED')
+Q(); S('CONFIRMED', DONE, [E('e1', 0.4)], lk=40, chg=1, conf=1); S('UNKNOWN', REC, [], vcur=0.1, comp=0, chg=1, conf=1); S('BLOCK', BLK, [E('e1', 0.4)], chg=1, conf=1, **FIN)
+scenario('BUY_DONE_THEN_CLOSED_OFF_GRID_PLUS_EXTRA_STEPS_THAT_ADD_UP_IS_BLOCK')
+Q(); S('CONFIRMED', DONE, [E('e1', 0.4)], lk=40, chg=1, conf=1); S('BLOCK', BLK, [E('e1', 0.405), E('e2', 0.41)], chg=1, conf=1, **FIN)
+scenario('BUY_CLOSED_FLAG_WITH_A_FOUND_POSITION_IS_INVALID_INPUT')
+Q(); S('CONFIRMED', DONE, [E('e1', 0.4)], lk=40, chg=1, conf=1); S('INVALID_INPUT', DONE, [E('e1', 0.4)], found=1, vcur=0.1, comp=1, closed=1, conf=1)
 scenario('BUY_OVERFILL'); Q(); S('BLOCK', BLK, [E('e1', 0.4), E('e2', 0.1)], vcur=0.05, chg=1, lk=50)
 scenario('BUY_EXECUTION_OFF_GRID'); Q(); S('BLOCK', BLK, [E('e1', 0.075)], vcur=0.425, chg=1)
 scenario('BUY_ALREADY_BLOCKED_SNAPSHOT_CHANGES_NOTHING')
@@ -202,6 +240,7 @@ def emit_mql():
     arr('int', 'R_RKIND', [str(r['rkind']) for r in ROWS])
     arr('int', 'R_FOUND', [str(r['found']) for r in ROWS])
     arr('int', 'R_COMP', [str(r['comp']) for r in ROWS])
+    arr('int', 'R_CLOSED', [str(r['closed']) for r in ROWS])
     arr('int', 'R_NEX', [str(len(r['ex'])) for r in ROWS])
     ids, reqs, vols = [], [], []
     for r in ROWS:

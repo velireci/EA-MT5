@@ -65,6 +65,7 @@ class Snapshot:
     volume_current: float
     executions: list = field(default_factory=list)
     executions_complete: bool = False
+    position_closed_proven: bool = False
 
 
 @dataclass
@@ -84,8 +85,10 @@ def _bad(reason):
 def _validate(snap):
     if not isinstance(snap, Snapshot):
         return _bad('INVALID_SNAPSHOT: not a snapshot')
-    if not isinstance(snap.position_found, bool) or not isinstance(snap.executions_complete, bool):
+    if not isinstance(snap.position_found, bool) or not isinstance(snap.executions_complete, bool) or not isinstance(snap.position_closed_proven, bool):
         return _bad('INVALID_SNAPSHOT: flags must be booleans')
+    if snap.position_closed_proven and snap.position_found:
+        return _bad('INVALID_SNAPSHOT: a position cannot be both found and proven closed')
     if isinstance(snap.position_id, bool) or not isinstance(snap.position_id, int) or snap.position_id <= 0:
         return _bad('INVALID_POSITION_ID: must be an integer > 0')
     if not isinstance(snap.request_id, str) or snap.request_id == '':
@@ -125,6 +128,9 @@ def reconcile(state, snap):
     if snap.volume_step != state.volume_step:
         return _block(state, 'STEP_CHANGED: snapshot step %.10g is not the step %.10g of the request' % (snap.volume_step, state.volume_step))
     if not snap.position_found:
+        fin = _finished_after_done(state, snap)
+        if fin:
+            return Outcome(CONFIRMED, 'ALREADY_DONE: POSITION_CLOSED_PROVEN_BY_HISTORY', linked_steps=fin[0], duplicates=fin[1], unlinked=fin[2])
         return _block(state, 'POSITION_MISSING: the position is not in the snapshot; DONE needs a matching position')
     seen = {}
     linked, dups, unlinked = 0, 0, 0
@@ -186,6 +192,31 @@ def reconcile(state, snap):
     out = _not_done(state, done_before, linked, 'UNKNOWN: ' + what)
     out.decision, out.linked_steps, out.duplicates, out.unlinked = UNKNOWN, linked, dups, unlinked
     return out
+
+
+def _finished_after_done(state, snap):
+    """The ONLY answer for a position that is not open: an existing DONE (confirmations 1) whose linked executions still equal the request exactly, a complete
+    list and a position the adapter PROVED closed from the history. Changes nothing. Returns (linked, duplicates, unlinked) or None; any doubt (conflict, off the
+    grid, other volume) -> None -> POSITION_MISSING BLOCK."""
+    if state.status != act.DONE or state.confirmations != 1 or not snap.position_closed_proven or not snap.executions_complete:
+        return None
+    seen, linked, dups, unlinked = {}, 0, 0, 0
+    for e in snap.executions:
+        key = (e.request_id, e.volume)
+        if e.exec_id in seen:
+            if seen[e.exec_id] != key:
+                return None
+            dups += 1
+            continue
+        seen[e.exec_id] = key
+        if e.request_id != state.request_id:
+            unlinked += 1
+            continue
+        k = t006._grid_steps(e.volume, state.volume_step)
+        if k < 0:
+            return None
+        linked += k
+    return (linked, dups, unlinked) if linked == state.request_steps else None
 
 
 def _not_done(state, done_before, linked, reason):

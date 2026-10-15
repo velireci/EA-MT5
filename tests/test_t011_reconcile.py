@@ -35,7 +35,7 @@ def run_rows(mod_act, mod_rec, mods_eq=True):
             got, exp = (st.status,) + ((st.confirmations,) if row['conf'] >= 0 else ()), (row['st'],) + ((row['conf'],) if row['conf'] >= 0 else ())
         else:
             snap = mod_rec.Snapshot(bool(row['found']), row['pos'], row['rid'], row['step'], row['vcur'],
-                                    [mod_rec.Exec(*e) for e in row['ex']], bool(row['comp']))
+                                    [mod_rec.Exec(*e) for e in row['ex']], bool(row['comp']), bool(row['closed']))
             plan = (st.initial_steps, st.request_steps, st.request_id, st.volume_step)
             o = mod_rec.reconcile(st, snap)
             if (st.initial_steps, st.request_steps, st.request_id, st.volume_step) != plan:
@@ -191,6 +191,51 @@ class Properties(unittest.TestCase):
         self.assertEqual((o1.decision, o2.decision, o2.changed), (rec.PARTIAL, rec.PARTIAL, False))
         self.assertEqual(st, s1)
 
+    def _done(self):
+        st = act.State()
+        act.on_quote(st, 7, act.BUY, 2000.0, 2000.0, 2000.3, 0.5, 0.5, 0.01, 0.01, 100.0)
+        rec.reconcile(st, rec.Snapshot(True, 7, 'X2R80-7', 0.01, 0.1, [rec.Exec('e1', 'X2R80-7', 0.4)], True))
+        self.assertEqual((st.status, st.confirmations), (act.DONE, 1))
+        return st
+
+    def test_a_finished_position_answers_already_done_without_changing_anything(self):
+        st = self._done()
+        before = copy.deepcopy(st)
+        snap = rec.Snapshot(False, 7, 'X2R80-7', 0.01, 0.0, [rec.Exec('e1', 'X2R80-7', 0.4)], True, True)
+        for _ in range(3):
+            o = rec.reconcile(st, snap)
+            self.assertEqual((o.decision, o.changed, o.reason), (rec.CONFIRMED, False, 'ALREADY_DONE: POSITION_CLOSED_PROVEN_BY_HISTORY'))
+            self.assertEqual(st, before)                 # status, confirmations, executed_steps, reason, plan: all untouched
+
+    def test_the_finished_path_needs_a_DONE_state_with_exactly_one_confirmation(self):
+        for conf in (0, 2):
+            st = self._done()
+            st.confirmations = conf
+            o = rec.reconcile(st, rec.Snapshot(False, 7, 'X2R80-7', 0.01, 0.0, [rec.Exec('e1', 'X2R80-7', 0.4)], True, True))
+            self.assertEqual((o.decision, st.status), (rec.BLOCK, act.BLOCKED), conf)
+            self.assertEqual(st.confirmations, conf)     # BLOCK never rewrites the confirmation count either
+        for status in (act.REQUEST_PENDING, act.NEEDS_RECONCILIATION, act.BLOCKED):
+            st = act.State()
+            act.on_quote(st, 7, act.BUY, 2000.0, 2000.0, 2000.3, 0.5, 0.5, 0.01, 0.01, 100.0)
+            st.status = status
+            o = rec.reconcile(st, rec.Snapshot(False, 7, 'X2R80-7', 0.01, 0.0, [rec.Exec('e1', 'X2R80-7', 0.4)], True, True))
+            self.assertEqual(o.decision, rec.BLOCK, status)
+            self.assertEqual(st.status, act.BLOCKED)
+
+    def test_the_closed_flag_is_a_strict_boolean_and_never_with_a_found_position(self):
+        st = self._done()
+        for bad in (1, 'yes', None):
+            o = rec.reconcile(st, rec.Snapshot(False, 7, 'X2R80-7', 0.01, 0.0, [rec.Exec('e1', 'X2R80-7', 0.4)], True, bad))
+            self.assertEqual(o.decision, rec.INVALID_INPUT)
+        o = rec.reconcile(st, rec.Snapshot(True, 7, 'X2R80-7', 0.01, 0.1, [rec.Exec('e1', 'X2R80-7', 0.4)], True, True))
+        self.assertEqual((o.decision, st.status), (rec.INVALID_INPUT, act.DONE))
+
+    def test_the_finished_path_never_produces_a_request(self):
+        src = _read('tests', 't011_reconcile_reference.py')
+        body = src[src.index('def _finished_after_done'):src.index('def _not_done')]
+        for word in ('REQUEST_ACTION', 'on_quote', 'send', 'retry', 'Save', 'save'):
+            self.assertNotIn(word, body)
+
 
 class Mutants(unittest.TestCase):
     def _build(self, pairs):
@@ -207,6 +252,20 @@ class Mutants(unittest.TestCase):
         for k, v in ns.items():
             setattr(m, k, v)
         return m
+
+    @staticmethod
+    def _direct(m):
+        """hand-built DONE states that the allowed transitions cannot produce (confirmations other than 1) must not take the finished path"""
+        bad = []
+        for conf in (0, 2):
+            st = act.State()
+            act.on_quote(st, 7, act.BUY, 2000.0, 2000.0, 2000.3, 0.5, 0.5, 0.01, 0.01, 100.0)
+            m.reconcile(st, m.Snapshot(True, 7, 'X2R80-7', 0.01, 0.1, [m.Exec('e1', 'X2R80-7', 0.4)], True))
+            st.confirmations = conf
+            o = m.reconcile(st, m.Snapshot(False, 7, 'X2R80-7', 0.01, 0.0, [m.Exec('e1', 'X2R80-7', 0.4)], True, True))
+            if o.decision != 'BLOCK' or st.confirmations != conf:
+                bad.append(('finished path with confirmations', conf))
+        return bad
 
     def test_mutants_are_caught(self):
         cases = [
@@ -229,12 +288,20 @@ class Mutants(unittest.TestCase):
             ('incomplete list confirms', [("        if not complete:\n            out = _not_done(state, done_before, linked, 'UNKNOWN: INCOMPLETE_EVIDENCE", "        if False:\n            out = _not_done(state, done_before, linked, 'UNKNOWN: INCOMPLETE_EVIDENCE")]),
             ('re-check of DONE confirmed again', [("        if done_before:\n            return Outcome(CONFIRMED, 'ALREADY_DONE', **common)", "        if False:\n            return Outcome(CONFIRMED, 'ALREADY_DONE', **common)")]),
             ('execution off the grid accepted', [("        if k < 0:", "        if False:")]),
+            ('finished path without the closed proof', [("not snap.position_closed_proven or ", "")]),
+            ('finished path promotes a non-DONE state', [("state.status != act.DONE or ", "")]),
+            ('finished path ignores confirmations', [("state.confirmations != 1 or ", "")]),
+            ('finished path accepts an incomplete list', [(" or not snap.executions_complete:\n        return None", ":\n        return None")]),
+            ('finished path does not require linked == request', [("return (linked, dups, unlinked) if linked == state.request_steps else None", "return (linked, dups, unlinked)")]),
+            ('finished path ignores an exec id conflict', [("            if seen[e.exec_id] != key:\n                return None", "            if False:\n                return None")]),
+            ('finished path accepts an off-grid execution', [("        if k < 0:\n            return None", "        if False:\n            return None")]),
+            ('finished path changes the state', [("    return (linked, dups, unlinked) if linked == state.request_steps else None", "    state.status = act.NEEDS_RECONCILIATION\n    return (linked, dups, unlinked) if linked == state.request_steps else None")]),
         ]
         for name, pairs in cases:
             with self.subTest(name):
                 m = self._build(pairs)
                 try:
-                    bad = run_rows(act, m)
+                    bad = run_rows(act, m) or self._direct(m)
                 except Exception:
                     bad = ['exception']
                 self.assertTrue(bad, 'mutant not caught: ' + name)

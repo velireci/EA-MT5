@@ -45,8 +45,8 @@ def run_rows(mod_ad):
         if res.verdict == 'READY':
             s = res.snapshot
             got = (int(res.complete), res.linked_deals, res.duplicate_deals, res.excluded_entries, res.excluded_other, ','.join(e.exec_id for e in s.executions),
-                   int(s.position_found), s.volume_current, s.volume_step)
-            exp = (row['complete'], row['linked'], row['dup'], row['exe'], row['exo'], row['execs'], row['found'], row['vcur'], row['vstep'])
+                   int(s.position_found), s.volume_current, s.volume_step, int(s.position_closed_proven))
+            exp = (row['complete'], row['linked'], row['dup'], row['exe'], row['exo'], row['execs'], row['found'], row['vcur'], row['vstep'], row['closed'])
             if got != exp:
                 bad.append((row['scn'], 'fields', got, exp))
             o = rec.reconcile(st, s)
@@ -161,7 +161,7 @@ class Mutants(unittest.TestCase):
     def test_mutants_are_caught(self):
         cases = [
             ('unmapped exit deals counted', [("        if d.order not in mp.orders:\n            ex_other += 1\n            continue", "        if False:\n            continue")]),
-            ('entries counted', [("        if d.entry != ENTRY_OUT:\n            ex_entry += 1\n            continue", "        if False:\n            continue")]),
+            ('entries counted', [("        if d.entry != ENTRY_OUT:\n            ex_entry += 1\n            unsupported = True                                  # INOUT, OUT_BY or an unknown kind never proves a close\n            continue", "        if False:\n            continue")]),
             ('duplicate tickets counted', [("            if seen[d.ticket] == d:\n                dup += 1\n                continue", "            if seen[d.ticket] == d:\n                dup += 1")]),
             ('executor assertion ignored', [("    if not mp.orders_complete:\n        missing.append", "    if False:\n        missing.append")]),
             ('active order accepted', [("        if o.where != WHERE_HISTORY or o.state not in FINAL_STATES:", "        if False:")]),
@@ -171,7 +171,7 @@ class Mutants(unittest.TestCase):
             ('netting allowed', [("    if raw.margin_mode != MARGIN_HEDGING:", "    if False:")]),
             ('unstable read accepted', [("    if not stable:", "    if False:")]),
             ('truncation ignored', [("    if raw.deals_truncated or len(raw.deals) > MAX_DEALS", "    if len(raw.deals) > MAX_DEALS")]),
-            ('step copied from the state', [("[rec.Exec(str(d.ticket), state.request_id, d.volume) for d in linked], complete)", "[rec.Exec(str(d.ticket), state.request_id, d.volume) for d in linked], complete)"),
+            ('step copied from the state', [("[rec.Exec(str(d.ticket), state.request_id, d.volume) for d in linked], complete, closed)", "[rec.Exec(str(d.ticket), state.request_id, d.volume) for d in linked], complete, closed)"),
                                            ("snap = rec.Snapshot(found, mp.position_id, state.request_id, raw.vol_step,", "snap = rec.Snapshot(found, mp.position_id, state.request_id, state.volume_step,")]),
             ('empty order map accepted', [("    if not isinstance(mp.orders, list) or len(mp.orders) == 0:", "    if False:")]),
             ('order of another position accepted', [("        if e_steps != 0 and o.position_id != mp.position_id:", "        if False:")]),
@@ -183,6 +183,16 @@ class Mutants(unittest.TestCase):
             ('map request mismatch ignored', [("    if mp.request_id != state.request_id:", "    if False:")]),
             ('capacity of a snapshot truncated', [("    if len(linked) > rec.MAX_EXEC:", "    linked = linked[:rec.MAX_EXEC]\n    if False:")]),
             ('blocked state ignored', [("    if state.status == act.BLOCKED:", "    if False:")]),
+            ('closed: INOUT / OUT_BY / unknown entry ignored', [("            unsupported = True                                  # INOUT, OUT_BY", "            pass                                                # INOUT, OUT_BY")]),
+            ('closed: opening volume not compared with the stored initial volume', [("in_steps == state.initial_steps", "True")]),
+            ('closed: exit total not compared with the opening volume', [("\n              and out_steps == in_steps)", ")")]),
+            ('closed: unmapped exit deals not counted', [("        k_out = t006._grid_steps(d.volume, raw.vol_step) if t006._num(d.volume) and d.volume > 0 else -1\n        if k_out <= 0:\n            unsupported = True\n        else:\n            out_steps += k_out\n        if d.order not in mp.orders:", "        if d.order not in mp.orders:")]),
+            ('closed: incomplete evidence accepted', [("closed = (not found and complete and not unsupported", "closed = (not found and not unsupported")]),
+            ('closed: an open position accepted', [("closed = (not found and complete", "closed = (complete")]),
+            ('closed: opening deal side ignored', [("if d.type != want_in or k <= 0:", "if k <= 0:")]),
+            ('closed: broker step vs request step ignored', [(" and raw.vol_step == state.volume_step", "")]),
+            ('closed: identical duplicate deals counted twice', [("                dup += 1\n                continue", "                dup += 1")]),
+            ('closed: off-grid volume accepted', [("            if d.type != want_in or k <= 0:", "            if d.type != want_in or False:"), ("        if k_out <= 0:\n            unsupported = True", "        if False:\n            unsupported = True")]),
         ]
         for name, pairs in cases:
             with self.subTest(name):

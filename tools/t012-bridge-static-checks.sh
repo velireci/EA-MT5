@@ -95,7 +95,7 @@ PYEOF
 
 echo "=== S6: the verified modules are identical to $BASE ==="
 if git cat-file -e "$BASE^{commit}" 2>/dev/null; then
-  for p in src/include/DailyHistory.mqh src/include/DailyLimits.mqh src/include/DailyPreviewGate.mqh src/include/SessionPolicy.mqh src/include/ExitSnapshotAdapter.mqh src/XauUsdDailyHistoryDiag.mq5 tests/t012_daily_reference.py tests/t012_history_reference.py; do
+  for p in src/include/DailyHistory.mqh src/include/DailyLimits.mqh src/include/DailyPreviewGate.mqh src/include/SessionPolicy.mqh src/XauUsdDailyHistoryDiag.mq5 tests/t012_daily_reference.py tests/t012_history_reference.py; do
     git diff --quiet "$BASE" -- "$p" && echo "  PASS $p identical to $BASE" || { echo "  FAIL $p differs from $BASE"; FAIL=1; }
   done
 else

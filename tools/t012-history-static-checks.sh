@@ -126,7 +126,7 @@ echo "  INFO ASCII-only checked for every history file"
 
 echo "=== S6: the verified modules are identical to $BASE ==="
 if git cat-file -e "$BASE^{commit}" 2>/dev/null; then
-  for p in src/include/DailyLimits.mqh src/include/DailyPreviewGate.mqh src/include/SessionPolicy.mqh src/include/TradePlanning.mqh src/include/ExitSnapshotAdapter.mqh src/include/ExitReconciliation.mqh src/include/ExitActivation.mqh tests/t009_session_reference.py tests/t012_daily_reference.py; do
+  for p in src/include/DailyLimits.mqh src/include/DailyPreviewGate.mqh src/include/SessionPolicy.mqh src/include/TradePlanning.mqh src/include/ExitActivation.mqh tests/t009_session_reference.py tests/t012_daily_reference.py; do
     git diff --quiet "$BASE" -- "$p" && echo "  PASS $p identical to $BASE" || { echo "  FAIL $p differs from $BASE"; FAIL=1; }
   done
 else

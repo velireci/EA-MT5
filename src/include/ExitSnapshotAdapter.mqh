@@ -350,7 +350,10 @@ bool XA_Build(const SEaState &st,const SXaMap &mp,const SXaRaw &raw,const bool s
    int lk[XA_MAX_DEALS];                       // indexes of the linked deals
    int nl=0,dup=0,ex_entry=0,ex_other=0;
    bool has_entry_in=false;
+   long in_steps=0,out_steps=0;                // for the closed-position proof only (unique deals of THIS position identifier)
+   bool unsupported=false;
    int wrong=(st.direction==1 ? XA_DEAL_SELL : XA_DEAL_BUY);
+   int want_in=(st.direction==1 ? XA_DEAL_BUY : XA_DEAL_SELL);
    for(int i=0;i<raw.n_deals;i++)
      {
       if(raw.deal[i].position_id!=mp.position_id)
@@ -379,11 +382,17 @@ bool XA_Build(const SEaState &st,const SXaMap &mp,const SXaRaw &raw,const bool s
         {
          has_entry_in=true;
          ex_entry++;
+         long ki=(TG_Finite(raw.deal[i].volume) && raw.deal[i].volume>0.0 ? PS_GridSteps(raw.deal[i].volume,raw.vol_step) : -1);
+         if(raw.deal[i].type!=want_in || ki<=0)
+            unsupported=true;
+         else
+            in_steps+=ki;
          continue;
         }
       if(raw.deal[i].entry!=XA_ENTRY_OUT)
         {
          ex_entry++;
+         unsupported=true;                                  // INOUT, OUT_BY or an unknown kind never proves a close
          continue;
         }
       if((raw.deal[i].type!=XA_DEAL_BUY && raw.deal[i].type!=XA_DEAL_SELL) || raw.deal[i].type!=wrong)
@@ -391,6 +400,11 @@ bool XA_Build(const SEaState &st,const SXaMap &mp,const SXaRaw &raw,const bool s
          XA_Fail(res,XA_BLOCK,StringFormat("DEAL_DIRECTION_MISMATCH: exit deal %I64u has type %d against a position with direction %d",raw.deal[i].ticket,raw.deal[i].type,st.direction));
          return(false);
         }
+      long ko=(TG_Finite(raw.deal[i].volume) && raw.deal[i].volume>0.0 ? PS_GridSteps(raw.deal[i].volume,raw.vol_step) : -1);
+      if(ko<=0)
+         unsupported=true;
+      else
+         out_steps+=ko;
       if(!XA_InMap(mp,raw.deal[i].order))
         {
          ex_other++;
@@ -454,6 +468,9 @@ bool XA_Build(const SEaState &st,const SXaMap &mp,const SXaRaw &raw,const bool s
       missing+=(missing!="" ? "; " : "")+"the opening deal of the position is not in the history list";
    bool complete=(missing=="");
    ER_SnapshotInit(snap,found,mp.position_id,st.request_id,raw.vol_step,(found ? raw.pos_volume : 0.0),complete);
+   // FINISHED POSITION proof (never from the mere absence of the position): not open, complete evidence, only supported deals, the same step as the request,
+   // opening volume == the STORED initial volume and the total exit volume == the opening volume, all in volume steps
+   snap.position_closed_proven=(!found && complete && !unsupported && raw.vol_step==st.volume_step && in_steps>0 && in_steps==st.initial_steps && out_steps==in_steps);
    for(int a=0;a<nl;a++)
       ER_AddExec(snap,StringFormat("%I64u",raw.deal[lk[a]].ticket),st.request_id,raw.deal[lk[a]].volume);
    res.verdict=XA_READY;

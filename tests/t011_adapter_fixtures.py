@@ -38,9 +38,9 @@ def setup(name):
 
 
 def row(name, setup_name='PEND', deals=(), orders=(), raw=None, mp=None, stable=True, verdict='READY', why='', complete=0, linked=0,
-        dup=0, exe=0, exo=0, execs='', found=1, vcur=0.1, vstep=0.01, decision='', state=''):
+        dup=0, exe=0, exo=0, execs='', found=1, vcur=0.1, vstep=0.01, decision='', state='', closed=0):
     r = dict(scn=name, setup=setup_name, stable=int(stable), deals=list(deals), orders=list(orders), verdict=verdict, why=why, complete=complete,
-             linked=linked, dup=dup, exe=exe, exo=exo, execs=execs, found=found, vcur=vcur, vstep=vstep, decision=decision, state=state)
+             linked=linked, dup=dup, exe=exe, exo=exo, execs=execs, found=found, vcur=vcur, vstep=vstep, decision=decision, state=state, closed=closed)
     m = dict(request_id=RID, position_id=7, symbol='XAUUSD', orders=[501], orders_complete=True)
     m.update(mp or {})
     w = dict(api_ok=1, symbol_ok=1, vol_step=0.01, vol_min=0.01, vol_max=100.0, margin_ok=1, margin_mode=ad.MARGIN_HEDGING, n_pos=1, pos_ticket=9,
@@ -107,6 +107,58 @@ row('TWO_OPEN_POSITIONS_WITH_THE_SAME_IDENTIFIER', deals=[IN_B], raw=dict(n_pos=
 row('POSITION_SYMBOL_MISMATCH', deals=[IN_B], raw=dict(pos_symbol='EURUSD'), verdict='BLOCK', why='SYMBOL_MISMATCH')
 row('POSITION_DIRECTION_MISMATCH', deals=[IN_B], raw=dict(pos_type=ad.POS_SELL), verdict='BLOCK', why='DIRECTION_MISMATCH')
 row('POSITION_IDENTIFIER_NOT_TICKET', deals=[IN_B, OUT(1001, 501, 0.4)], orders=[FILLED(501, 0.4, 0.0)], raw=dict(pos_ticket=7), complete=1, linked=1, exe=1, execs='1001', decision='CONFIRMED', state='DONE')
+# ---- a FINISHED position (Part 11): n_pos == 0 and the history proves the closure (opening volume == total exit volume of the position, on the grid, no INOUT / OUT_BY)
+GONE = dict(n_pos=0)
+REM = lambda t, vol, order=900: OUT(t, order, vol)                 # an exit deal of the remainder (manual close, SL or TP: not our order)
+FIN = dict(raw=GONE, found=0, vcur=0.0)
+row('BUY_DONE_REMAINDER_CLOSED_BY_HAND_IS_PROVEN_CLOSED', 'DONE_BUY', deals=[IN_B, OUT(1001, 501, 0.4), REM(1005, 0.1)], orders=[FILLED(501, 0.4, 0.0)],
+    complete=1, linked=1, exe=1, exo=1, execs='1001', closed=1, decision='CONFIRMED', state='DONE', **FIN)
+row('SELL_DONE_REMAINDER_CLOSED_BY_HAND_IS_PROVEN_CLOSED', 'DONE_SELL', deals=[IN_S, OUT(1001, 501, 0.4, False), (1005, 900, 7, ad.ENTRY_OUT, ad.DEAL_BUY, 0.1)], orders=[FILLED(501, 0.4, 0.0)],
+    raw=dict(n_pos=0, pos_type=ad.POS_SELL), found=0, vcur=0.0, complete=1, linked=1, exe=1, exo=1, execs='1001', closed=1, decision='CONFIRMED', state='DONE')
+row('BUY_DONE_REMAINDER_CLOSED_BY_STOP_ORDER_ZERO_IS_PROVEN_CLOSED', 'DONE_BUY', deals=[IN_B, OUT(1001, 501, 0.4), REM(1005, 0.1, order=0)], orders=[FILLED(501, 0.4, 0.0)],
+    complete=1, linked=1, exe=1, exo=1, execs='1001', closed=1, decision='CONFIRMED', state='DONE', **FIN)
+row('BUY_DONE_REMAINDER_IN_TWO_DEALS_AND_AN_IDENTICAL_DUPLICATE_COUNTS_ONCE', 'DONE_BUY', deals=[IN_B, OUT(1001, 501, 0.4), REM(1005, 0.06), REM(1006, 0.04), REM(1006, 0.04)],
+    orders=[FILLED(501, 0.4, 0.0)], complete=1, linked=1, dup=1, exe=1, exo=2, execs='1001', closed=1, decision='CONFIRMED', state='DONE', **FIN)
+row('BUY_DONE_OPENING_IN_TWO_DEALS_EQUAL_TO_THE_STORED_INITIAL_VOLUME', 'DONE_BUY', deals=[(100, 400, 7, ad.ENTRY_IN, ad.DEAL_BUY, 0.3), (101, 400, 7, ad.ENTRY_IN, ad.DEAL_BUY, 0.2), OUT(1001, 501, 0.4), REM(1005, 0.1)],
+    orders=[FILLED(501, 0.4, 0.0)], complete=1, linked=1, exe=2, exo=1, execs='1001', closed=1, decision='CONFIRMED', state='DONE', **FIN)
+row('BUY_DONE_THEN_SAME_TICKET_WITH_CONFLICTING_DATA_IS_UNKNOWN', 'DONE_BUY', deals=[IN_B, OUT(1001, 501, 0.4), REM(1005, 0.1), REM(1005, 0.2)], orders=[FILLED(501, 0.4, 0.0)],
+    raw=GONE, verdict='UNKNOWN', why='READ_INCONSISTENT')
+row('BUY_DONE_EXIT_VOLUME_BELOW_THE_OPENING_IS_NOT_PROVEN', 'DONE_BUY', deals=[IN_B, OUT(1001, 501, 0.4), REM(1005, 0.09)], orders=[FILLED(501, 0.4, 0.0)],
+    complete=1, linked=1, exe=1, exo=1, execs='1001', closed=0, decision='BLOCK', state='BLOCKED', **FIN)
+row('BUY_DONE_NO_REMAINDER_DEAL_AT_ALL_IS_NOT_PROVEN', 'DONE_BUY', deals=[IN_B, OUT(1001, 501, 0.4)], orders=[FILLED(501, 0.4, 0.0)],
+    complete=1, linked=1, exe=1, execs='1001', closed=0, decision='BLOCK', state='BLOCKED', **FIN)
+row('BUY_DONE_EXIT_VOLUME_ABOVE_THE_OPENING_IS_NOT_PROVEN', 'DONE_BUY', deals=[IN_B, OUT(1001, 501, 0.4), REM(1005, 0.1), REM(1006, 0.01)], orders=[FILLED(501, 0.4, 0.0)],
+    complete=1, linked=1, exe=1, exo=2, execs='1001', closed=0, decision='BLOCK', state='BLOCKED', **FIN)
+row('BUY_DONE_INOUT_DEAL_DOES_NOT_PROVE_THE_CLOSE', 'DONE_BUY', deals=[IN_B, OUT(1001, 501, 0.4), (1005, 900, 7, ad.ENTRY_INOUT, ad.DEAL_SELL, 0.1)], orders=[FILLED(501, 0.4, 0.0)],
+    complete=1, linked=1, exe=2, execs='1001', closed=0, decision='BLOCK', state='BLOCKED', **FIN)
+row('BUY_DONE_OUT_BY_DEAL_DOES_NOT_PROVE_THE_CLOSE', 'DONE_BUY', deals=[IN_B, OUT(1001, 501, 0.4), (1005, 900, 7, ad.ENTRY_OUT_BY, ad.DEAL_SELL, 0.1)], orders=[FILLED(501, 0.4, 0.0)],
+    complete=1, linked=1, exe=2, execs='1001', closed=0, decision='BLOCK', state='BLOCKED', **FIN)
+row('BUY_DONE_UNSUPPORTED_ENTRY_KIND_DOES_NOT_PROVE_THE_CLOSE', 'DONE_BUY', deals=[IN_B, OUT(1001, 501, 0.4), (1005, 900, 7, 9, ad.DEAL_SELL, 0.1)], orders=[FILLED(501, 0.4, 0.0)],
+    complete=1, linked=1, exe=2, execs='1001', closed=0, decision='BLOCK', state='BLOCKED', **FIN)
+row('BUY_DONE_EXIT_DEAL_OF_AN_UNSUPPORTED_TYPE_BLOCKS_THE_VERDICT', 'DONE_BUY', deals=[IN_B, OUT(1001, 501, 0.4), (1005, 900, 7, ad.ENTRY_OUT, 2, 0.1)], orders=[FILLED(501, 0.4, 0.0)],
+    raw=GONE, verdict='BLOCK', why='DEAL_DIRECTION_MISMATCH')
+row('BUY_DONE_OPENING_VOLUME_DIFFERS_FROM_THE_STORED_INITIAL_VOLUME', 'DONE_BUY', deals=[(100, 400, 7, ad.ENTRY_IN, ad.DEAL_BUY, 0.6), OUT(1001, 501, 0.4), REM(1005, 0.2)], orders=[FILLED(501, 0.4, 0.0)],
+    complete=1, linked=1, exe=1, exo=1, execs='1001', closed=0, decision='BLOCK', state='BLOCKED', **FIN)
+row('BUY_DONE_OPENING_DEAL_OF_THE_WRONG_SIDE_IS_NOT_PROVEN', 'DONE_BUY', deals=[IN_S, OUT(1001, 501, 0.4), REM(1005, 0.1)], orders=[FILLED(501, 0.4, 0.0)],
+    complete=1, linked=1, exe=1, exo=1, execs='1001', closed=0, decision='BLOCK', state='BLOCKED', **FIN)
+row('BUY_DONE_OPENING_DEAL_MISSING_IS_NOT_PROVEN', 'DONE_BUY', deals=[OUT(1001, 501, 0.4), REM(1005, 0.1)], orders=[FILLED(501, 0.4, 0.0)],
+    complete=0, linked=1, exo=1, execs='1001', closed=0, decision='BLOCK', state='BLOCKED', **FIN)
+row('BUY_DONE_EXECUTOR_DOES_NOT_ASSERT_THE_ORDER_LIST_IS_PROVEN_NOT_CLOSED', 'DONE_BUY', mp=dict(orders_complete=False), deals=[IN_B, OUT(1001, 501, 0.4), REM(1005, 0.1)], orders=[FILLED(501, 0.4, 0.0)],
+    complete=0, linked=1, exe=1, exo=1, execs='1001', closed=0, decision='BLOCK', state='BLOCKED', **FIN)
+row('BUY_DONE_MAPPED_ORDER_NOT_FINAL_IS_NOT_PROVEN', 'DONE_BUY', deals=[IN_B, OUT(1001, 501, 0.4), REM(1005, 0.1)], orders=[(501, ad.WHERE_ACTIVE, ad.ORD_PARTIAL, 0.4, 0.0, 7)],
+    complete=0, linked=1, exe=1, exo=1, execs='1001', closed=0, decision='BLOCK', state='BLOCKED', **FIN)
+row('BUY_DONE_EXIT_OFF_THE_VOLUME_GRID_IS_NOT_PROVEN', 'DONE_BUY', deals=[IN_B, OUT(1001, 501, 0.4), REM(1005, 0.105)], orders=[FILLED(501, 0.4, 0.0)],
+    complete=1, linked=1, exe=1, exo=1, execs='1001', closed=0, decision='BLOCK', state='BLOCKED', **FIN)
+row('BUY_DONE_BROKER_STEP_DIFFERS_FROM_THE_REQUEST_STEP_IS_NOT_PROVEN', 'DONE_BUY', deals=[IN_B, OUT(1001, 501, 0.4), REM(1005, 0.1)], orders=[FILLED(501, 0.4, 0.0)],
+    raw=dict(n_pos=0, vol_step=0.001), found=0, vcur=0.0, vstep=0.001, complete=1, linked=1, exe=1, exo=1, execs='1001', closed=0, decision='BLOCK', state='BLOCKED')
+row('BUY_DONE_THE_READ_IS_UNSTABLE_GIVES_NO_SNAPSHOT', 'DONE_BUY', stable=False, deals=[IN_B, OUT(1001, 501, 0.4), REM(1005, 0.1)], orders=[FILLED(501, 0.4, 0.0)], raw=GONE, verdict='UNKNOWN', why='READ_UNSTABLE')
+row('BUY_DONE_HISTORY_TRUNCATED_GIVES_NO_SNAPSHOT', 'DONE_BUY', deals=[IN_B, OUT(1001, 501, 0.4)], raw=dict(n_pos=0, truncated=1), verdict='UNKNOWN', why='CAPACITY')
+row('BUY_DONE_POSITION_STILL_OPEN_IS_NEVER_PROVEN_CLOSED', 'DONE_BUY', deals=[IN_B, OUT(1001, 501, 0.4), REM(1005, 0.1)], orders=[FILLED(501, 0.4, 0.0)],
+    complete=1, linked=1, exe=1, exo=1, execs='1001', closed=0, decision='CONFIRMED', state='DONE')
+row('BUY_PENDING_AND_PROVEN_CLOSED_IS_PROVEN_BUT_NOT_PROMOTED_BY_THE_RECONCILIATION', 'PEND', deals=[IN_B, OUT(1001, 501, 0.4), REM(1005, 0.1)], orders=[FILLED(501, 0.4, 0.0)],
+    complete=1, linked=1, exe=1, exo=1, execs='1001', closed=1, decision='BLOCK', state='BLOCKED', **FIN)
+row('BUY_NEEDS_RECONCILIATION_AND_PROVEN_CLOSED_IS_NOT_PROMOTED', 'REC_BUY', deals=[IN_B, OUT(1001, 501, 0.4), REM(1005, 0.1)], orders=[FILLED(501, 0.4, 0.0)],
+    complete=1, linked=1, exe=1, exo=1, execs='1001', closed=1, decision='BLOCK', state='BLOCKED', **FIN)
 # ---- real broker parameters
 row('BROKER_STEP_CHANGED_IS_PASSED_ON', deals=[IN_B, OUT(1001, 501, 0.4)], orders=[FILLED(501, 0.4, 0.0)], raw=dict(vol_step=0.001), complete=1, linked=1, exe=1, execs='1001', vstep=0.001, decision='BLOCK', state='BLOCKED')
 row('BROKER_STEP_UNREADABLE', deals=[IN_B], raw=dict(vol_step=0.0), verdict='UNKNOWN', why='SYMBOL_PARAMETERS_UNAVAILABLE')
@@ -185,6 +237,7 @@ def emit_mql():
     arr('int', 'X_EXO', [str(r['exo']) for r in ROWS])
     arr('string', 'X_EXECS', [q(r['execs']) for r in ROWS])
     arr('int', 'X_FOUND', [str(r['found']) for r in ROWS])
+    arr('int', 'X_CLOSED', [str(r['closed']) for r in ROWS])
     arr('double', 'X_VCUR', [_n(r['vcur']) for r in ROWS])
     arr('double', 'X_VSTEP', [_n(r['vstep']) for r in ROWS])
     arr('string', 'X_DECISION', [q(r['decision']) for r in ROWS])

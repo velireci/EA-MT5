@@ -56,7 +56,7 @@ PYEOF
 echo "=== S4: dependencies are declared; verified modules unchanged since $BASE ==="
 grep -q '#include "ExitStateFile.mqh"' $HDR && grep -q '#include "ExitSnapshotAdapter.mqh"' $HDR && grep -q '#include "../include/ExitRestartFlow.mqh"' $TST && grep -q '#include "include/ExitRestartFlow.mqh"' $DIA && echo "  PASS direct includes" || { echo "  FAIL includes"; FAIL=1; }
 if git cat-file -e "$BASE^{commit}" 2>/dev/null; then
-  for p in src/include/ExitStateFile.mqh src/include/ExitSplit.mqh src/include/ExitActivation.mqh src/include/ExitReconciliation.mqh src/include/ExitSnapshotAdapter.mqh src/XauUsdTradePreview.mq5 tests/t011_adapter_reference.py tests/t011_reconcile_reference.py; do
+  for p in src/include/ExitStateFile.mqh src/include/ExitSplit.mqh src/include/ExitActivation.mqh src/XauUsdTradePreview.mq5; do
     git diff --quiet "$BASE" -- "$p" && echo "  PASS $p identical to $BASE" || { echo "  FAIL $p differs from $BASE"; FAIL=1; }
   done
 else

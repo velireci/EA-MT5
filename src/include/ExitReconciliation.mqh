@@ -40,6 +40,7 @@ struct SErSnapshot
    double volume_step;
    double volume_current;
    bool executions_complete;
+   bool position_closed_proven;   // set by the adapter only when the history PROVES the position finished (never from the mere absence of the position)
    int n_exec;
    SErExec exec[ER_MAX_EXEC];
   };
@@ -77,6 +78,7 @@ void ER_SnapshotInit(SErSnapshot &s,const bool found,const ulong position_id,con
    s.volume_step=volume_step;
    s.volume_current=volume_current;
    s.executions_complete=complete;
+   s.position_closed_proven=false;
    s.n_exec=0;
    for(int i=0;i<ER_MAX_EXEC;i++)
      {
@@ -147,6 +149,8 @@ void ER_NotDone(SEaState &st,SErOutcome &o,const bool done_before,const long lin
 // empty string when the snapshot is well formed, else the reason of INVALID_INPUT
 string ER_Validate(const SErSnapshot &snap)
   {
+   if(snap.position_closed_proven && snap.position_found)
+      return("INVALID_SNAPSHOT: a position cannot be both found and proven closed");
    if(snap.position_id==0)
       return("INVALID_POSITION_ID: must be an integer > 0");
    if(snap.request_id=="")
@@ -165,6 +169,44 @@ string ER_Validate(const SErSnapshot &snap)
          return(StringFormat("INVALID_EXECUTION: volume %.10g must be finite and > 0",snap.exec[i].volume));
      }
    return("");
+  }
+
+// The ONLY answer for a position that is not open: an existing DONE (confirmations 1) whose linked executions still equal the request exactly, a complete list and a
+// position the adapter PROVED closed from the history. Changes nothing, saves nothing, produces no request. false on any doubt (the caller then keeps POSITION_MISSING -> BLOCK).
+bool ER_FinishedAfterDone(const SEaState &st,const SErSnapshot &snap,long &linked,int &dups,int &unl)
+  {
+   linked=0;
+   dups=0;
+   unl=0;
+   if(st.status!=EA_ST_DONE || st.confirmations!=1 || !snap.position_closed_proven || !snap.executions_complete)
+      return(false);
+   for(int i=0;i<snap.n_exec;i++)
+     {
+      bool dup=false;
+      for(int j=0;j<i;j++)
+         if(snap.exec[j].exec_id==snap.exec[i].exec_id)
+           {
+            if(snap.exec[j].request_id!=snap.exec[i].request_id || snap.exec[j].volume!=snap.exec[i].volume)
+               return(false);
+            dup=true;
+            break;
+           }
+      if(dup)
+        {
+         dups++;
+         continue;
+        }
+      if(snap.exec[i].request_id!=st.request_id)
+        {
+         unl++;
+         continue;
+        }
+      long k=PS_GridSteps(snap.exec[i].volume,st.volume_step);
+      if(k<0)
+         return(false);
+      linked+=k;
+     }
+   return(linked==st.request_steps);
   }
 
 // Judges the snapshot and applies the permitted transition to `st`. Returns true when the decision is CONFIRMED.
@@ -204,6 +246,16 @@ bool ER_Reconcile(SEaState &st,const SErSnapshot &snap,SErOutcome &o)
      }
    if(!snap.position_found)
      {
+      long fl=0;
+      int fd=0,fu=0;
+      if(ER_FinishedAfterDone(st,snap,fl,fd,fu))
+        {
+         ER_Out(o,ER_CONFIRMED,"ALREADY_DONE: POSITION_CLOSED_PROVEN_BY_HISTORY");
+         o.linked_steps=fl;
+         o.duplicates=fd;
+         o.unlinked=fu;
+         return(true);
+        }
       ER_Block(st,o,"POSITION_MISSING: the position is not in the snapshot; DONE needs a matching position",0,0,0);
       return(false);
      }

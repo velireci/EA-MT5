@@ -91,6 +91,25 @@ cp $HDR "$NEG/NonAscii.mqh"; printf '// caf\xc3\xa9\n' >> "$NEG/NonAscii.mqh"
 n=$(LC_ALL=C grep -c '[^ -~	]' "$NEG/NonAscii.mqh" || true)
 [ "$n" != "0" ] && echo "  PASS non-ASCII byte detected" || { echo "  FAIL non-ASCII not detected"; FAIL=1; }
 
+
+echo "=== S8: the finished-position path (Part 11) changes nothing, saves nothing, produces no request ==="
+cat > "$NEG/s8.py" <<'PYEOF'
+import re, sys
+code = re.sub(r'//[^\n]*', '', re.sub(r'(?s)/\*.*?\*/', '', open(sys.argv[1], encoding='ascii').read()))
+fn = code[code.index('bool ER_FinishedAfterDone('):code.index('bool ER_Reconcile(')]
+assert 'const SEaState &st' in fn and 'const SErSnapshot &snap' in fn
+for w in ('st.status=', 'st.confirmations=', 'st.reason=', 'st.executed_steps=', 'ER_Block', 'EA_OnQuote', 'EA_OnReport', 'File', 'Order', 'GlobalVariable', 'Sleep'):
+    assert w not in fn, w
+for need in ('st.status!=EA_ST_DONE', 'st.confirmations!=1', '!snap.position_closed_proven', '!snap.executions_complete', 'linked==st.request_steps'):
+    assert need in fn, need
+br = code[code.index('if(!snap.position_found)'):code.index('long linked=0;')]
+assert br.index('ER_FinishedAfterDone(') < br.index('ER_Block(')
+assert 'o.changed=true' not in br.split('ER_Block(')[0]
+assert 'position_closed_proven=false' in code and 'INVALID_SNAPSHOT: a position cannot be both found and proven closed' in code
+PYEOF
+python3 -I "$NEG/s8.py" $HDR && echo "  PASS ER_FinishedAfterDone is read-only and its branch answers ALREADY_DONE without a state change" || { echo "  FAIL"; FAIL=1; }
+cp $HDR "$NEG/S8a.mqh"; sed -i 's/   if(st.status!=EA_ST_DONE || st.confirmations!=1 || /   if(st.confirmations!=1 || /' "$NEG/S8a.mqh"
+python3 -I "$NEG/s8.py" "$NEG/S8a.mqh" 2>/dev/null && { echo "  FAIL a finished path without the DONE test not detected"; FAIL=1; } || echo "  PASS a finished path that does not require DONE is detected"
 echo
 [ $FAIL -eq 0 ] && echo "T011 RECONCILE STATIC CHECKS: ALL PASS (static only; MetaEditor compile and MT5 run UNVERIFIED)" || echo "T011 RECONCILE STATIC CHECKS: FAILURES"
 exit $FAIL

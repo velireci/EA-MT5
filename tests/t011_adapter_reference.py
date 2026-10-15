@@ -24,6 +24,9 @@ inconsistent identity, wrong direction/symbol, conflicting map). Nothing is trun
 executions is UNKNOWN.
 ACCOUNT MODE: HEDGING is supported (positions are separate, selected by identifier). NETTING and EXCHANGE are NOT supported: all trades of
 the symbol share one position there, so our fills cannot be separated from other trades -> BLOCK. Any other value -> BLOCK.
+position_closed_proven (Part 11) is True ONLY when the position is not open, executions_complete holds, every deal of the identifier is a supported IN/OUT
+(INOUT, OUT_BY or unknown kinds, an IN deal of the other side, a non-positive or off-grid volume prove nothing), the broker step equals the request step, the opening
+volume equals the STORED initial volume and the total exit volume (unique deal tickets, all exit deals, mapped or not) equals the opening volume, in volume steps.
 executions_complete is True ONLY when ALL of these are proven (each is listed in `proof` when missing):
   1 the executor asserts the order tickets are complete (map.orders_complete);
   2 every mapped order is found in the HISTORY in a final state (FILLED, CANCELED, REJECTED, EXPIRED), none is still active or missing;
@@ -178,6 +181,8 @@ def build(state, mp, raw, stable):
     # ---- deals: de-duplicated by ticket, only exit deals of a mapped order count
     seen = {}
     linked, dup, ex_entry, ex_other, has_entry_in = [], 0, 0, 0, False
+    in_steps, out_steps, unsupported = 0, 0, False        # for the closed-position proof only (unique deals of THIS position identifier)
+    want_in = DEAL_BUY if state.direction == 1 else DEAL_SELL
     for d in raw.deals:
         if d.position_id != mp.position_id:
             return _unknown('READ_INCONSISTENT: deal %d belongs to position %d, not %d' % (d.ticket, d.position_id, mp.position_id))
@@ -190,13 +195,24 @@ def build(state, mp, raw, stable):
         if d.entry == ENTRY_IN:
             has_entry_in = True
             ex_entry += 1
+            k = t006._grid_steps(d.volume, raw.vol_step) if t006._num(d.volume) and d.volume > 0 else -1
+            if d.type != want_in or k <= 0:
+                unsupported = True
+            else:
+                in_steps += k
             continue
         if d.entry != ENTRY_OUT:
             ex_entry += 1
+            unsupported = True                                  # INOUT, OUT_BY or an unknown kind never proves a close
             continue
         wrong = DEAL_SELL if state.direction == 1 else DEAL_BUY
         if d.type not in (DEAL_BUY, DEAL_SELL) or d.type != wrong:
             return _block('DEAL_DIRECTION_MISMATCH: exit deal %d has type %d against a position with direction %d' % (d.ticket, d.type, state.direction))
+        k_out = t006._grid_steps(d.volume, raw.vol_step) if t006._num(d.volume) and d.volume > 0 else -1
+        if k_out <= 0:
+            unsupported = True
+        else:
+            out_steps += k_out
         if d.order not in mp.orders:
             ex_other += 1
             continue
@@ -234,6 +250,10 @@ def build(state, mp, raw, stable):
     if not has_entry_in:
         missing.append('the opening deal of the position is not in the history list')
     complete = not missing
+    # FINISHED POSITION proof (never from the mere absence of the position): not open, complete evidence, only supported deals, the same step as the request,
+    # opening volume == the stored initial volume and the total exit volume == the opening volume, all in volume steps
+    closed = (not found and complete and not unsupported and raw.vol_step == state.volume_step and in_steps > 0 and in_steps == state.initial_steps
+              and out_steps == in_steps)
     snap = rec.Snapshot(found, mp.position_id, state.request_id, raw.vol_step, raw.pos_volume if found else 0.0,
-                        [rec.Exec(str(d.ticket), state.request_id, d.volume) for d in linked], complete)
+                        [rec.Exec(str(d.ticket), state.request_id, d.volume) for d in linked], complete, closed)
     return Result(READY, '', snap, complete, '; '.join(missing) if missing else 'complete: all six proofs hold', len(linked), dup, ex_entry, ex_other)
