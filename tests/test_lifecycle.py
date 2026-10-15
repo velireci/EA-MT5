@@ -1181,6 +1181,14 @@ class ManagedFlow(unittest.TestCase):
 
 
 class Sources(unittest.TestCase):
+    def test_regagain_uses_scripted_absence_instead_of_live_positions(self):
+        with open(os.path.join(ROOT, 'src', 'tests', 'EntryLifecycleTest.mq5'), encoding='ascii') as f:
+            text = f.read()
+        helper = text[text.index('int RegAgain('):text.index('void Scenario_auto_registration_existing_record_needs_the_full_base')]
+        self.assertIn('CTestRegistrar g;', helper)
+        self.assertIn('g.closed=false;', helper)
+        self.assertNotIn('CMhRegistrar g;', helper)
+
     def test_mql_scenarios_pinned(self):
         with open(os.path.join(ROOT, 'src', 'tests', 'EntryLifecycleTest.mq5'), encoding='ascii') as f:
             t = f.read()
@@ -1287,4 +1295,5 @@ class Mutants(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
 

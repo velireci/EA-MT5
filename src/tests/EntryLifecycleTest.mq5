@@ -1074,7 +1074,8 @@ void Scenario_auto_registration_acknowledge_and_instances(void)
 // a fresh registrar over the SAME T011 files, asked directly about the already registered fill
 int RegAgain(CRegWorld &r,const long magic,const string phrase,string &detail)
   {
-   CMhRegistrar g;
+   CTestRegistrar g;
+   g.closed=false; // unreadable fixture is not proof of closure; never scan real positions here
    g.entry_store=GetPointer(r.w.s);
    g.exit_tr=GetPointer(r.x);
    g.magic=magic;
@@ -1515,5 +1516,6 @@ void OnStart()
    Scenario_managed_slots_released_and_capacity();
    PrintFormat("T019 ENTRY LIFECYCLE TEST finished: %d passed, %d failed",g_pass,g_fail);
   }
+
 
 
