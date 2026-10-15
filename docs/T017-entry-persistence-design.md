@@ -1,6 +1,6 @@
 # T017 proposal: persistent records for FAKE entry execution
 
-Status: owner approved; implemented on base 761bd8e. FAKE transport remains fixed. Codex verification below; owner MT5 execution pending. No trade or merge.
+Status: owner approved; implemented on base 761bd8e. FAKE transport remains fixed. Codex verification below; owner-relayed MT5 EntryPersistenceTest on e2d20db: 99 passed / 0 failed (2026-10-15 20:38:57.500, XAUUSD.fx M15). No trade or merge.
 
 ## Goal
 Keep the entry executor's existing per-signal records across EA recreation, without importing real trading code into the FAKE orchestrator. A repeated signal must remain consumed even if the orchestrator baseline is deliberately bypassed in a regression test.
@@ -51,5 +51,5 @@ The store extraction preserves the existing interface. Namespace separation is m
 - Protected-file pins exclude EntryTransportReal where the compatible extraction is intentional. The gate's stale SetupPlanBridge pin is also removed because that API was deliberately refactored in fe53c06. New exact-body checks protect the extracted store/transport behavior.
 - Independent review found no actionable functional issue. The stale EA comment about memory-only records was corrected.
 
-## Owner action
-Run EntryPersistenceTest in MT5 and send the final T017 line. It writes and removes only its exact SELFTEST files and uses fake transport; no real orders or positions are used. This run verifies terminal file/lock behavior. It is not a full MT5 restart of the orchestrator EA, nor complete recovery of baseline/halt/fake-order state.
+## Owner evidence
+Owner-relayed log: 2026.10.15 20:38:57.500, EntryPersistenceTest-e2d20db (XAUUSD.fx,M15): T017 ENTRY PERSISTENCE TEST finished: 99 passed, 0 failed. Codex did not execute this MT5 run. It writes and removes only its exact SELFTEST files and uses fake transport; no real orders or positions are used. This run verifies terminal file/lock behavior. It is not a full MT5 restart of the orchestrator EA, nor complete recovery of baseline/halt/fake-order state.

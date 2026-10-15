@@ -211,7 +211,7 @@ Mbetet: orari nuk dërgon ende anulime ose mbyllje; persistence/catchup/lajmet t
 - [x] T016: orkestruesi FAKE i korrigjuar: rikuperimi i të dhënave rinis baseline, M4ContextEqual krahason kontekstin e plotë, sizing-u përdor sondën e brokerit pas gjeometrisë. Codex: 128 Python OK, pesë kompilime 0 errors / 0 warnings, kontrollet statike me 23 kontrolle negative kalojnë; kontrollet e bazës Git u kapërcyen në eksportin lokal.
 - [x] T016: pronari MT5 në fe53c06, XAUUSD.fx M15: EntryOrchestratorTest 97/0 (19:05:58), SetupPlanBridgeTest 77/0 (19:06:09), 15.10.2026. Evidencë e përcjellë; FAKE vetëm, pa provë live të EA-së dhe pa integrim T011.
 - [x] T017: ruajtje në disk për rekordet FAKE, namespace i veçuar dhe kyçje; transporti mbetet FAKE. Codex: 137 Python OK, pesë kompilime 0/0, kontrolle statike me 9 kontrolle negative të reja.
-- [ ] T017: pronari ekzekuton EntryPersistenceTest në MT5. Nuk pretendohet rikuperim i plotë i orkestruesit ose ekzekutim real.
+- [x] T017: pronari MT5 në e2d20db, XAUUSD.fx M15, 15.10.2026 20:38:57.500: EntryPersistenceTest 99 passed / 0 failed. Evidencë e përcjellë. Nuk pretendohet rikuperim i plotë i orkestruesit ose ekzekutim real.
 - [x] T014 (e përcjellë): Codex 0/0 + 27 Python, MT5 SetupPlanBridgeTest 77/0
 
 ## T012 — kufijtë ditorë

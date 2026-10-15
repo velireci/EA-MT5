@@ -48,4 +48,4 @@ It is not a diagnostic panel. It draws nothing; it logs one status line and sets
 - Owner-relayed MT5 on fe53c06, XAUUSD.fx M15: EntryOrchestratorTest 97/0 at 19:05:58 and SetupPlanBridgeTest 77/0 at 19:06:09. These are owner runs, not Codex runs. No EA was attached and no trade was made by Codex.
 
 ## Next action
-Revised MT5 tests have passed per the owner logs. T017 is implemented; owner MT5 EntryPersistenceTest is pending (see docs/T017-entry-persistence-design.md). The EA remains FAKE only. No real entry transport or T011 management integration was added. T017 adds isolated persistence of FAKE executor records only.
+Revised MT5 tests have passed per the owner logs. T017 is implemented; owner-relayed MT5 EntryPersistenceTest on e2d20db passed 99/0 (see docs/T017-entry-persistence-design.md). The EA remains FAKE only. No real entry transport or T011 management integration was added. T017 adds isolated persistence of FAKE executor records only.
