@@ -106,6 +106,39 @@ class World:
         return o2, l2, self.step(o2, l2)
 
 
+class TimerMarketRetry(unittest.TestCase):
+    def test_cached_feed_quote_recovery_keeps_history_blocked(self):
+        for d in (1, -1):
+            w = World(d)
+            before, level = observer_n(d, 2)
+            w.step(before, level)
+            after, level = observer_n(d, 3)
+            w.mk.q = replace(w.mk.q, time=w.tr.now - 31)
+            self.assertEqual(w.step(after, level).status, 'MARKET_NOT_READY')
+            w.mk.q = replace(w.mk.q, time=w.tr.now)
+            recovered = w.step(after, level)
+            self.assertEqual(recovered.status, 'NO_PLAN')
+            self.assertTrue(recovered.reason.startswith('HISTORICAL'), recovered.reason)
+            self.assertEqual(w.o.baseline, after.last_asof)
+            w.untouched(self)
+
+    def test_cached_feed_gate_recheck_sends_once_and_not_on_feed_failure(self):
+        for d in (1, -1):
+            w = World(d)
+            before, level = observer_n(d, 2)
+            w.step(before, level)
+            after, level = observer_n(d, 3)
+            w.mk.spread = tp.SPREAD_BLOCKED
+            self.assertEqual(w.step(after, level).status, 'GATE_BLOCKED')
+            self.assertEqual(w.tr.sends, 0)
+            w.mk.spread = tp.SPREAD_CLEAR
+            self.assertTrue(w.step(after, level).request)
+            for _ in range(3):
+                self.assertEqual(w.step(after, level).status, 'ALREADY_HANDLED')
+            self.assertEqual(w.tr.sends, 1)
+            self.assertEqual(w.step(after, level, feed_ok=False).status, 'FEED_NOT_OK')
+            self.assertEqual(w.tr.sends, 1)
+
 class Chain(unittest.TestCase):
     def test_buy_and_sell_reach_one_fake_request_equal_to_the_plan(self):
         for d in (1, -1):
@@ -374,7 +407,7 @@ class RiskFromBalance(unittest.TestCase):
 
 SCENARIOS = ['buy_to_fake_request', 'sell_to_fake_request', 'replay_baseline_no_signal', 'restart_no_double', 'defect_rebases', 'context_change_rebases', 'unset_inputs_block',
              'market_missing_blocks', 'gate_blocks_no_request', 'probe_uses_effective_tick', 'halt_after_uncertainty',
-             'market_recovery_rebases', 'context_fields_rebase', 'probe_independent_of_property', 'reservation_before_every_send', 'risk_budget_from_current_balance', 'risk_base_failure_blocks']
+             'market_recovery_rebases', 'context_fields_rebase', 'probe_independent_of_property', 'reservation_before_every_send', 'risk_budget_from_current_balance', 'risk_base_failure_blocks', 'cached_feed_market_recheck']
 
 
 class Reservation(unittest.TestCase):
@@ -467,6 +500,17 @@ class ReviewRegressions(unittest.TestCase):
 
 
 class Sources(unittest.TestCase):
+    def test_ea_timer_rechecks_market_even_without_a_feed_rebuild(self):
+        ea = self.strip(_read('src', 'XauUsdEntryOrchestrator.mq5'))
+        poll = ea[ea.index('void Poll()'):ea.index('int OnInit()')]
+        before_step = poll[:poll.index('g_orch.Step(')]
+        self.assertIn('g_feed.Poll(feed_ok);', before_step)
+        self.assertNotIn('return;', before_step)
+        self.assertEqual(poll.count('g_feed.Poll('), 1)
+        self.assertEqual(poll.count('g_orch.Step('), 1)
+        feed = self.strip(_read('src', 'include', 'EntryOrchestratorFeed.mqh'))
+        self.assertIn('if(!M4TimelineNeedsBuild(false,built,at,cut,hc,mc)) {feed_ok=built; return(false);}', feed)
+
     def strip(self, t):
         return re.sub(r'//[^\n]*', '', re.sub(r'(?s)/\*.*?\*/', '', t))
 
@@ -542,3 +586,4 @@ class Mutants(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+

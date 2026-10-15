@@ -74,3 +74,10 @@ Limits: the entry transport stays FAKE, so no real position exists to register; 
 ### Demo risk policy and the demo preset (EA v1.08; compile and MT5 UNVERIFIED)
 - `InpRiskSource` = AMOUNT (default; `InpRiskBudget`, -1 blocks) or DEMO_1PCT_CURRENT_BALANCE: the budget is 1% of `ACCOUNT_BALANCE` read at every step on a demo account. Any unreadable / invalid / stale / non-demo balance gives `RISK_BASE_NOT_READY` (the baseline is rebased) and there is no fallback. The budget sizes the plan and is the budget of the loss check (same value, same instant). It is a provisional demo choice; D2 (base, costs) stays a client question before live. The daily-limit base is not touched.
 - `src/presets/XauUsdEntryOrchestrator_demo_fake.set`: complete, labelled, FAKE / READ_ONLY. `python3 tests/preset_check.py` lists what would still block, offline.
+
+
+## Timer market re-evaluation (Codex correction on e4cde2e)
+
+The closed H4/M15 feed still rebuilds only when its existing timeline policy requires it. The EA timer now evaluates the orchestrator on every Poll, even when the feed reused its cached state. A feed failure still passes feed_ok=false and blocks; quote recovery still resets the baseline and cannot revive an old candidate. Gate recovery may reconsider an unconsumed eligible signal; executor records continue to prevent duplicate requests. Unchanged exposure messages are logged only once per change.
+
+This correction does not repair or relax stale broker quotes. QUOTE_NOT_READY_OR_STALE can remain valid when the market data is unavailable, invalid or older than the configured limit. No freshness limit was enlarged. Owner rerun: only EntryOrchestratorTest and the corrected EA using the existing FAKE/READ_ONLY demo preset; no new trade or lifecycle suite rerun is needed for this EA wiring correction.

@@ -70,6 +70,11 @@ for name, t in (('EA', ea), ('feed', fd)):
         assert w not in t, name + ': ' + w
 for w in ('EntryTransportReal', 'ExitTransportReal', 'CEnRealTransport', 'CEnRealStore', 'CRealTransport'):
     assert w not in fd, 'feed: ' + w
+poll = ea[ea.index('void Poll()'):ea.index('int OnInit()')]
+pre_step = poll[:poll.index('g_orch.Step(')]
+assert 'g_feed.Poll(feed_ok);' in pre_step and 'return;' not in pre_step, 'timer must recheck the market with cached feed'
+assert poll.count('g_feed.Poll(') == 1 and poll.count('g_orch.Step(') == 1, 'one feed refresh and market evaluation per poll'
+assert 'if(exposure!=g_last_exposure)' in poll, 'unchanged exposure logs are suppressed'
 assert 'DBS_Load(' in fd and fd.count('DBS_Load(') == 1, 'the store is read with LOAD only'
 assert 'class CEoTerminalFake : public CEnFakeTransport' in ea, 'fake transport class'
 assert ea.count('CEoTerminalFake g_tr;') == 1 and 'g_trp=GetPointer(g_tr);' in ea, 'the FAKE transport is the default'
@@ -191,5 +196,9 @@ expect_assert "$NEG/o2.py" "$NEG/S4.mqh" "a stale balance accepted" "fresh"
 mut S5.mqh $EA 's/^input ENUM_EO_RISK_SOURCE InpRiskSource=EOI_RISK_AMOUNT;/input ENUM_EO_RISK_SOURCE InpRiskSource=EOI_RISK_DEMO_1PCT_CURRENT_BALANCE;/'
 expect_assert "$NEG/o3.py" "$NEG/S5.mqh $FEED" "the demo balance policy on by default" "default not UNSET"
 
+mut S6.mqh $EA 's/   g_feed.Poll(feed_ok);/   if(!g_feed.Poll(feed_ok)) return;/'
+expect_assert "$NEG/o3.py" "$NEG/S6.mqh $FEED" "a stale quote waiting for the next closed bar" "timer must recheck"
+
 [ $FAIL -eq 0 ] && echo "ENTRY ORCHESTRATOR STATIC CHECKS: ALL PASS (static only; MetaEditor compile and MT5 run UNVERIFIED)" || echo "ENTRY ORCHESTRATOR STATIC CHECKS: FAILURES"
 exit $FAIL
+

@@ -9,7 +9,7 @@
 //   A filled order is registered with the existing T011 executor and then managed by the T011 driver inside this EA (OnTick = the 2R level, OnTimer = reconcile only) only when InpManagementRegistration is true;
 //   the registered fill stays in the lifecycle index until the T011 record is DONE or the position is proven closed (that index is the restart memory). Not proof of broker execution. UNVERIFIED: not compiled or run.
 #property strict
-#property version "1.08"
+#property version "1.09"
 #include "include/EntryOrchestratorFeed.mqh"
 #include "include/EntryTransportFake.mqh"
 #include "include/ExposureReaderReal.mqh"
@@ -187,6 +187,7 @@ CLcGuard g_guard;                  // the gate's pre-send hook + the lifecycle s
 CEnFakeFileStore g_lockstore;      // dedicated store for the index lock: the file store above holds ONE lock at a time (the executor's per-signal lock)
 ulong g_lc_filters_ms=0;
 string g_last="";
+string g_last_exposure="";
 
 void Status(const string text)
   {
@@ -359,7 +360,7 @@ void Poll()
   {
    Lifecycle();
    bool feed_ok=false;
-   if(!g_feed.Poll(feed_ok)) return;                // nothing new on the closed bars
+   g_feed.Poll(feed_ok); // rebuild closed bars only when needed; cached feed still gets fresh market/gate checks on every timer
    if(InpExposureSource==EOI_EXPOSURE_ACCOUNT_READ)
      {
       SExpResult ex;
@@ -367,8 +368,9 @@ void Poll()
       EX_Compute(InpEaMagic,_Symbol,(int)InpPendingPolicy,(int)InpPendingRiskPolicy,GetPointer(port),ex);      // 1 = COUNT / INCLUDE, 2 = IGNORE / EXCLUDE, 0 = UNSET
       g_cfg.open_positions=EX_GatePositions(ex);
       g_cfg.existing_risk=EX_GateRisk(ex);
-      PrintFormat("T018 EXPOSURE source=ACCOUNT_READ (read-only) ok=%d reason=%s owned+reserved=%I64d pending=%I64d foreign_positions=%I64d foreign_pending=%I64d risk_known=%d risk=%.2f %s",
+      string exposure=StringFormat("T018 EXPOSURE source=ACCOUNT_READ (read-only) ok=%d reason=%s owned+reserved=%I64d pending=%I64d foreign_positions=%I64d foreign_pending=%I64d risk_known=%d risk=%.2f %s",
                   (int)ex.ok,ex.reason,ex.open_positions,ex.pending,ex.foreign_positions,ex.foreign_pending,(int)ex.risk_known,ex.existing_risk,ex.risk_reason);
+      if(exposure!=g_last_exposure) {g_last_exposure=exposure; Print(exposure);}
      }
    SEoOutcome out;
    g_orch.Step(g_cfg,GetPointer(g_market),feed_ok,g_feed.st,g_feed.f,g_feed.broken,g_feed.cut,g_trp,g_storep,out,GetPointer(g_guard));      // the guard indexes the signal BEFORE the executor can send
@@ -419,3 +421,4 @@ void OnTick()
    int sent=g_mgr.OnQuote(t.bid,t.ask);
    if(sent>0) PrintFormat("T011 MANAGEMENT: %d closing request(s) sent at the 2R level; the timer reconciles them",sent);
   }
+

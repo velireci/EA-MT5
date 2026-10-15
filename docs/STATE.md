@@ -134,3 +134,12 @@ Updated: 2026-10-15 (Europe/Tirane). Snapshot, not a transcript.
 See EA_INTEGRATION_PLAN.md, 'Marrëveshja e pronarit: DEMO kundrejt LIVE'. Temporary documented demo choices do not constitute client approval for live. For demo, 1% of current balance is accepted provisionally; D2 (base and costs) stays open for client confirmation before live. No code/preset/transport change here; the delivered FAKE work preset still blocks on risk_budget. The remaining D1–D13 questions stay in the existing single list (D9 already technical/resolved); recommendations are not blanket-approved.
 
 Owner-relayed MT5 evidence (not assistant execution): EntryLifecycleTest-d5f7460, XAUUSD.fx M15, 23:13:25: 231 passed / 0 failed. Orchestrator 6eab15d started FAKE/READ_ONLY; 23:20:19 CONFIG_UNSET risk_budget, virtual requests 0, lifecycle open 0. No real-trading proof.
+
+
+## Codex timer correction on e4cde2e (2026-10-15)
+
+Owner-relayed MT5 evidence: EntryOrchestratorTest-e4cde2e 129/0 at 23:40:33; EntryLifecycleTest-e4cde2e 231/0 at 23:42:06. EA started FAKE/READ_ONLY at 23:44:42, exposure ACCOUNT_READ OK with no positions/orders and known risk 0, then MARKET_NOT_READY / QUOTE_NOT_READY_OR_STALE. This does not establish whether the broker quote itself was stale or unreadable.
+
+Confirmed wiring defect: EA Poll returned whenever the closed-bar feed had no rebuild, so market/quote/gate recovery was not re-evaluated until another feed build. Fix: always run the existing orchestrator Step after feed Poll, passing feed_ok unchanged; the feed still decides when closed bars need rebuilding. Existing baseline/recovery rules, per-signal persistence and duplicate prevention are unchanged. Unchanged exposure messages are suppressed to avoid logging them every timer poll. No new input, transport, policy, module or real order.
+
+Regressions: source check observed failing before the fix; BUY/SELL cached-feed quote recovery keeps historical outage candidates blocked; a cleared gate can proceed on the same closed-bar snapshot once; repeats cannot send twice; bad feed still blocks. MQL scenario cached_feed_market_recheck mirrors these cases. Codex focused Python 77 passed; orchestrator static checks and negative control passed (Git-base comparisons skipped in this source export). Codex compiled EntryOrchestratorTest and the corrected EA: each 0 errors / 0 warnings. Owner MT5 rerun of the correction remains pending; earlier results are not a run of the corrected EA.

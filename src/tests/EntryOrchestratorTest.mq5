@@ -658,6 +658,37 @@ void Scenario_risk_base_failure_blocks(void)
         }
   }
 
+void Scenario_cached_feed_market_recheck(void)
+  {
+   for(int dir=-1;dir<=1;dir+=2)
+     {
+      CW w;
+      w.Init(dir);
+      CObs before,after;
+      before.Make(dir,2); after.Make(dir,3);
+      w.StepObs(before);
+      w.mk.q.time=w.t.now-31;
+      w.StepObs(after);
+      bool stale=(w.out.status=="MARKET_NOT_READY" && w.Untouched());
+      w.mk.q.time=w.t.now;
+      w.StepObs(after);
+      Check(stale && w.out.status=="NO_PLAN" && Starts(w.out.reason,"HISTORICAL") && w.o.baseline==after.Cut() && w.Untouched(),StringFormat("dir %d: fresh quote rechecks cached bars without reviving an outage candidate",dir));
+      CW g;
+      g.Init(dir);
+      g.StepObs(before);
+      g.mk.spread=TP_SPREAD_BLOCKED;
+      g.StepObs(after);
+      bool blocked=(g.out.status=="GATE_BLOCKED" && g.Untouched());
+      g.mk.spread=TP_SPREAD_CLEAR;
+      g.StepObs(after);
+      bool placed=(g.out.request && g.t.sends==1);
+      for(int i=0;i<3;i++) g.StepObs(after);
+      Check(blocked && placed && g.out.status=="ALREADY_HANDLED" && g.t.sends==1,StringFormat("dir %d: a cleared gate on cached bars sends once, repeated timer checks never duplicate",dir));
+      g.StepObs(after,false);
+      Check(g.out.status=="FEED_NOT_OK" && g.t.sends==1,StringFormat("dir %d: failed feed blocks cached state",dir));
+     }
+  }
+
 void OnStart()
   {
    Print("T016 ENTRY ORCHESTRATOR TEST: fake transport, fake store and a scripted market; no file, no terminal read, no order, no trade.");
@@ -678,6 +709,8 @@ void OnStart()
    Scenario_reservation_before_every_send();
    Scenario_risk_budget_from_current_balance();
    Scenario_risk_base_failure_blocks();
+   Scenario_cached_feed_market_recheck();
    TestOffsetValidation();
    PrintFormat("T016 ENTRY ORCHESTRATOR TEST finished: %d passed, %d failed",g_pass,g_fail);
   }
+
