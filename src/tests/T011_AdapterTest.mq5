@@ -184,6 +184,19 @@ void TestConstants(void)
          XA_ORD_FILLED==(int)ORDER_STATE_FILLED && XA_ORD_REJECTED==(int)ORDER_STATE_REJECTED && XA_ORD_EXPIRED==(int)ORDER_STATE_EXPIRED,"order state mirrors equal the terminal constants");
    Check(XA_MARGIN_NETTING==(int)ACCOUNT_MARGIN_MODE_RETAIL_NETTING && XA_MARGIN_EXCHANGE==(int)ACCOUNT_MARGIN_MODE_EXCHANGE && XA_MARGIN_HEDGING==(int)ACCOUNT_MARGIN_MODE_RETAIL_HEDGING,"margin mode mirrors equal the terminal constants");
   }
+void TestModeRead(void)
+  {
+   int mode;
+   bool ok;
+   XA_ModeRead(0,0,mode,ok);
+   Check(ok && mode==XA_MARGIN_NETTING,"margin mode 0 (netting) with no error is a VALID read, not a failure");
+   XA_ModeRead(2,0,mode,ok);
+   Check(ok && mode==XA_MARGIN_HEDGING,"margin mode 2 (hedging) with no error is valid");
+   XA_ModeRead(2,4001,mode,ok);
+   Check(!ok && mode==-1,"an error code makes the read fail whatever the value");
+   XA_ModeRead(0,4001,mode,ok);
+   Check(!ok && mode==-1,"an error code with value 0 still fails");
+  }
 void TestStability(void)
   {
    SXaRaw a,b;
@@ -206,6 +219,7 @@ void OnStart()
   {
    RunRows();
    TestConstants();
+   TestModeRead();
    TestStability();
    PrintFormat("T011 ADAPTER TEST finished: %d passed, %d failed",g_pass,g_fail);
   }

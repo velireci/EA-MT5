@@ -124,6 +124,12 @@ def _block(reason):
     return Result(BLOCK, reason)
 
 
+def mode_read(value, error_code):
+    """Mirror of XA_ModeRead: ok only when the terminal reported no error for this read; the value (0 = netting included) is not a failure signal."""
+    ok = error_code == 0
+    return (int(value) if ok else -1), ok
+
+
 def raw_equal(a, b):
     """Two reads are the same read (stability)."""
     return a == b

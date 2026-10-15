@@ -95,6 +95,17 @@ class Scenarios(unittest.TestCase):
             self.assertFalse(res.complete, name)
             self.assertIn(res.proof.split(';')[0][:3], res.proof)
 
+    def test_margin_mode_read_zero_is_a_valid_value_and_netting_blocks(self):
+        self.assertEqual(ad.mode_read(0, 0), (0, True))                 # retail netting: valid value, NOT a failure
+        self.assertEqual(ad.mode_read(2, 0), (2, True))
+        self.assertEqual(ad.mode_read(2, 4001), (-1, False))            # an error code, whatever the value
+        self.assertEqual(ad.mode_read(0, 4001), (-1, False))
+        row = next(r for r in fx.ROWS if r['scn'] == 'NETTING_ACCOUNT_BLOCKS')
+        self.assertEqual((row['raw']['margin_mode'], row['raw']['margin_ok'], row['verdict'], row['why']), (0, 1, 'BLOCK', 'UNSUPPORTED_ACCOUNT_MODE'))
+        hdr = _read('src', 'include', 'ExitSnapshotAdapter.mqh')
+        self.assertIn('AccountInfoInteger(ACCOUNT_MARGIN_MODE);', hdr)
+        self.assertNotIn('AccountInfoInteger(ACCOUNT_MARGIN_MODE,', hdr)
+
     def test_unstable_read_is_detected_by_comparing_two_reads(self):
         base = next(r for r in fx.ROWS if r['scn'] == 'BUY_FULL_ONE_DEAL_COMPLETE')
         _, a = make(base)

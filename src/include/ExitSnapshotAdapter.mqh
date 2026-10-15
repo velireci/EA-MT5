@@ -226,6 +226,13 @@ bool XA_SameDeal(const SXaRawDeal &a,const SXaRawDeal &b)
    return(a.ticket==b.ticket && a.order==b.order && a.position_id==b.position_id && a.entry==b.entry && a.type==b.type && a.volume==b.volume);
   }
 
+// The margin mode read: ok only when the terminal reported no error for THIS read; the value (0 = netting included) is never a failure signal.
+void XA_ModeRead(const long value,const int error_code,int &mode,bool &ok)
+  {
+   ok=(error_code==0);
+   mode=(ok ? (int)value : -1);
+  }
+
 bool XA_FinalOrderState(const int s)
   {
    return(s==XA_ORD_CANCELED || s==XA_ORD_FILLED || s==XA_ORD_REJECTED || s==XA_ORD_EXPIRED);
@@ -474,9 +481,11 @@ void XA_ReadRaw(const SXaMap &mp,SXaRaw &raw)
    raw.vol_min=v;
    raw.symbol_ok=raw.symbol_ok && SymbolInfoDouble(mp.symbol,SYMBOL_VOLUME_MAX,v);
    raw.vol_max=v;
-   long mm=0;
-   raw.margin_ok=AccountInfoInteger(ACCOUNT_MARGIN_MODE,mm);
-   raw.margin_mode=(int)mm;
+   // AccountInfoInteger(ACCOUNT_MARGIN_MODE) RETURNS the value (there is no by-reference overload). The error state is isolated for this
+   // read alone, and the value is judged separately in XA_Build: 0 is a VALID value (retail netting), which the adapter blocks as unsupported.
+   ResetLastError();
+   long mm=AccountInfoInteger(ACCOUNT_MARGIN_MODE);
+   XA_ModeRead(mm,GetLastError(),raw.margin_mode,raw.margin_ok);
    // open positions, matched by IDENTIFIER (the ticket may differ)
    int total=PositionsTotal();
    for(int i=0;i<total;i++)

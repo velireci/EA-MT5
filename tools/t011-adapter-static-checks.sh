@@ -54,6 +54,37 @@ i=t.index('void XA_ReadRaw('); j=t.index('bool XA_ReadAndBuild(')
 print(t[i:j])"; strip $DIAG) | grep -oE "\b(Position|Order|History|Symbol|Account|Terminal|MQL|Time|Copy|Chart|Object|Global|File|Event)[A-Za-z0-9_]*\s*\(" | sed 's/\s*($//' | sort -u | grep -vxE "($READS)" | grep -vE "^(PositionsTotal|OrderSelect)$" || true)
 if [ -z "$bad" ]; then echo "  PASS every terminal call of the reader and the diagnostic is on the read-only whitelist"; else echo "$bad" | sed 's/^/  FAIL not on the whitelist: /'; FAIL=1; fi
 
+echo "=== S3b: argument counts of the terminal calls (a wrong overload such as AccountInfoInteger(prop, long&) does not exist) ==="
+arity() { # arity FILE... : counts the top-level arguments of every whitelisted terminal call
+  for f in "$@"; do strip $f; done | python3 -I -c "
+import re, sys
+text = sys.stdin.read()
+# allowed argument counts per call; AccountInfoInteger has ONE form only (it returns the value)
+ALLOWED = {'PositionsTotal': (0,), 'PositionGetTicket': (1,), 'PositionGetInteger': (1, 2), 'PositionGetDouble': (1, 2), 'PositionGetString': (1, 2),
+           'OrderSelect': (1,), 'HistorySelectByPosition': (1,), 'HistoryDealsTotal': (0,), 'HistoryDealGetTicket': (1,),
+           'HistoryDealGetInteger': (2, 3), 'HistoryDealGetDouble': (2, 3), 'HistoryOrderSelect': (1,), 'HistoryOrderGetInteger': (2, 3),
+           'HistoryOrderGetDouble': (2, 3), 'OrderGetInteger': (1, 2), 'SymbolInfoDouble': (2, 3), 'AccountInfoInteger': (1,),
+           'GetLastError': (0,), 'ResetLastError': (0,)}
+bad = 0
+for m in re.finditer(r'\b(' + '|'.join(ALLOWED) + r')\s*\(', text):
+    depth, i, n, any_arg = 1, m.end(), 0, False
+    while i < len(text) and depth:
+        c = text[i]
+        if c in '([': depth += 1
+        elif c in ')]': depth -= 1
+        elif c == ',' and depth == 1: n += 1
+        elif not c.isspace() and depth == 1: any_arg = True
+        i += 1
+    args = (n + 1) if (any_arg or n) else 0
+    if args not in ALLOWED[m.group(1)]:
+        print('%s called with %d argument(s), allowed %s' % (m.group(1), args, ALLOWED[m.group(1)]))
+        bad = 1
+sys.exit(bad)
+"
+}
+out=$(arity $HDR $DIAG) && echo "  PASS every terminal call in the adapter and the diagnostic has an existing argument count" || { echo "$out" | sed 's/^/  FAIL /'; FAIL=1; }
+grep -qF 'AccountInfoInteger(ACCOUNT_MARGIN_MODE);' $HDR && echo "  PASS the margin mode is the RETURNED value of AccountInfoInteger" || { echo "  FAIL margin mode read"; FAIL=1; }
+
 echo "=== S4: identity rules in the header ==="
 for pat in 'POSITION_IDENTIFIER' 'DEAL_POSITION_ID' 'DEAL_ORDER' 'DEAL_ENTRY' 'ORDER_POSITION_ID' 'HistorySelectByPosition' 'XA_MARGIN_HEDGING' 'UNSUPPORTED_ACCOUNT_MODE' 'READ_UNSTABLE' 'CAPACITY' 'NO_ORDER_TICKETS' 'XA_RawEqual(' 'PS_GridSteps(' 'raw.vol_step'; do
   grep -qF -- "$pat" $HDR && echo "  PASS header has: $pat" || { echo "  FAIL header lacks: $pat"; FAIL=1; }
@@ -89,13 +120,8 @@ for f in $NEWFILES; do
 done
 echo "  INFO ASCII-only checked for every adapter file"
 
-echo "=== S6: nothing else changed relative to $BASE (verified modules untouched) ==="
+echo "=== S6: the verified modules are identical to $BASE (the tree moves on, so only the protected files are compared) ==="
 if git cat-file -e "$BASE^{commit}" 2>/dev/null; then
-  changed=$(git diff --name-only "$BASE" -- . ; git ls-files --others --exclude-standard)
-  printf '%s\n' docs/STATE.md reports/T011-verification.md $NEWFILES > "$NEG/allowed.txt"
-  extra=$(echo "$changed" | sort -u | grep -v '^$' | grep -vxFf "$NEG/allowed.txt" || true)
-  if [ -z "$extra" ]; then echo "  PASS changed/new paths are only the adapter files, T011 docs and docs/STATE.md"
-  else echo "$extra" | sed 's/^/  FAIL unexpected change: /'; FAIL=1; fi
   for p in docs/PROJECT_CHECKLIST.md docs/PROJECT_PROGRESS.html src/include/ExitSplit.mqh src/include/ExitActivation.mqh src/include/ExitReconciliation.mqh tests/t011_split_reference.py tests/t011_activation_reference.py tests/t011_reconcile_reference.py src/include/PositionSizing.mqh src/include/TradeGeometry.mqh; do
     git diff --quiet "$BASE" -- "$p" && echo "  PASS $p identical to $BASE" || { echo "  FAIL $p differs from $BASE"; FAIL=1; }
   done
@@ -123,6 +149,31 @@ mutate "the adapter writes the state" $HDR "bool found=(raw.n_pos==1);" "bool fo
 mutate "a literal complete = true" $HDR "bool complete=(missing==\"\");" "bool complete=true;" "complete *= *true"
 mutate "a terminal read inside the pure core" $HDR "bool XA_FinalOrderState(" "int zz=PositionsTotal(); bool XA_FinalOrderState(" "PositionsTotal"
 mutate "the comment is used as a link" $HDR "bool XA_InMap(" "string zc=\"\"; long q=DEAL_COMMENT; bool XA_InMap(" "DEAL_COMMENT"
+# the wrong AccountInfoInteger signature that the first version used must now be caught by the arity check
+python3 -I - $HDR "$NEG/WrongSig.mqh" <<'PYEOF' || { echo "  FAIL wrong-signature control: mutation target absent (vacuous)"; FAIL=1; }
+import sys
+t = open(sys.argv[1], encoding='ascii').read()
+old = 'long mm=AccountInfoInteger(ACCOUNT_MARGIN_MODE);'
+if old not in t:
+    sys.exit(3)
+open(sys.argv[2], 'w', encoding='ascii').write(t.replace(old, 'long mm=0; bool okm=AccountInfoInteger(ACCOUNT_MARGIN_MODE,mm);', 1))
+PYEOF
+if [ -f "$NEG/WrongSig.mqh" ]; then
+  if arity "$NEG/WrongSig.mqh" >/dev/null 2>&1; then echo "  FAIL the two-argument AccountInfoInteger was not detected"; FAIL=1; else echo "  PASS the two-argument AccountInfoInteger is detected (the error of fc42cb6)"; fi
+fi
+# a swallowed-zero control: treating the returned value 0 as a failure
+python3 -I - $HDR "$NEG/ZeroFail.mqh" <<'PYEOF' || { echo "  FAIL zero-failure control: mutation target absent (vacuous)"; FAIL=1; }
+import sys
+t = open(sys.argv[1], encoding='ascii').read()
+old = 'ok=(error_code==0);'
+if old not in t:
+    sys.exit(3)
+open(sys.argv[2], 'w', encoding='ascii').write(t.replace(old, 'ok=(error_code==0 && value!=0);', 1))
+PYEOF
+if [ -f "$NEG/ZeroFail.mqh" ]; then
+  if strip "$NEG/ZeroFail.mqh" | grep -qE 'value *!= *0'; then echo "  PASS treating margin mode 0 as a failure is detected"; else echo "  FAIL zero-as-failure not detected"; FAIL=1; fi
+fi
+if strip $HDR | grep -qE 'value *!= *0|mm *== *0|mm *!= *0'; then echo "  FAIL the header treats a margin mode value of 0 as a failure"; FAIL=1; else echo "  PASS the header never treats a margin mode value of 0 as a failure"; fi
 cp $HDR "$NEG/Unbalanced.mqh"; echo "void x(){" >> "$NEG/Unbalanced.mqh"
 python3 tools/t001-check-balance.py "$NEG/Unbalanced.mqh" >/dev/null 2>&1 && { echo "  FAIL unbalanced brace not detected"; FAIL=1; } || echo "  PASS unbalanced brace detected"
 cp $HDR "$NEG/NonAscii.mqh"; printf '// caf\xc3\xa9\n' >> "$NEG/NonAscii.mqh"
