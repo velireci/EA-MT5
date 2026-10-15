@@ -1,16 +1,20 @@
 // T008 manually supplied candidate + real broker parameters. NEVER sends orders.
 // T010 adds opt-in automatic USD-high-news (MT5 calendar, read-only) and spread filters; results feed only the permit snapshot.
+// T012 adds an opt-in DAILY source (DAILY_SRC_SNAPSHOT: daily limits from explicit inputs, UTC like T009). Observation only: the daily BLOCK joins the final
+// preview result; cancel_pending_due is a diagnostic flag, nothing is cancelled or closed; no history or account is read; MANUAL (default) changes nothing.
 #property strict
-#property version "1.03"
+#property version "1.04"
 #include "include/SymbolSnapshot.mqh"
 #include "include/BrokerLossCheck.mqh"
 #include "include/SessionPolicy.mqh"
 #include "include/NewsSpreadFilters.mqh"
+#include "include/DailyPreviewGate.mqh"
 enum PREVIEW_SIDE {PREVIEW_UNSET=0,PREVIEW_BUY=1,PREVIEW_SELL=-1};
 enum PREVIEW_STATE {STATE_UNKNOWN=0,STATE_CLEAR=1,STATE_BLOCK=2};
 enum PREVIEW_SESSION_SOURCE {SESSION_MANUAL=0,SESSION_TIRANE_CLOCK=1};
 enum PREVIEW_NEWS_SOURCE {NEWS_SRC_MANUAL=0,NEWS_SRC_CALENDAR_AUTO=1};
 enum PREVIEW_SPREAD_SOURCE {SPREAD_SRC_MANUAL=0,SPREAD_SRC_QUOTE_AUTO=1};
+enum PREVIEW_DAILY_SOURCE {DAILY_SRC_MANUAL=0,DAILY_SRC_SNAPSHOT=1};
 input PREVIEW_SIDE InpDirection=PREVIEW_UNSET;
 input string InpSignalId="";
 input string InpSetupId="";
@@ -35,10 +39,17 @@ input double InpMaxSpreadPoints=-1; // auto spread only; -1 = policy UNSET (bloc
 input PREVIEW_STATE InpSpreadState=STATE_UNKNOWN; // used only when InpSpreadSource=SPREAD_SRC_MANUAL
 input PREVIEW_STATE InpSignalUnused=STATE_UNKNOWN; // CLEAR=externally confirmed unused; BLOCK=duplicate
 input long InpOpenPositions=-1; // explicit external snapshot, NOT read from account
-input long InpTradesToday=-1;
+input long InpTradesToday=-1; // also the trade count of the daily check (DAILY_SRC_SNAPSHOT); -1 = unknown
 input double InpExistingRisk=-1;
 input long InpMaxPositions=-1; // -1 = policy unset, no silent choice
-input long InpMaxTrades=-1;
+input long InpMaxTrades=-1; // also the trade limit of the daily check; -1 = UNSET (blocks). 2 versus 3 is an open client decision: no default
+input PREVIEW_DAILY_SOURCE InpDailySource=DAILY_SRC_MANUAL; // MANUAL = daily check not evaluated (old behaviour). SNAPSHOT = T012 daily limits from the inputs below; UTC like T009 (PC clock), refused in tester
+input int InpDailySnapshotDay=0; // Tirane day (yyyymmdd) the figures belong to; a different day than the UTC instant gives STALE_SNAPSHOT_DAY
+input double InpDailyBalanceStart=-1; // balance at the start of the Tirane day, SUPPLIED (not read from the account); <=0 = unknown
+input bool InpDailyResultKnown=false; // true only when InpDailyClosedResult is the robot's closed result of the day; false = unknown
+input double InpDailyClosedResult=0; // closed result of the ROBOT today in account currency (no floating, no manual trades); used only if InpDailyResultKnown
+input long InpDailyWins=-1; // wins today as classified by the caller (partial exits/costs/breakeven NOT classified here); -1 = unknown
+input long InpDailyConsecutiveLosses=-1; // consecutive losses today as classified by the caller; -1 = unknown
 input double InpCombinedRiskCap=-1; // money in account currency, not percent
 input double InpModelTolerance=.01; // diagnostic convention: relative model discrepancy
 input int InpMaxQuoteAgeSeconds=30; // diagnostic freshness limit
@@ -166,6 +177,18 @@ void Evaluate()
                   session.day_key,TimeToString(session.midnight_utc,TIME_DATE|TIME_SECONDS),(int)session.entry_open,
                   (int)session.cancel_pending_due,(int)session.friday_close_due);
      }
+   // T012 daily limits (observation only). MANUAL evaluates nothing; SNAPSHOT evaluates the explicit inputs above.
+   bool daily_on=(InpDailySource==DAILY_SRC_SNAPSHOT);
+   if(daily_on && MQLInfoInteger(MQL_TESTER)) {StopPreview("DAILY_UTC_UNAVAILABLE_IN_TESTER");return;}
+   SDlResult daily;
+   bool daily_evaluated=DG_Evaluate(daily_on,daily_on ? TimeGMT() : 0,InpDailySnapshotDay,InpDailyBalanceStart,InpDailyResultKnown,InpDailyClosedResult,
+                                    InpTradesToday,InpDailyWins,InpDailyConsecutiveLosses,InpMaxTrades,daily);
+   string daily_text=DG_Text(daily_evaluated,daily);
+   if(daily_evaluated)
+      PrintFormat("T012 DAILY source=DAILY_SNAPSHOT allowed=%d primary=%s reasons=%s tirane_day=%d snapshot_day=%d cancel_pending_due=%d daily_limit_reached=%d | balance_start=%.2f result_known=%d closed_result=%.2f trades=%I64d wins=%I64d consecutive_losses=%I64d max_trades=%I64d | DIAGNOSTIC ONLY: nothing is cancelled or closed; no history or account is read",
+                  (int)daily.entry_allowed,daily.primary,DL_Joined(daily),daily.day_key,InpDailySnapshotDay,(int)daily.cancel_pending_due,(int)daily.daily_limit_reached,
+                  InpDailyBalanceStart,(int)InpDailyResultKnown,InpDailyClosedResult,InpTradesToday,InpDailyWins,InpDailyConsecutiveLosses,InpMaxTrades);
+   else Print("T012 DAILY source=MANUAL: not evaluated, the preview behaves as before");
    snap.news_state=(InpNewsState==STATE_CLEAR ? TP_NEWS_CLEAR : InpNewsState==STATE_BLOCK ? TP_NEWS_BLOCKED : TP_NEWS_UNKNOWN);
    snap.spread_state=(InpSpreadState==STATE_CLEAR ? TP_SPREAD_CLEAR : InpSpreadState==STATE_BLOCK ? TP_SPREAD_BLOCKED : TP_SPREAD_UNKNOWN);
    string news_text="MANUAL "+EnumToString(InpNewsState),spread_text="MANUAL "+EnumToString(InpSpreadState);
@@ -210,8 +233,9 @@ void Evaluate()
       permit.allow=false;
       if(permit.primary_reason=="") permit.primary_reason="SIGNAL_USAGE_UNKNOWN";
      }
-   bool preview_ok=(loss_check=="OK" && permit.allow);
+   bool preview_ok=DG_FinalPreview(loss_check=="OK",permit.allow,daily_evaluated,daily.entry_allowed);
    string reasons=TP_ReasonsText(permit);
+   if(daily_evaluated && !daily.entry_allowed) reasons+=" | DAILY: "+DL_Joined(daily);
    panel="T008 PREVIEW ONLY / NO ORDERS\n"+_Symbol+" / "+symbol.account_currency+"\n"+
          "E "+DoubleToString(plan.e_out,symbol.digits)+" SL "+DoubleToString(plan.s_out,symbol.digits)+
          " TP "+DoubleToString(plan.tp,symbol.digits)+"\nLots "+DoubleToString(plan.volume_out,8)+
@@ -220,6 +244,7 @@ void Evaluate()
          "\nPermit risk "+DoubleToString(guarded.risk_model,4)+
          "\nNEWS "+news_text+"\nSPREAD "+spread_text+"\nFilter results feed ONLY the permit snapshot; no order action."+
          "\nExternal policy snapshot; costs/actual fills NOT modelled.\nStatic snapshot: reattach or change inputs to refresh.";
+   panel+="\nDAILY (T012, diagnostic only) "+daily_text;
    PrintFormat("T008 PREVIEW RESULT %s | E %.8f SL %.8f TP %.8f lots %.8f | loss_check %s | permit %s | reasons %s | NO ORDERS",
                preview_ok ? "CHECKS_PASS" : "BLOCK",plan.e_out,plan.s_out,plan.tp,plan.volume_out,loss_check,
                permit.allow ? "ALLOW_PREVIEW_ONLY" : "BLOCK",reasons);
