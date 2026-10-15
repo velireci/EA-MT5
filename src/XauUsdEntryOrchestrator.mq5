@@ -166,6 +166,7 @@ bool Configure(void)
       g_registrar.magic=InpEaMagic;
       g_registrar.phrase=InpManagementAuthorisation;
       g_registrar.rpol=EX_RPOL_R_GEOM;
+      g_registrar.provenance=MH_PROV_SYNTHETIC;      // the entry transport of this EA is the FAKE one: its fills are never matched to real positions (a real entry transport must declare MH_PROV_BROKER)
       g_registrar.selftest=false;
       g_sink=GetPointer(g_registrar);
      }
@@ -284,7 +285,7 @@ void Poll()
    if(!g_feed.Poll(feed_ok)) return;                // nothing new on the closed bars
    if(InpExposureSource==EOI_EXPOSURE_ACCOUNT_READ)
      {
-      SExResult ex;
+      SExpResult ex;
       CExRealPort port;
       EX_Compute(InpEaMagic,_Symbol,(int)InpPendingPolicy,(int)InpPendingRiskPolicy,GetPointer(port),ex);      // 1 = COUNT / INCLUDE, 2 = IGNORE / EXCLUDE, 0 = UNSET
       g_cfg.open_positions=EX_GatePositions(ex);

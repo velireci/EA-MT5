@@ -22,7 +22,8 @@ SCENARIOS = ['index_codec_and_damage', 'register_and_save_failure', 'startup_cle
              'index_saved_before_send', 'no_send_when_index_unusable', 'crash_windows_restart_halts', 'two_instances_no_lost_update', 'refused_instance_and_wrong_release',
              'release_only_by_owner_on_failure_paths', 'damage_during_run_never_overwritten', 'fill_report_and_registration_inputs',
              'auto_registration_confirms_once', 'auto_registration_idempotent_after_crash', 'auto_registration_refusals_keep_the_t011_contracts', 'auto_registration_transient_and_locks',
-             'auto_registration_acknowledge_and_instances']
+             'auto_registration_acknowledge_and_instances', 'auto_registration_existing_record_needs_the_full_base', 'auto_registration_idempotent_after_management_started',
+        'auto_registration_synthetic_fill_never_registers_a_real_position']
 EV_ALL_ENABLED = tp.EV_SESSION_END | tp.EV_NEWS_BLOCK | tp.EV_DAILY_LIMIT
 
 
@@ -698,6 +699,7 @@ class CountingRegistrar:
     """wraps the CURRENT lc.Registrar (so the mutants of the registrar take effect) and counts the calls"""
 
     def __init__(self, *a, **k):
+        k.setdefault('provenance', lc.PROV_BROKER)
         self.inner = lc.Registrar(*a, **k)
         self.calls = 0
 
@@ -878,6 +880,73 @@ class AutoRegistration(unittest.TestCase):
             self.assertEqual(rw2.tick(forged), [])
             self.assertEqual((rw2.reg.calls, rw2.t11_files()), (0, []))
 
+    def _again(self, rw, **kw):
+        """a fresh registrar over the SAME T011 store, asked directly about the already registered fill"""
+        base = dict(magic=777, phrase=ex.AUTH_PHRASE, rpol=ex.RPOL_R_GEOM, provenance=lc.PROV_BROKER)
+        base.update(kw)
+        return lc.Registrar(rw.w.store, rw.xtr, rw.xstore, Locks(), **base).on_filled(rw.login, SIG)
+
+    def test_auto_registration_existing_record_needs_the_full_base(self):
+        for d in (1, -1):
+            rw = RegWorld(self, d)
+            self.assertIn('REGISTERED_WITH_T011', ' '.join(rw.tick()))
+            saved = rw.xstore.read(rw.name)
+            self.assertEqual(self._again(rw)[0], lc.SINK_CONFIRMED, 'the unchanged world is confirmed by comparison')
+
+            def refused(label, frag, change, **kw):
+                tr = rw.xtr
+                backup = (tr.position.price_open, tr.position.magic, tr.position.type, tr.account.demo, tr.account.margin_mode, tr.symbol.vol_step)
+                change(tr)
+                status, detail = self._again(rw, **kw)
+                (tr.position.price_open, tr.position.magic, tr.position.type, tr.account.demo, tr.account.margin_mode, tr.symbol.vol_step) = backup
+                tag = '%s dir %d' % (label, d)
+                self.assertEqual(status, lc.SINK_REFUSED, tag + ': ' + detail)
+                self.assertIn(frag, detail, tag)
+                self.assertEqual(rw.xstore.read(rw.name), saved, tag + ': the record is never rewritten')
+            refused('stored E differs from the live open price', 'T011_RECORD_CONFLICT', lambda t: setattr(t.position, 'price_open', 2001.0 if d == 1 else 1999.0))
+            refused('magic of the configuration differs', 'OWNERSHIP_NOT_PROVEN', lambda t: None, magic=999)
+            refused('configuration and live position of a magic that is not the entry record magic', 'OWNERSHIP_NOT_PROVEN', lambda t: setattr(t.position, 'magic', 999), magic=999)
+            refused('live position of another magic', 'OWNERSHIP_NOT_PROVEN', lambda t: setattr(t.position, 'magic', 0))
+            refused('live position of another direction', 'OWNERSHIP_NOT_PROVEN', lambda t: setattr(t.position, 'type', 1 - t.position.type))
+            refused('wrong authorisation phrase', 'REAL_NOT_AUTHORISED', lambda t: None, phrase='NOPE')
+            refused('not a demo account', 'REAL_REQUIRES_DEMO_ACCOUNT', lambda t: setattr(t.account, 'demo', False))
+            refused('netting account', 'UNSUPPORTED_ACCOUNT_MODE', lambda t: setattr(t.account, 'margin_mode', 0))
+            refused('symbol volume step differs from the stored plan', 'T011_RECORD_CONFLICT', lambda t: setattr(t.symbol, 'vol_step', 0.1))
+            self.assertEqual(rw.xtr.sends, [])
+
+    def test_auto_registration_idempotent_after_management_started(self):
+        for d in (1, -1):
+            rw = RegWorld(self, d)
+            self.assertIn('REGISTERED_WITH_T011', ' '.join(rw.tick()))
+            saved = rw.xstore.read(rw.name)
+            rw.xtr.position.sl = 2000.0                                   # management moved the stop to the entry
+            rw.xtr.position.volume = 0.1                                  # and closed the 80% part
+            status, detail = self._again(rw)
+            self.assertEqual(status, lc.SINK_CONFIRMED, detail)
+            self.assertIn('ALREADY_REGISTERED', detail)
+            self.assertEqual(rw.xstore.read(rw.name), saved)
+            rw.xtr.position.found = False                                 # the position is not readable: the open price cannot be proven
+            status, detail = self._again(rw)
+            self.assertEqual(status, lc.SINK_PENDING, detail)
+            self.assertIn('POSITION_NOT_FOUND', detail)
+
+    def test_auto_registration_synthetic_fill_never_registers_a_real_position(self):
+        for d in (1, -1):
+            for prov, label in ((lc.PROV_SYNTHETIC, 'synthetic'), (lc.PROV_UNSET, 'unset')):
+                rw = RegWorld(self, d)                                  # a REAL position with the same identifier, magic, symbol, direction, volume and SL exists
+                reads = []
+                orig = rw.xtr.find_position
+                rw.xtr.find_position = lambda i, orig=orig: (reads.append(i), orig(i))[1]
+                reg = CountingRegistrar(rw.w.store, rw.xtr, rw.xstore, rw.locks, magic=777, phrase=rw.phrase, rpol=ex.RPOL_R_GEOM, provenance=prov)
+                text = ' '.join(rw.tick(reg=reg))
+                tag = '%s dir %d' % (label, d)
+                self.assertIn('PROVENANCE_NOT_BROKER', text, tag)
+                self.assertEqual((rw.t11_files(), rw.xtr.sends, reads), ([], [], []), tag + ': no file, no send, the real position is not even read')
+                self.assertIn('MANAGEMENT_REGISTRATION_REFUSED', rw.st.halted, tag)
+                self.assertEqual(rw.st.ids, [SIG], tag)
+            rw = RegWorld(self, d)
+            self.assertIn('REGISTERED_WITH_T011', ' '.join(rw.tick()), 'the same world with BROKER provenance registers')
+
 
 class Sources(unittest.TestCase):
     def test_mql_scenarios_pinned(self):
@@ -946,8 +1015,14 @@ class Mutants(unittest.TestCase):
                 ("    if not lockstore.lock(key):", "    if False:"),
                 ("    if not st.lock_owned:\n        st.halted = st.halted or 'LIFECYCLE_LOCK_NOT_OWNED'\n        return False", "    if False:\n        return False"),
                 # automatic registration
-                ("        if self.exit_store.exists(name) or self.exit_store.exists(name + '.tmp'):\n            return self._compare(name, ident, rec)", "        if False:\n            return self._compare(name, ident, rec)"),
-                ("                and o.plan_s_src == rec.s and o.plan_rpol == self.rpol):", "                and o.plan_rpol == self.rpol):"),
+                ("        if self.exit_store.exists(name) or self.exit_store.exists(name + '.tmp'):\n            return self._compare(name, ident, rec, acct)", "        if False:\n            return self._compare(name, ident, rec, acct)"),
+                ("o.plan_e_src == pos.price_open\n                and o.plan_s_src == rec.s and o.plan_e_out == geo.e_out and o.plan_s_out == geo.s_out and o.state.level == geo.level_2r", "o.plan_s_src == rec.s and o.plan_s_out == geo.s_out"),
+                ("        if not (self.phrase == ex.AUTH_PHRASE):\n            return SINK_REFUSED, 'REAL_NOT_AUTHORISED'", "        if False:\n            return SINK_REFUSED, 'REAL_NOT_AUTHORISED'"),
+                ("        if not acct.demo:\n            return SINK_REFUSED, 'REAL_REQUIRES_DEMO_ACCOUNT'", "        if False:\n            return SINK_REFUSED, 'REAL_REQUIRES_DEMO_ACCOUNT'"),
+                ("        if not (self.magic > 0 and rec.magic == self.magic):", "        if False:"),
+                ("        if pos.symbol != ident.symbol or pos.magic != self.magic or pos.type != (0 if rec.direction == 1 else 1):\n            return SINK_REFUSED, 'OWNERSHIP_NOT_PROVEN: symbol, magic or direction of the live", "        if False:\n            return SINK_REFUSED, 'OWNERSHIP_NOT_PROVEN: symbol, magic or direction of the live"),
+                                ("        if self.provenance != PROV_BROKER:", "        if False:"),
+                ("and o.plan_vol_min == sym.vol_min and o.plan_vol_step == sym.vol_step and o.plan_vol_max == sym.vol_max)", ")"),
                 ("        return (SINK_PENDING if res.reason.startswith(self.TRANSIENT) else SINK_REFUSED), res.reason", "        return SINK_CONFIRMED, res.reason"),
                 ("            if n >= self.MAX_TRIES:", "            if False:"),
                 ("            if sid in st.unmanaged:\n                continue", "            if False:\n                continue"),
@@ -972,4 +1047,3 @@ class Mutants(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
-

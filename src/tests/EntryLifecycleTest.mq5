@@ -4,7 +4,7 @@
 // NOT YET COMPILED OR RUN (UNVERIFIED): Codex compiles it, the owner runs it in MT5.
 #property strict
 #property script_show_inputs
-#property version "1.02"
+#property version "1.03"
 #include "../include/EntryLifecycle.mqh"
 #include "../include/EntryTransportFake.mqh"
 #include "../include/ExitTransportFake.mqh"
@@ -796,6 +796,7 @@ public:
       reg.magic=777;
       reg.phrase=phrase;
       reg.rpol=EX_RPOL_R_GEOM;
+      reg.provenance=MH_PROV_BROKER;
       reg.selftest=true;
      }
    string Tick(void)
@@ -851,6 +852,7 @@ void Scenario_auto_registration_idempotent_after_crash(void)
       reg2.magic=777;
       reg2.phrase=EX_AUTH_PHRASE;
       reg2.rpol=EX_RPOL_R_GEOM;
+      reg2.provenance=MH_PROV_BROKER;
       reg2.selftest=true;
       SLcState st2;
       string notes;
@@ -864,6 +866,7 @@ void Scenario_auto_registration_idempotent_after_crash(void)
       reg3.magic=777;
       reg3.phrase=EX_AUTH_PHRASE;
       reg3.rpol=EX_RPOL_R_GEOM;
+      reg3.provenance=MH_PROV_BROKER;
       reg3.selftest=true;
       string tampered=saved+"x";                                          // any edit breaks the record check: unusable
       ESF_WriteAll(reg3.Name(r.login,REG_POS),tampered);
@@ -986,6 +989,114 @@ void Scenario_auto_registration_acknowledge_and_instances(void)
      }
   }
 
+// a fresh registrar over the SAME T011 files, asked directly about the already registered fill
+int RegAgain(CRegWorld &r,const long magic,const string phrase,string &detail)
+  {
+   CMhRegistrar g;
+   g.entry_store=GetPointer(r.w.s);
+   g.exit_tr=GetPointer(r.x);
+   g.magic=magic;
+   g.phrase=phrase;
+   g.rpol=EX_RPOL_R_GEOM;
+   g.provenance=MH_PROV_BROKER;
+   g.selftest=true;
+   return(g.OnFilled(r.login,SIG,detail));
+  }
+
+void Scenario_auto_registration_existing_record_needs_the_full_base(void)
+  {
+   for(int d=0;d<2;d++)
+     {
+      int dir=(d==0 ? 1 : -1);
+      CRegWorld r;
+      r.Build(dir,(d==0 ? 2005.0 : 1995.0),EX_AUTH_PHRASE);
+      bool reg=Has(r.Tick(),"REGISTERED_WITH_T011");
+      string saved=r.File();
+      string detail;
+      Check(reg && RegAgain(r,777,EX_AUTH_PHRASE,detail)==LC_SINK_CONFIRMED,StringFormat("dir %d: the unchanged world is confirmed by comparison",dir));
+      string label[8]={"stored E differs from the live open price","magic of the configuration differs","configuration and live position of a magic that is not the entry record magic","live position of another magic",
+                       "live position of another direction","wrong authorisation phrase","not a demo account","netting account"};
+      string frag[8]={"T011_RECORD_CONFLICT","OWNERSHIP_NOT_PROVEN","OWNERSHIP_NOT_PROVEN","OWNERSHIP_NOT_PROVEN","OWNERSHIP_NOT_PROVEN","REAL_NOT_AUTHORISED","REAL_REQUIRES_DEMO_ACCOUNT","UNSUPPORTED_ACCOUNT_MODE"};
+      for(int k=0;k<9;k++)
+        {
+         double open0=r.x.position.price_open;
+         long magic0=r.x.position.magic;
+         int type0=r.x.position.type;
+         bool demo0=r.x.account.demo;
+         int mode0=r.x.account.margin_mode;
+         double step0=r.x.symbol.vol_step;
+         long cfg_magic=777;
+         string phrase=EX_AUTH_PHRASE;
+         string lab="symbol volume step differs from the stored plan";
+         string fr="T011_RECORD_CONFLICT";
+         if(k<8) {lab=label[k]; fr=frag[k];}
+         if(k==0) r.x.position.price_open=(d==0 ? 2001.0 : 1999.0);
+         if(k==1) cfg_magic=999;
+         if(k==2) {cfg_magic=999; r.x.position.magic=999;}
+         if(k==3) r.x.position.magic=0;
+         if(k==4) r.x.position.type=1-r.x.position.type;
+         if(k==5) phrase="NOPE";
+         if(k==6) r.x.account.demo=false;
+         if(k==7) r.x.account.margin_mode=0;
+         if(k==8) r.x.symbol.vol_step=0.1;
+         string dt;
+         int res=RegAgain(r,cfg_magic,phrase,dt);
+         r.x.position.price_open=open0;
+         r.x.position.magic=magic0;
+         r.x.position.type=type0;
+         r.x.account.demo=demo0;
+         r.x.account.margin_mode=mode0;
+         r.x.symbol.vol_step=step0;
+         Check(res==LC_SINK_REFUSED && Has(dt,fr) && r.File()==saved,StringFormat("dir %d: %s: refused (%s), the record is never rewritten",dir,lab,fr));
+        }
+      Check(r.x.sends==0,StringFormat("dir %d: nothing was sent",dir));
+      RegClean(r.login);
+     }
+  }
+
+void Scenario_auto_registration_idempotent_after_management_started(void)
+  {
+   for(int d=0;d<2;d++)
+     {
+      int dir=(d==0 ? 1 : -1);
+      CRegWorld r;
+      r.Build(dir,(d==0 ? 2005.0 : 1995.0),EX_AUTH_PHRASE);
+      bool reg=Has(r.Tick(),"REGISTERED_WITH_T011");
+      string saved=r.File();
+      r.x.position.sl=r.w.plan.e_out;                              // management moved the stop to the entry
+      r.x.position.volume=0.02;                                    // and closed the 80% part
+      string detail;
+      int res=RegAgain(r,777,EX_AUTH_PHRASE,detail);
+      Check(reg && res==LC_SINK_CONFIRMED && Has(detail,"ALREADY_REGISTERED") && r.File()==saved,StringFormat("dir %d: a moved SL and a reduced volume do not break the idempotent confirmation; nothing is rewritten",dir));
+      r.x.position.found=false;
+      res=RegAgain(r,777,EX_AUTH_PHRASE,detail);
+      Check(res==LC_SINK_PENDING && Has(detail,"POSITION_NOT_FOUND") && r.File()==saved,StringFormat("dir %d: an unreadable position cannot prove the stored base: pending, not confirmed",dir));
+      RegClean(r.login);
+     }
+  }
+
+void Scenario_auto_registration_synthetic_fill_never_registers_a_real_position(void)
+  {
+   for(int d=0;d<2;d++)
+     {
+      int dir=(d==0 ? 1 : -1);
+      for(int k=0;k<2;k++)
+        {
+         CRegWorld r;                                                // a REAL position with the same identifier, magic, symbol, direction, volume and SL exists
+         r.Build(dir,(d==0 ? 2005.0 : 1995.0),EX_AUTH_PHRASE);
+         r.reg.provenance=(k==0 ? MH_PROV_SYNTHETIC : MH_PROV_UNSET);
+         string text=r.Tick();
+         Check(r.ok && Has(text,"PROVENANCE_NOT_BROKER") && r.File()=="" && r.x.sends==0 && Has(r.w.g.st.halted,"MANAGEMENT_REGISTRATION_REFUSED") && r.w.g.st.n==1 && !r.Locked(),
+               StringFormat("dir %d %s: the identifier collision registers nothing (no T011 file, no send, halted, the fill stays indexed)",dir,(k==0 ? "synthetic" : "unset")));
+         RegClean(r.login);
+        }
+      CRegWorld b;
+      b.Build(dir,(d==0 ? 2005.0 : 1995.0),EX_AUTH_PHRASE);
+      Check(Has(b.Tick(),"REGISTERED_WITH_T011"),StringFormat("dir %d: the same world with BROKER provenance registers",dir));
+      RegClean(b.login);
+     }
+  }
+
 void OnStart()
   {
    Print("T019 ENTRY LIFECYCLE TEST: fake transport and fake store only; no terminal read, no order, no file.");
@@ -1012,6 +1123,9 @@ void OnStart()
    Scenario_auto_registration_refusals_keep_the_t011_contracts();
    Scenario_auto_registration_transient_and_locks();
    Scenario_auto_registration_acknowledge_and_instances();
+   Scenario_auto_registration_existing_record_needs_the_full_base();
+   Scenario_auto_registration_idempotent_after_management_started();
+   Scenario_auto_registration_synthetic_fill_never_registers_a_real_position();
    PrintFormat("T019 ENTRY LIFECYCLE TEST finished: %d passed, %d failed",g_pass,g_fail);
   }
 

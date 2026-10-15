@@ -96,6 +96,7 @@ assert '#include "include/EntryLifecycle.mqh"' in ea and '#include "include/Entr
 assert 'input bool InpManagementRegistration=false;' in ea and 'input string InpManagementAuthorisation="";' in ea and 'input ENUM_EO_MGMT_RPOL InpManagementRPolicy=EOI_MGMT_RPOL_UNSET;' in ea, 'registration is off and UNSET by default'
 conf = ea[ea.index('bool Configure(void)'):ea.index('SEoFeedCfg fc;')]
 assert 'if(InpManagementRegistration)' in conf and 'InpManagementAuthorisation!=EX_AUTH_PHRASE || InpManagementRPolicy!=EOI_MGMT_RPOL_R_GEOM || InpEaMagic<=0) return(false);' in conf, 'registration needs the phrase, R_GEOM and a magic'
+assert 'g_registrar.provenance=MH_PROV_SYNTHETIC;' in conf and 'MH_PROV_BROKER' not in ea, 'the FAKE entry transport declares SYNTHETIC provenance'
 assert conf.count('g_sink=GetPointer(g_registrar);') == 1 and 'g_sink=NULL;' in conf and 'g_registrar.exit_tr=GetPointer(g_xtr);' in conf and 'g_registrar.selftest=false;' in conf, 'the sink is set only inside the registration branch, with the read-only transport'
 assert 'int EnabledCancelEvents(void)' in ea and 'InpCancelOnSessionEnd ? TP_EV_SESSION_END : 0' in ea
 assert ea.count('LC_Tick(') == 1 and ea.count('LC_Startup(') == 1, 'one tick and one startup'
@@ -147,20 +148,65 @@ assert 'if(ESF_Exists(name) || ESF_Exists(name+ESF_TMP_SUFFIX)) return(Compare('
 assert 'rec.state!=EN_ST_FILLED || rec.linked!=1 || rec.position_id==0' in rg and rg.index('FILL_NOT_PROVEN') < rg.index('ETD_Register('), 'only a proven fill'
 assert 'acct.login!=rec.login || acct.server!=rec.server' in rg, 'account identity'
 assert 'MH_MAX_TRIES' in rg and 'RETRIES_EXHAUSTED' in rg, 'bounded retries'
+assert 'if(provenance!=MH_PROV_BROKER)' in rg and rg.index('if(provenance!=MH_PROV_BROKER)') < rg.index('EN_Load('), 'the provenance is judged before any read'
+cmp_ = rg[rg.index('int Compare('):rg.index('int Attempt(')]
+for need in ('phrase!=EX_AUTH_PHRASE', '!acct.demo', 'acct.margin_mode!=2', 'rec.magic==magic', 'pos.magic!=magic', 'EX_Geometry(', 'o.plan_e_src==pos.price_open', 'st.level==geo.level_2r', 'o.plan_vol_step==sym.vol_step'):
+    assert need in cmp_, 'the comparison of an existing record lacks: ' + need
+assert 'ESF_Save' not in cmp_ and 'ETD_Register' not in cmp_, 'the comparison never writes'
 assert 'q.level_2r=0.0;' in rg, 'the 2R level is computed by T011 itself from the real open price (R_GEOM), never supplied'
 assert 'TP_EQUALS_2R' not in t and 'tp_equals' not in t.lower(), 'the TP / 2R rule is T011 own and is not touched or interpreted here'
 PYEOF
 python3 -I "$NEG/l6.py" $MH && echo "  PASS no order call, no direct file write, one ETD_Register, read-only transport (IsReal, PreCheck refuses, Send inert), proven fill only, compare-never-rewrite, bounded retries" || { echo "  FAIL"; FAIL=1; }
 
+echo "=== L5b: no type, function or macro is declared in two headers that one program includes ==="
+cat > "$NEG/l5b.py" <<'PYEOF'
+import os, re, sys
+def closure(path, seen):
+    path = os.path.normpath(path)
+    if path in seen:
+        return
+    seen.append(path)
+    text = re.sub(r'//[^\n]*', '', open(path, encoding='ascii').read())
+    for inc in re.findall(r'#include "([^"]+)"', text):
+        closure(os.path.join(os.path.dirname(path), inc), seen)
+def decls(path):
+    text = re.sub(r'//[^\n]*', '', open(path, encoding='ascii').read())
+    out = set()
+    for m in re.finditer(r'^(?:struct|class|enum)\s+(\w+)', text, re.M):
+        out.add(m.group(1))
+    for m in re.finditer(r'^#define\s+(\w+)', text, re.M):
+        if not m.group(1).startswith('VELO_') or not m.group(1).endswith('_MQH'):
+            out.add(m.group(1))
+    for m in re.finditer(r'^(?:[A-Za-z_][\w<>]*\s+)+\**&?\s*(\w+)\s*\([^;{]*\)\s*(?:\{|$)', text, re.M):
+        out.add(m.group(1))
+    return out
+bad = []
+for prog in sys.argv[1:]:
+    files = []
+    closure(prog, files)
+    owner = {}
+    for f in files:
+        for n in decls(f):
+            if n in owner and owner[n] != f:
+                bad.append('%s: %s declared in %s and %s' % (prog, n, owner[n], f))
+            owner.setdefault(n, f)
+assert not bad, 'duplicate declaration: ' + '; '.join(bad[:5])
+PYEOF
+python3 -I "$NEG/l5b.py" $EA $TS && echo "  PASS the EA and the lifecycle test include no duplicate declaration" || { echo "  FAIL"; FAIL=1; }
+
 echo "=== L5: protected modules are untouched since $BASE ==="
 for p in src/include/EntryExecutor.mqh src/include/EntryTransport.mqh src/include/EntryTransportFake.mqh src/include/EntryTransportReal.mqh src/include/EntryStateFile.mqh \
-         src/include/EntryOrchestratorFeed.mqh src/include/ExposureReader.mqh src/include/ExposureReaderReal.mqh src/include/SetupPlanBridge.mqh src/include/TradePlanning.mqh \
+         src/include/EntryOrchestratorFeed.mqh src/include/ExposureReaderReal.mqh src/include/SetupPlanBridge.mqh src/include/TradePlanning.mqh \
          src/include/ExitExecutor.mqh src/include/ExitTickDriver.mqh src/include/ExitStateFile.mqh src/XauUsdTradePreview.mq5 src/XauUsdT011ExitManager.mq5 src/XauUsdT011ExitRegister.mq5; do
   if git cat-file -e $BASE:$p 2>/dev/null; then
     if git diff --quiet $BASE -- $p; then echo "  PASS $p identical to $BASE"; else echo "  FAIL $p differs from $BASE"; FAIL=1; fi
   else echo "  SKIP $p (base not available)"; fi
 done
 
+# ExposureReader.mqh: the ONLY change since the base is the rename SExResult -> SExpResult (it collided with the T011 SExResult in one program)
+if git cat-file -e $BASE:src/include/ExposureReader.mqh 2>/dev/null; then
+  if git show $BASE:src/include/ExposureReader.mqh | sed 's/\bSExResult\b/SExpResult/g' | cmp -s - src/include/ExposureReader.mqh; then echo "  PASS src/include/ExposureReader.mqh differs from $BASE only by the SExResult -> SExpResult rename"; else echo "  FAIL src/include/ExposureReader.mqh changed beyond the rename"; FAIL=1; fi
+fi
 echo "=== L6: negative controls ==="
 expect_assert() {   # $1 script, $2 file(s), $3 message, $4 text the assertion message must contain
   if err=$(python3 -I "$1" $2 2>&1 >/dev/null); then echo "  FAIL $3 NOT detected"; FAIL=1;
@@ -230,7 +276,7 @@ mut Z4.mqh $MH 's/      ETD_Register(cfg,exit_tr,rt,name,idn,q,res);/      ETD_R
 expect_assert "$NEG/l6.py" "$NEG/Z4.mqh" "a second registration call" "one registration call"
 mut Z5.mqh $MH 's/      ETD_Register(cfg,exit_tr,rt,name,idn,q,res);/      EX_Register(cfg,exit_tr,rt,name,idn,q,res);/'
 expect_assert "$NEG/l6.py" "$NEG/Z5.mqh" "a registration that skips the per-position lock" "one registration call"
-mut Z6.mqh $MH 's/      if(ESF_Exists(name) || ESF_Exists(name+ESF_TMP_SUFFIX)) return(Compare(name,idn,rec,detail));/      \/\/ none/'
+mut Z6.mqh $MH 's/      if(ESF_Exists(name) || ESF_Exists(name+ESF_TMP_SUFFIX)) return(Compare(name,idn,rec,acct,detail));/      \/\/ none/'
 expect_assert "$NEG/l6.py" "$NEG/Z6.mqh" "a registrar that may rewrite an existing record" "compared and never rewritten"
 mut Z7.mqh $MH 's/      if(rec.state!=EN_ST_FILLED || rec.linked!=1 || rec.position_id==0)/      if(false)/'
 expect_assert "$NEG/l6.py" "$NEG/Z7.mqh" "a registration of an unproven fill" "only a proven fill"
@@ -247,6 +293,18 @@ expect_assert "$NEG/l3.py" "$NEG/ZC.mqh" "a tick that never reaches the registra
 
 mut ZD.mqh $HD 's/         else if(r2==LC_SINK_PENDING) LC_Note(notes,"FILL_REGISTRATION_PENDING "+id+": "+detail);/         else if(r2==LC_SINK_PENDING) {LC_Note(notes,"FILL_REGISTRATION_PENDING "+id+": "+detail); LC_Remove(s,i);}/'
 expect_assert "$NEG/l2.py" "$NEG/ZD.mqh" "a fill forgotten while its registration is pending" "only after the registration is CONFIRMED"
+
+mut ZE.mqh $MH 's/      if(provenance!=MH_PROV_BROKER)/      if(false)/'
+expect_assert "$NEG/l6.py" "$NEG/ZE.mqh" "a synthetic fill matched to a real position" "provenance is judged"
+mut ZF.mqh $MH 's/      if(phrase!=EX_AUTH_PHRASE) {detail="REAL_NOT_AUTHORISED"; return(LC_SINK_REFUSED);}/      \/\/ none/'
+expect_assert "$NEG/l6.py" "$NEG/ZF.mqh" "an existing record accepted without the authorisation phrase" "phrase!=EX_AUTH_PHRASE"
+mut ZG.mqh $MH 's/o.plan_e_src==pos.price_open \&\& //'
+expect_assert "$NEG/l6.py" "$NEG/ZG.mqh" "an existing record accepted without the open price" "o.plan_e_src==pos.price_open"
+mut ZH.mqh $EA 's/      g_registrar.provenance=MH_PROV_SYNTHETIC;/      g_registrar.provenance=MH_PROV_BROKER;/'
+expect_assert "$NEG/l3.py" "$NEG/ZH.mqh" "the FAKE entry transport declared as a broker" "SYNTHETIC provenance"
+cp src/include/ExposureReader.mqh "$NEG/dup.mqh"; sed -i 's/^struct SExpResult/struct SExResult/' "$NEG/dup.mqh"
+mkdir -p "$NEG/p/include"; cp src/include/*.mqh "$NEG/p/include/"; cp "$NEG/dup.mqh" "$NEG/p/include/ExposureReader.mqh"; cp $EA "$NEG/p/Ea.mq5"
+if err=$(python3 -I "$NEG/l5b.py" "$NEG/p/Ea.mq5" 2>&1 >/dev/null); then echo "  FAIL a duplicate struct name NOT detected"; FAIL=1; elif echo "$err" | grep -q "duplicate declaration: .*SExResult"; then echo "  PASS a duplicate struct name is detected"; else echo "  FAIL the control broke for another reason: $(echo "$err" | tail -1)"; FAIL=1; fi
 
 [ $FAIL -eq 0 ] && echo "LIFECYCLE STATIC CHECKS: ALL PASS (static only; MetaEditor compile and MT5 run UNVERIFIED)" || echo "LIFECYCLE STATIC CHECKS: FAILURES"
 exit $FAIL

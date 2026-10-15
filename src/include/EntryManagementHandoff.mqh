@@ -11,6 +11,11 @@
 
 #define MH_MAX_TRIES 5
 
+// where the filled order came from: UNSET blocks; SYNTHETIC = the FAKE entry transport (its position ids are not broker facts); BROKER = a real entry transport
+#define MH_PROV_UNSET 0
+#define MH_PROV_SYNTHETIC 1
+#define MH_PROV_BROKER 2
+
 // READ-ONLY exit transport over the terminal: account / symbol / position reads (flagged getters, a failed getter is "not found", never a default); PreCheck refuses, Send does nothing and is counted.
 // IsReal() = true on purpose: it keeps the authorisation phrase and the demo-account gates of EX_Register in force.
 class CMhReadTransport : public CExitTransport
@@ -102,11 +107,12 @@ public:
    long magic;
    string phrase;               // the standing authorisation phrase (EX_AUTH_PHRASE) given as an EA input
    int rpol;                    // EX_RPOL_R_GEOM
+   int provenance;              // MH_PROV_*; anything but BROKER refuses before any terminal read
    bool selftest;               // test file names only (a prefix); the production name is ESF_FileName
    string tries_id[LC_MAX];
    int tries[LC_MAX];
    int n_tries;
-   CMhRegistrar(void) {entry_store=NULL; exit_tr=NULL; magic=0; phrase=""; rpol=EX_RPOL_UNSET; selftest=false; n_tries=0;}
+   CMhRegistrar(void) {entry_store=NULL; exit_tr=NULL; magic=0; phrase=""; rpol=EX_RPOL_UNSET; provenance=MH_PROV_UNSET; selftest=false; n_tries=0;}
    string Name(const long login,const ulong position_id) {return((selftest ? "VELO_T019_SELFTEST_" : "")+ESF_FileName(login,position_id));}
    string Inputs(const SEnRecord &rec)
      {
@@ -119,25 +125,58 @@ public:
       return(StringFind(reason,"ACCOUNT_UNREADABLE")==0 || StringFind(reason,"SYMBOL_UNREADABLE")==0 || StringFind(reason,"POSITION_NOT_FOUND")==0 || StringFind(reason,"INSTANCE_LOCK_HELD")==0 ||
              StringFind(reason,"ENTRY_UNAVAILABLE")==0);
      }
-   int Compare(const string name,const SEsIdentity &idn,const SEnRecord &rec,string &detail)
+   // an EXISTING T011 record is accepted only when the whole base of the plan matches what registration would store NOW and the registration gates still hold; nothing is written.
+   // What management legitimately changes (live SL, live volume, request / order state) is not compared; what it cannot change (open price, initial SL, TP, direction, initial volume,
+   // the symbol's volume rules, the derived 2R level) is.
+   int Compare(const string name,const SEsIdentity &idn,const SEnRecord &rec,const SExAccount &acct,string &detail)
      {
       if(ESF_Exists(name+ESF_TMP_SUFFIX)) {detail="T011_RECORD_CONFLICT: a leftover temporary file exists; recover by hand"; return(LC_SINK_REFUSED);}
+      if(phrase!=EX_AUTH_PHRASE) {detail="REAL_NOT_AUTHORISED"; return(LC_SINK_REFUSED);}
+      if(!acct.demo) {detail="REAL_REQUIRES_DEMO_ACCOUNT"; return(LC_SINK_REFUSED);}
+      if(acct.margin_mode!=2) {detail="UNSUPPORTED_ACCOUNT_MODE: only HEDGING"; return(LC_SINK_REFUSED);}
+      if(!(magic>0 && rec.magic==magic)) {detail="OWNERSHIP_NOT_PROVEN: the magic of the configuration differs from the magic of the entry record"; return(LC_SINK_REFUSED);}
+      SExSymbol sym;
+      exit_tr.ReadSymbol(idn.symbol,sym);
+      if(!sym.read_ok || sym.tick_size<=0.0) {detail="SYMBOL_UNREADABLE"; return(LC_SINK_PENDING);}
+      SExPosition pos;
+      exit_tr.FindPosition(idn.position_id,pos);
+      if(!pos.found || pos.ticket==0 || pos.identifier!=idn.position_id) {detail="POSITION_NOT_FOUND: the open price of the position cannot be proven, so the stored base cannot be compared"; return(LC_SINK_PENDING);}
+      if(pos.symbol!=idn.symbol || pos.magic!=magic || pos.type!=(rec.direction==1 ? 0 : 1)) {detail="OWNERSHIP_NOT_PROVEN: symbol, magic or direction of the live position differ from the record / configuration"; return(LC_SINK_REFUSED);}
       SEaState st;
       SEsRestore o;
       ESF_Load(name,idn,st,o);
-      if((o.verdict==ESC_USABLE_IDLE || o.verdict==ESC_USABLE_REQUEST) && o.plan_set && st.direction==rec.direction && MathAbs(st.volume_initial-rec.volume)<1e-9 && MathAbs(o.plan_tp-rec.tp)<1e-9 &&
-         MathAbs(o.plan_s_src-rec.s)<1e-9 && o.plan_rpol==rpol)
+      if(!((o.verdict==ESC_USABLE_IDLE || o.verdict==ESC_USABLE_REQUEST || o.verdict==ESC_USABLE_BLOCKED) && o.plan_set))
         {
-         detail="ALREADY_REGISTERED (the T011 record matches the plan; nothing is rewritten) "+Inputs(rec);
-         return(LC_SINK_CONFIRMED);
+         detail="T011_RECORD_CONFLICT: the existing T011 record is unusable and is never overwritten ("+o.reason+")";
+         return(LC_SINK_REFUSED);
         }
-      detail="T011_RECORD_CONFLICT: the existing T011 record is unusable or differs from the plan and is never overwritten ("+o.reason+")";
-      return(LC_SINK_REFUSED);
+      if(!(EX_Finite(pos.price_open) && pos.price_open>0.0 && EX_OnGrid(pos.price_open,sym.tick_size) && EX_OnGrid(rec.s,sym.tick_size)))
+        {
+         detail="T011_RECORD_CONFLICT: the live open price or the initial SL is not usable as a base";
+         return(LC_SINK_REFUSED);
+        }
+      STgResult geo;
+      EX_Geometry(sym,rec.direction,pos.price_open,rec.s,rec.tp,geo);
+      if(geo.status!=TG_OK) {detail="T011_RECORD_CONFLICT: the base does not give a geometry ("+TG_StatusName(geo.status)+")"; return(LC_SINK_REFUSED);}
+      bool same=(st.direction==rec.direction && st.volume_initial==rec.volume && o.plan_tp==rec.tp && o.plan_rpol==rpol && o.plan_e_src==pos.price_open && o.plan_s_src==rec.s &&
+                 o.plan_e_out==geo.e_out && o.plan_s_out==geo.s_out && st.level==geo.level_2r && o.plan_vol_min==sym.vol_min && o.plan_vol_step==sym.vol_step && o.plan_vol_max==sym.vol_max);
+      if(!same)
+        {
+         detail="T011_RECORD_CONFLICT: the existing T011 record differs from the plan (open price, initial SL, TP, direction, volume, 2R level or symbol volume rules) and is never overwritten";
+         return(LC_SINK_REFUSED);
+        }
+      detail="ALREADY_REGISTERED (the whole base of the T011 record matches; nothing is rewritten) "+Inputs(rec);
+      return(LC_SINK_CONFIRMED);
      }
    int Attempt(const long login,const string signal_id,string &detail)
      {
       SEnRecord rec;
       string why;
+      if(provenance!=MH_PROV_BROKER)
+        {
+         detail="PROVENANCE_NOT_BROKER: the fill comes from a "+(provenance==MH_PROV_SYNTHETIC ? "synthetic (FAKE)" : "not declared")+" entry transport; its position id is not a broker fact and is never matched to a real position";
+         return(LC_SINK_REFUSED);
+        }
       if(entry_store==NULL || exit_tr==NULL) {detail="REGISTRAR_NOT_BOUND"; return(LC_SINK_REFUSED);}
       if(EN_Load(entry_store,EN_FileName(login,signal_id),rec,why)!=1) {detail="ENTRY_RECORD_UNREADABLE"; return(LC_SINK_REFUSED);}
       if(rec.state!=EN_ST_FILLED || rec.linked!=1 || rec.position_id==0) {detail="FILL_NOT_PROVEN"; return(LC_SINK_REFUSED);}
@@ -151,7 +190,7 @@ public:
       idn.symbol=rec.symbol;
       idn.position_id=rec.position_id;
       string name=Name(acct.login,rec.position_id);
-      if(ESF_Exists(name) || ESF_Exists(name+ESF_TMP_SUFFIX)) return(Compare(name,idn,rec,detail));
+      if(ESF_Exists(name) || ESF_Exists(name+ESF_TMP_SUFFIX)) return(Compare(name,idn,rec,acct,detail));
       SExConfig cfg;
       EX_ConfigInit(cfg);
       cfg.enabled=true;

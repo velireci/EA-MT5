@@ -138,7 +138,7 @@ void Scenario_inputs_unset_block(void)
      {
       CFakePort p;
       p.AddPos(1);
-      SExResult r;
+      SExpResult r;
       long magic=(k==0 ? 0 : k==1 ? -1 : MAGIC);
       string symbol=(k==2 ? "" : "XAUUSD");
       int policy=(k==3 ? EX_PEND_UNSET : k==4 ? 9 : EX_PEND_COUNT);
@@ -156,13 +156,13 @@ void Scenario_account_not_separable(void)
       CFakePort p;
       p.AddPos(1);
       p.margin_mode=modes[k];
-      SExResult r;
+      SExpResult r;
       EX_Compute(MAGIC,"XAUUSD",EX_PEND_COUNT,EX_RISK_INCLUDE,GetPointer(p),r);
       Check(!r.ok && r.reason=="OWNERSHIP_NOT_SEPARABLE" && EX_GatePositions(r)==-1,StringFormat("margin mode %d: ownership not separable, unknown",modes[k]));
      }
    CFakePort q;
    q.account_ok=false;
-   SExResult s;
+   SExpResult s;
    EX_Compute(MAGIC,"XAUUSD",EX_PEND_COUNT,EX_RISK_INCLUDE,GetPointer(q),s);
    Check(!s.ok && s.reason=="ACCOUNT_UNREADABLE","an unreadable account is unknown");
   }
@@ -175,7 +175,7 @@ void Scenario_ownership_by_magic(void)
    p.AddPos(3,778);
    p.AddPos(4);
    p.AddOrd(5,0);
-   SExResult r;
+   SExpResult r;
    EX_Compute(MAGIC,"XAUUSD",EX_PEND_COUNT,EX_RISK_INCLUDE,GetPointer(p),r);
    Check(r.ok && r.open_positions==2 && r.foreign_positions==2 && r.foreign_pending==1 && r.pending==0,"only the EA magic is owned; manual / other-EA items are foreign information");
    Check(p.calls==2,"foreign items are never evaluated");
@@ -188,14 +188,14 @@ void Scenario_pending_policy(void)
    p.AddOrd(2);
    p.AddOrd(3,MAGIC,1,0.1,100.0,101.0);
    p.AddOrd(4,0);
-   SExResult r;
+   SExpResult r;
    EX_Compute(MAGIC,"XAUUSD",EX_PEND_COUNT,EX_RISK_INCLUDE,GetPointer(p),r);
    Check(r.ok && r.open_positions==3 && r.pending==2 && r.foreign_pending==1,"COUNT: owned pending orders reserve positions");
    CFakePort q;
    q.AddPos(1);
    q.AddOrd(2);
    q.AddOrd(3);
-   SExResult s;
+   SExpResult s;
    EX_Compute(MAGIC,"XAUUSD",EX_PEND_IGNORE,EX_RISK_INCLUDE,GetPointer(q),s);
    Check(s.ok && s.open_positions==1 && s.pending==2 && q.order_reads==2,"IGNORE: no reservation, but the orders are still read (twice) and known");
    CFakePort u;
@@ -215,17 +215,17 @@ void Scenario_risk_from_broker(void)
    p.AddPos(1);
    p.AddPos(2,MAGIC,1,0.2,100.0,101.0);
    p.AddPos(3,MAGIC,0,0.1,100.0,100.5);
-   SExResult r;
+   SExpResult r;
    EX_Compute(MAGIC,"XAUUSD",EX_PEND_COUNT,EX_RISK_INCLUDE,GetPointer(p),r);
    Check(r.ok && r.risk_known && Near(r.existing_risk,30.0) && Near(EX_GateRisk(r),30.0),"risk = loss at the stop from the broker calculation; a stop past break-even carries none");
    CFakePort q;
    q.AddPos(1);
    q.AddOrd(2,MAGIC,1,0.3,100.0,101.0);
-   SExResult s;
+   SExpResult s;
    EX_Compute(MAGIC,"XAUUSD",EX_PEND_COUNT,EX_RISK_INCLUDE,GetPointer(q),s);
    Check(s.risk_known && Near(s.existing_risk,40.0),"owned pending orders add their risk at their own price");
    CFakePort e;
-   SExResult t;
+   SExpResult t;
    EX_Compute(MAGIC,"XAUUSD",EX_PEND_COUNT,EX_RISK_INCLUDE,GetPointer(e),t);
    Check(t.ok && t.open_positions==0 && t.risk_known && t.existing_risk==0.0,"nothing owned: zero is a KNOWN value");
   }
@@ -240,13 +240,13 @@ void Scenario_risk_unknown_never_zero(void)
       if(k==2) p.AddPos(1,MAGIC,0,0.0,100.0,99.0);
       if(k==3) {p.AddPos(1); p.AddPos(2,MAGIC,0,0.1,100.0,98.0);}
       if(k==4) p.AddOrd(1,MAGIC,0,0.1,100.0,0.0);
-      SExResult r;
+      SExpResult r;
       EX_Compute(MAGIC,"XAUUSD",EX_PEND_COUNT,EX_RISK_INCLUDE,GetPointer(p),r);
       Check(r.ok && !r.risk_known && r.existing_risk==-1.0 && EX_GateRisk(r)==-1.0 && r.risk_reason!="",StringFormat("risk case %d is unknown, never zero",k));
      }
    CFakePort q;
    q.AddPos(1,MAGIC,0,0.1,100.0,0.0);
-   SExResult s;
+   SExpResult s;
    EX_Compute(MAGIC,"XAUUSD",EX_PEND_IGNORE,EX_RISK_INCLUDE,GetPointer(q),s);
    Check(s.open_positions==1,"the count stays known when only the risk is unknown");
   }
@@ -256,12 +256,12 @@ void Scenario_lists_incomplete(void)
    CFakePort p;
    p.AddPos(1);
    p.pos_complete=false;
-   SExResult r;
+   SExpResult r;
    EX_Compute(MAGIC,"XAUUSD",EX_PEND_COUNT,EX_RISK_INCLUDE,GetPointer(p),r);
    Check(!r.ok && r.reason=="POSITIONS_INCOMPLETE" && EX_GatePositions(r)==-1 && EX_GateRisk(r)==-1.0,"an incomplete position list is unknown");
    CFakePort q;
    for(int i=1;i<=EX_MAX+1;i++) q.AddPos(i);
-   SExResult s;
+   SExpResult s;
    EX_Compute(MAGIC,"XAUUSD",EX_PEND_COUNT,EX_RISK_INCLUDE,GetPointer(q),s);
    Check(!s.ok && s.reason=="POSITIONS_INCOMPLETE","a list beyond the capacity is unknown");
    CFakePort u;
@@ -280,7 +280,7 @@ void Scenario_lists_incomplete(void)
 
 void Scenario_list_changes_during_read(void)
   {
-   SExResult r;
+   SExpResult r;
    CFakePort a;
    a.AddPos(1);
    a.grow_positions=true;
@@ -315,7 +315,7 @@ void Scenario_fill_between_reads(void)
          p.AddOrd(7,MAGIC,kind,0.1,100.0,sl);
          p.fill_at=fill_at;
          p.fill_ticket=7;
-         SExResult r;
+         SExpResult r;
          EX_Compute(MAGIC,"XAUUSD",EX_PEND_COUNT,EX_RISK_INCLUDE,GetPointer(p),r);
          Check(!r.ok && (r.reason=="POSITIONS_CHANGED" || r.reason=="ORDERS_CHANGED") && EX_GatePositions(r)==-1 && EX_GateRisk(r)==-1.0,
                StringFormat("kind %d, fill before read %d: unknown, never a confirmed zero",kind,fill_at));
@@ -324,21 +324,21 @@ void Scenario_fill_between_reads(void)
       b.AddOrd(7,MAGIC,kind,0.1,100.0,sl);
       b.fill_at=1;
       b.fill_ticket=7;
-      SExResult rb;
+      SExpResult rb;
       EX_Compute(MAGIC,"XAUUSD",EX_PEND_COUNT,EX_RISK_INCLUDE,GetPointer(b),rb);
       Check(rb.ok && rb.open_positions==1 && rb.pending==0,StringFormat("kind %d: a fill before the first read is a consistent snapshot",kind));
       CFakePort a;
       a.AddOrd(7,MAGIC,kind,0.1,100.0,sl);
       a.fill_at=5;
       a.fill_ticket=7;
-      SExResult ra;
+      SExpResult ra;
       EX_Compute(MAGIC,"XAUUSD",EX_PEND_COUNT,EX_RISK_INCLUDE,GetPointer(a),ra);
       Check(ra.ok && ra.open_positions==1 && ra.pending==1,StringFormat("kind %d: a fill after the last read is a consistent snapshot",kind));
      }
    CFakePort c;
    c.AddPos(1);
    c.AddOrd(2);
-   SExResult rc;
+   SExpResult rc;
    EX_Compute(MAGIC,"XAUUSD",EX_PEND_COUNT,EX_RISK_INCLUDE,GetPointer(c),rc);
    Check(c.reads==4 && c.pos_reads==2 && c.ord_reads==2,"four reads: positions, orders, positions, orders");
   }
@@ -348,7 +348,7 @@ void Scenario_pending_risk_separate(void)
    CFakePort p;
    p.AddPos(1);
    p.AddOrd(2,MAGIC,1,0.1,100.0,101.0);
-   SExResult r;
+   SExpResult r;
    EX_Compute(MAGIC,"XAUUSD",EX_PEND_COUNT,EX_RISK_INCLUDE,GetPointer(p),r);
    Check(r.ok && r.open_positions==2 && Near(r.existing_risk,20.0),"COUNT + INCLUDE: reservation and the risk of the pending order");
    EX_Compute(MAGIC,"XAUUSD",EX_PEND_IGNORE,EX_RISK_INCLUDE,GetPointer(p),r);
@@ -372,10 +372,10 @@ void Scenario_gate_mapping(void)
    CFakePort p;
    p.AddPos(1);
    p.AddOrd(2);
-   SExResult r;
+   SExpResult r;
    EX_Compute(MAGIC,"XAUUSD",EX_PEND_COUNT,EX_RISK_INCLUDE,GetPointer(p),r);
    Check(EX_GatePositions(r)==2 && r.pending==1,"the gate gets positions + reserved pending");
-   SExResult bad;
+   SExpResult bad;
    EX_ResultInit(bad);
    Check(EX_GatePositions(bad)==-1 && EX_GateRisk(bad)==-1.0,"a result that was never computed is unknown");
   }

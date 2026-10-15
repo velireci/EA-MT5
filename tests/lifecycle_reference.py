@@ -223,6 +223,9 @@ def exit_file_name(login, position_id):
     return 'VELO_T011_EXIT_%d_%d.state' % (login, position_id)
 
 
+PROV_UNSET, PROV_SYNTHETIC, PROV_BROKER = 0, 1, 2     # where the filled order came from: UNSET blocks; SYNTHETIC = the FAKE entry transport (its position ids are not broker facts); BROKER = a real entry transport
+
+
 class Registrar:
     """the fill sink: AUTOMATIC registration of a filled entry with T011 through the EXISTING ex.register (via the T011 driver's per-position lock), with the contracts of the explicit script unchanged:
     ownership (magic, symbol, direction, volume, hedging account), the initial SL asserted from the executor record and accepted only while the LIVE SL equals it, the stored plan, a state file that is
@@ -231,9 +234,9 @@ class Registrar:
     MAX_TRIES = 5
     TRANSIENT = ('ACCOUNT_UNREADABLE', 'SYMBOL_UNREADABLE', 'POSITION_NOT_FOUND', 'INSTANCE_LOCK_HELD', 'ENTRY_UNAVAILABLE')
 
-    def __init__(self, entry_store, exit_tr, exit_store, locks, magic, phrase, rpol):
+    def __init__(self, entry_store, exit_tr, exit_store, locks, magic, phrase, rpol, provenance=PROV_UNSET):
         self.entry_store, self.exit_tr, self.exit_store, self.locks = entry_store, exit_tr, exit_store, locks
-        self.magic, self.phrase, self.rpol = magic, phrase, rpol
+        self.magic, self.phrase, self.rpol, self.provenance = magic, phrase, rpol, provenance
         self.tries = {}
 
     def inputs(self, rec):
@@ -251,6 +254,8 @@ class Registrar:
         return status, detail
 
     def _attempt(self, login, sid):
+        if self.provenance != PROV_BROKER:
+            return SINK_REFUSED, 'PROVENANCE_NOT_BROKER: the fill comes from a %s entry transport; its position id is not a broker fact and is never matched to a real position' % ('synthetic (FAKE)' if self.provenance == PROV_SYNTHETIC else 'not declared')
         ok, text = self.entry_store.read(en.file_name(login, sid))
         ok, rec = en.decode(text) if ok else (False, None)
         if not ok:
@@ -265,7 +270,7 @@ class Registrar:
         ident = p.Identity(acct.server, acct.login, rec.symbol, rec.position_id)
         name = exit_file_name(acct.login, rec.position_id)
         if self.exit_store.exists(name) or self.exit_store.exists(name + '.tmp'):
-            return self._compare(name, ident, rec)
+            return self._compare(name, ident, rec, acct)
         cfg = ex.Config(enabled=True, real_authorised=(self.phrase == ex.AUTH_PHRASE), authorisation=self.phrase, ea_magic=self.magic, tp_set=True, tp_price=rec.tp, r_policy=self.rpol,
                         sl_initial_set=True, sl_initial=rec.s)
         q = ex.Quote(rec.direction, 0.0, 0.0, 0.0, rec.volume)
@@ -276,14 +281,42 @@ class Registrar:
             return SINK_PENDING, 'REGISTRATION_UNCERTAIN: ' + res.reason
         return (SINK_PENDING if res.reason.startswith(self.TRANSIENT) else SINK_REFUSED), res.reason
 
-    def _compare(self, name, ident, rec):
+    def _compare(self, name, ident, rec, acct):
+        """an EXISTING T011 record is accepted only when the whole base of the plan matches what registration would store NOW and the registration gates still hold; nothing is written.
+        What management legitimately changes (the live SL, the live volume, the request / order state) is not compared; what it cannot change (the open price, the initial SL, TP, direction,
+        the initial volume, the symbol's volume rules, the derived 2R level) is."""
         if self.exit_store.exists(name + '.tmp'):
             return SINK_REFUSED, 'T011_RECORD_CONFLICT: a leftover temporary file exists; recover by hand'
+        if not (self.phrase == ex.AUTH_PHRASE):
+            return SINK_REFUSED, 'REAL_NOT_AUTHORISED'
+        if not acct.demo:
+            return SINK_REFUSED, 'REAL_REQUIRES_DEMO_ACCOUNT'
+        if acct.margin_mode != 2:
+            return SINK_REFUSED, 'UNSUPPORTED_ACCOUNT_MODE: only HEDGING'
+        if not (self.magic > 0 and rec.magic == self.magic):
+            return SINK_REFUSED, 'OWNERSHIP_NOT_PROVEN: the magic of the configuration differs from the magic of the entry record'
+        sym = self.exit_tr.read_symbol(ident.symbol)
+        if not sym.read_ok or sym.tick_size <= 0:
+            return SINK_PENDING, 'SYMBOL_UNREADABLE'
+        pos = self.exit_tr.find_position(ident.position_id)
+        if not pos.found or pos.ticket <= 0 or pos.identifier != ident.position_id:
+            return SINK_PENDING, 'POSITION_NOT_FOUND: the open price of the position cannot be proven, so the stored base cannot be compared'
+        if pos.symbol != ident.symbol or pos.magic != self.magic or pos.type != (0 if rec.direction == 1 else 1):
+            return SINK_REFUSED, 'OWNERSHIP_NOT_PROVEN: symbol, magic or direction of the live position differ from the record / configuration'
         o = self.exit_store.load(name, ident)
-        if (o.verdict in (p.USABLE_IDLE, p.USABLE_REQUEST) and o.plan_set and o.state.direction == rec.direction and o.state.volume_initial == rec.volume and o.plan_tp == rec.tp
-                and o.plan_s_src == rec.s and o.plan_rpol == self.rpol):
-            return SINK_CONFIRMED, 'ALREADY_REGISTERED (the T011 record matches the plan; nothing is rewritten) ' + self.inputs(rec)
-        return SINK_REFUSED, 'T011_RECORD_CONFLICT: the existing T011 record is unusable or differs from the plan and is never overwritten (%s)' % o.reason
+        if o.verdict not in (p.USABLE_IDLE, p.USABLE_REQUEST, p.USABLE_BLOCKED) or not o.plan_set:
+            return SINK_REFUSED, 'T011_RECORD_CONFLICT: the existing T011 record is unusable and is never overwritten (%s)' % o.reason
+        if not (ex._finite(pos.price_open) and pos.price_open > 0 and ex._on_grid(pos.price_open, sym.tick_size) and ex._on_grid(rec.s, sym.tick_size)):
+            return SINK_REFUSED, 'T011_RECORD_CONFLICT: the live open price or the initial SL is not usable as a base'
+        geo = ex._geometry(sym, rec.direction, pos.price_open, rec.s, rec.tp)
+        if geo.status != tg.OK:
+            return SINK_REFUSED, 'T011_RECORD_CONFLICT: the base does not give a geometry (%s)' % geo.status
+        same = (o.state.direction == rec.direction and o.state.volume_initial == rec.volume and o.plan_tp == rec.tp and o.plan_rpol == self.rpol and o.plan_e_src == pos.price_open
+                and o.plan_s_src == rec.s and o.plan_e_out == geo.e_out and o.plan_s_out == geo.s_out and o.state.level == geo.level_2r
+                and o.plan_vol_min == sym.vol_min and o.plan_vol_step == sym.vol_step and o.plan_vol_max == sym.vol_max)
+        if not same:
+            return SINK_REFUSED, 'T011_RECORD_CONFLICT: the existing T011 record differs from the plan (open price, initial SL, TP, direction, volume, 2R level or symbol volume rules) and is never overwritten'
+        return SINK_CONFIRMED, 'ALREADY_REGISTERED (the whole base of the T011 record matches; nothing is rewritten) ' + self.inputs(rec)
 
 
 def _sweep(cfg, tr, store, st, notes, sink=None):

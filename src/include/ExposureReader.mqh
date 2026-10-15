@@ -34,7 +34,7 @@ public:
    virtual bool Calc(const bool buy,const string symbol,const double volume,const double open,const double sl,double &profit)=0;   // OrderCalcProfit; false = not obtained
   };
 
-struct SExResult
+struct SExpResult
   {
    bool ok;                     // the counts are trustworthy
    string reason;
@@ -47,7 +47,7 @@ struct SExResult
    string risk_reason;
   };
 
-void EX_ResultInit(SExResult &r)
+void EX_ResultInit(SExpResult &r)
   {
    r.ok=false;
    r.reason="";
@@ -60,8 +60,8 @@ void EX_ResultInit(SExResult &r)
    r.risk_reason="";
   }
 
-long EX_GatePositions(const SExResult &r) {return(r.ok ? r.open_positions : -1);}
-double EX_GateRisk(const SExResult &r) {return((r.ok && r.risk_known) ? r.existing_risk : -1.0);}
+long EX_GatePositions(const SExpResult &r) {return(r.ok ? r.open_positions : -1);}
+double EX_GateRisk(const SExpResult &r) {return((r.ok && r.risk_known) ? r.existing_risk : -1.0);}
 
 bool EX_Usable(const SExItem &i) {return(i.sl>0.0 && MathIsValidNumber(i.sl) && i.price>0.0 && MathIsValidNumber(i.price) && i.volume>0.0 && MathIsValidNumber(i.volume));}
 
@@ -78,7 +78,7 @@ bool EX_SameList(const SExItem &a[],const int na,const SExItem &b[],const int nb
    return(true);
   }
 
-void EX_Compute(const long magic,const string symbol,const int pend_policy,const int risk_policy,CExPort *port,SExResult &r)
+void EX_Compute(const long magic,const string symbol,const int pend_policy,const int risk_policy,CExPort *port,SExpResult &r)
   {
    EX_ResultInit(r);
    if(magic<=0 || symbol=="" || (pend_policy!=EX_PEND_COUNT && pend_policy!=EX_PEND_IGNORE) ||

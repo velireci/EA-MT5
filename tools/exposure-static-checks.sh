@@ -39,8 +39,8 @@ assert pos == sorted(pos), 'order of the checks'
 assert c.count('port.Orders(') == 2 and c.count('port.Calc(') == 1 and c.count('port.Positions(') == 2, 'call sites (every list is read twice)'
 assert 'if(pend_policy==EX_PEND_COUNT)' not in c, 'the counting policy must not gate the order read or the risk'
 assert 'risk_policy!=EX_RISK_UNSET && risk_policy!=EX_RISK_INCLUDE && risk_policy!=EX_RISK_EXCLUDE' in c, 'risk policy validation'
-assert 'long EX_GatePositions(const SExResult &r) {return(r.ok ? r.open_positions : -1);}' in t, 'gate positions mapping'
-assert 'double EX_GateRisk(const SExResult &r) {return((r.ok && r.risk_known) ? r.existing_risk : -1.0);}' in t, 'gate risk mapping'
+assert 'long EX_GatePositions(const SExpResult &r) {return(r.ok ? r.open_positions : -1);}' in t, 'gate positions mapping'
+assert 'double EX_GateRisk(const SExpResult &r) {return((r.ok && r.risk_known) ? r.existing_risk : -1.0);}' in t, 'gate risk mapping'
 assert 'pend_policy!=EX_PEND_COUNT && pend_policy!=EX_PEND_IGNORE' in c, 'pending policy default'
 PYEOF
 python3 -I "$NEG/x2.py" $CORE && echo "  PASS pure core, order of the checks, magic-only ownership, hedging only, unknown is -1, two reads per list compared, counting policy separate from the risk policy, one calculation call site" || { echo "  FAIL"; FAIL=1; }
@@ -103,7 +103,7 @@ mut B.mqh $CORE 's/      if(pos\[i\].magic!=magic) {r.foreign_positions++; conti
 expect_assert "$NEG/x2.py" "$NEG/B.mqh" "foreign positions counted as owned" "missing step: pos\[i\].magic"
 mut C.mqh $CORE 's/   r.existing_risk=(r.risk_known ? total : -1.0);/   r.existing_risk=total;/'
 expect_assert "$NEG/x2.py" "$NEG/C.mqh" "an unknown risk reported as a number" "missing step: r.existing_risk"
-mut D.mqh $CORE 's/double EX_GateRisk(const SExResult \&r) {return((r.ok \&\& r.risk_known) ? r.existing_risk : -1.0);}/double EX_GateRisk(const SExResult \&r) {return(r.existing_risk);}/'
+mut D.mqh $CORE 's/double EX_GateRisk(const SExpResult \&r) {return((r.ok \&\& r.risk_known) ? r.existing_risk : -1.0);}/double EX_GateRisk(const SExpResult \&r) {return(r.existing_risk);}/'
 expect_assert "$NEG/x2.py" "$NEG/D.mqh" "a gate risk without the known flag" "gate risk mapping"
 mut E.mqh $CORE 's/(pend_policy!=EX_PEND_COUNT \&\& pend_policy!=EX_PEND_IGNORE)/(false)/'
 expect_assert "$NEG/x2.py" "$NEG/E.mqh" "a defaulted pending policy" "pending policy default"
