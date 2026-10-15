@@ -195,6 +195,7 @@ Mbetet: orari nuk dërgon ende anulime ose mbyllje; persistence/catchup/lajmet t
 - [x] ExitActivation: Codex Python 12/0, MetaEditor 0/0, pronari MT5 1010/0 (d83426a).
 - [x] ExitReconciliation: pronari MT5 951/0, Codex kompilim 0/0 (të përcjella).
 - [x] ExitSnapshotAdapter (vetëm lexim, ca3bd57): Codex Python 10/0, MetaEditor AdapterTest/diagnostik 0/0; pronari MT5 15.10.2026 10:42:58: 391 passed, 0 failed (të përcjella). NUK provon hartën reale request→closing order dhe as pajtimin real: harta e ekzekutuesit mbetet input (ekzekutuesi nuk është ndërtuar).
+- [x] Ruajtja/rikthimi i gjendjes pas restart (ExitStateCodec + ExitStateFile, protokoll ruaj-para-dërgimit, pa urdhra): Python 29 teste OK dhe kontrolle statike; kompilimi, T011_PersistTest dhe T011_PersistFileTest në MT5 — UNVERIFIED. Nuk ka garanci atomike me brokerin.
 - [ ] Hapat e hapur: ekzekutuesi që regjistron biletat, harta reale kërkesë→urdhër, rinisja, politikat e daljes. T011 mbetet pjesërisht i hapur.
 
 ## T012 — kufijtë ditorë

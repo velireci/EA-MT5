@@ -61,3 +61,9 @@ Tests: `test_t011_adapter` 10 tests OK (new: mode read with value 0 and error 0 
 
 ### Evidence relayed for the adapter (documentation sync; no new run by Claude)
 At ca3bd57: Codex Python 10/0 and MetaEditor (T011_AdapterTest and the diagnostic) 0 errors / 0 warnings; owner MT5 2026-10-15 10:42:58, T011_AdapterTest 391 passed, 0 failed. Scope: the pure adapter over fixtures. It does NOT prove the real request -> closing order map or a real reconciliation: the executor that records order tickets is not built, so the map remains an input. This supersedes the earlier "UNVERIFIED compile / MT5" notes of Part 4 for the test script.
+
+## Part 5 - persistence and restart recovery (base 87380ac)
+New: `src/include/ExitStateCodec.mqh`, `src/include/ExitStateFile.mqh`, `src/tests/T011_PersistTest.mq5`, `src/tests/T011_PersistFileTest.mq5`, `tests/t011_persist_{reference,fixtures}.py`, `tests/test_t011_persist.py`, `tools/t011-persist-static-checks.sh`, `tasks/T011-exit-persistence.md`. No verified module changed (static check S3 against 87380ac).
+Executed here (Claude, sandbox): `python3 -m unittest tests/test_t011_persist.py` 29 tests OK (45 scenario rows; every truncation and every single-character change rejected; fresh-CRC field edits; restart with a pending request produces no second request; confirmation preserved over repeated restore / save / reconcile; file protocol with injected crashes; 17 mutants); `bash tools/t011-persist-static-checks.sh` ALL PASS (7 negative controls).
+UNVERIFIED: MetaEditor compile of the four MQL5 files; MT5 runs of both scripts; the terminal file API (`FileMove` with `FILE_REWRITE`, `FileReadArray`/`FileWriteArray`, flush) - the call signatures were written from memory and only argument counts are checked statically.
+Limits and the protocol the unbuilt executor must follow: tasks/T011-exit-persistence.md.
