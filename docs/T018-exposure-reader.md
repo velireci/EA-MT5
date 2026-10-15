@@ -1,6 +1,6 @@
 # T018 Read-only account exposure for the entry gate
 
-Status: written in the sandbox on base c6e9557. Compile and MT5 run UNVERIFIED (Codex compiles, owner runs). FAKE execution only; no real transport, no trade, no merge.
+Status: corrected test block verified on c009dbf; owner-relayed MT5 ExposureReaderTest 53/0. FAKE execution only; no trade or merge. Real account reading on the running EA is not yet observed.
 
 ## Why
 After T016/T017 the gate still got `open_positions` and `existing_risk` from hand-typed EA inputs. This block replaces them, opt-in, with a READ-ONLY reading of the account. Nothing strategic is decided.
@@ -24,10 +24,13 @@ After T016/T017 the gate still got `open_positions` and `existing_risk` from han
 - T011 registration after a fill remains unconnected (needs owner authorisation to change the stored-SL rule).
 
 ## Evidence
+- Owner-relayed MT5 on c009dbf, XAUUSD.fx M15, 2026-10-15 20:57:51.401: ExposureReaderTest 53 passed / 0 failed. This is the owner's run, not a Codex MT5 execution.
+- Codex on c009dbf: both ExposureReaderTest and XauUsdEntryOrchestrator compile 0 errors / 0 warnings; 115 targeted entry-chain Python tests PASS; exposure static checks PASS, with Git-base sections skipped in the local export.
+- These results supersede the historical pending/unverified compile and MT5 statements below.
 Sandbox: `python3 -m unittest tests.test_exposure` and `tools/exposure-static-checks.sh` (static only). MetaEditor compile of `ExposureReaderTest.mq5` and `XauUsdEntryOrchestrator.mq5`, and the MT5 run of the test, are UNVERIFIED.
 
 ## Next action
-Codex compiles both files; the owner runs `ExposureReaderTest`. Then, with ACCOUNT_READ and a policy chosen by the owner, one demo-chart observation that the log line `T018 EXPOSURE` matches the account.
+The corrected test package passed. Continue with the next coupled EA integration work as one delivery; include a read-only ACCOUNT_READ observation in its consolidated validation, using policies explicitly chosen by the owner. Do not select pending policies or enable real trading implicitly.
 
 ## Correction after the Codex review of ebbcb38 (compile 0/0 both files, 11 Python OK)
 Three findings fixed together, regressions first: (1) unchecked getters / unverified list stability -> flagged getters, change detection in the port and a double read in the core; (2) `IGNORE` merged the reservation with the risk -> two policies; (3) unknown `InpExposureSource` fell to the manual inputs -> refused in `Configure`. Python 11 -> 13 tests (2 new MQL scenarios `list_changes_during_read`, `pending_risk_separate`), static script 14 controls. The signature of `EX_Compute` gained `risk_policy`. Compile and MT5 of the new version UNVERIFIED.

@@ -1,6 +1,13 @@
-# Claude handoff — 2026-10-15
+# Claude handoff — integration delivery
 
-## Resume point
+## Latest resume point and owner direction
+Implementation: c009dbfd2c4be216d9067cffc46dc67f72e4d405, branch codex/t004-m15-confirmation, PR #4. T018 owner-relayed MT5 on 2026-10-15 20:57:51.401, XAUUSD.fx M15: ExposureReaderTest 53 passed / 0 failed. Codex: two compiles 0/0, 115 targeted Python tests pass; exposure static checks pass with Git-base sections skipped. T018 test block is verified; real ACCOUNT_READ observation is not yet done. No new technical implementation started after this result.
+
+The owner explicitly asks for faster delivery and fewer fragmented rounds. Continue building the existing EA with coupled integration work in ONE package: lifecycle/restart recovery and the entry-to-management connection, reusing the existing exposure reader and modules where their contracts allow. First inspect existing dependencies, then implement the technical work that does not require strategic decisions. Keep real transport disabled and preserve the stored-SL/ownership contracts; any change to those requires explicit owner agreement. Do not silently authorise trades, select UNSET strategy policies, fabricate broker evidence, or map FAKE tickets to real positions.
+
+Write and run focused regressions during implementation, fix all findings in the same delivery, compile affected programs, and provide ONE consolidated owner MT5 round. Reuse existing files; add a file only when implementation or verification needs it. Update existing STATE/checklist/progress together at the end. Gather genuinely blocking strategic questions in ONE list instead of interrupting for each. Do not run broad unrelated suites or create repeated diagnostic packages. The target is the integrated EA, not completing an arbitrary count of T-numbers.
+
+## Earlier verified base (historical)
 Branch: codex/t004-m15-confirmation, PR #4, remote ea-mt5. Implementation HEAD before this documentation handoff: e2d20db03e032fba773ca40add7cec751817768d. This handoff commit changes documentation only.
 
 The owner asked to return to Claude to continue building the EA. Continue from STATE and the integration plan; do not repeat the completed T011 diagnostic cycle without a concrete dependency or regression.
