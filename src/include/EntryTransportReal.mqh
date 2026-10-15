@@ -1,5 +1,5 @@
-// T013 entry REAL transport and REAL store: the ONLY file that calls the trading API for ENTRY orders (OrderSend for a pending LIMIT, OrderSend TRADE_ACTION_REMOVE to cancel, OrderCheck for the read-only
-// pre-check) and the only one that touches terminal files / the lock for the entry records. NEVER included by a test or by EntryExecutor.mqh, NEVER executed in this stage: it is compiled by
+// T013 entry REAL transport: trading API for pending placement/cancellation and pre-check. File storage is included separately from EntryStateFile.mqh (compatible CEnRealStore API).
+// NEVER included by a runtime test or by EntryExecutor.mqh, NEVER executed in this stage: it is compiled by
 // src/tests/EntryExecutorRealCompile.mq5 (which calls none of its methods) so that Codex can check the syntax. Real activation needs the explicit authorisation phrase, a DEMO account and the owner's
 // instruction (all enforced in EntryExecutor.mqh BEFORE Send is reached).
 // API FACTS (UNVERIFIED: the official pages could not be opened from the build environment): OrderSend returning true means the request passed the basic checks and was sent, NOT that it was
@@ -10,34 +10,7 @@
 #define VELO_ENTRY_TRANSPORT_REAL_MQH
 
 #include "EntryTransport.mqh"
-#include "ExitStateFile.mqh"
-#include "ExitInstanceLock.mqh"
-
-class CEnRealStore : public CEnStore
-  {
-   bool              m_held;
-public:
-   CEnRealStore(void) {m_held=false;}
-   virtual bool Lock(const string key)
-     {
-      string why;
-      return(EL_Acquire(key,m_held,why));
-     }
-   virtual void Unlock(const string key) {EL_Release(key,m_held);}
-   virtual bool Exists(const string name) {return(ESF_Exists(name));}
-   virtual bool Read(const string name,string &text) {return(ESF_ReadAll(name,text));}
-   virtual bool Write(const string name,const string text)
-     {
-      string tmp=name+ESF_TMP_SUFFIX;
-      if(ESF_Exists(tmp)) return(false);                 // a leftover temporary file: recover by hand first
-      if(!ESF_WriteAll(tmp,text)) {FileDelete(tmp); return(false);}
-      string back;
-      if(!ESF_ReadAll(tmp,back) || back!=text) {FileDelete(tmp); return(false);}
-      ResetLastError();
-      if(!FileMove(tmp,0,name,FILE_REWRITE)) {FileDelete(tmp); return(false);}
-      return(ESF_ReadAll(name,back) && back==text);
-     }
-  };
+#include "EntryStateFile.mqh"
 
 class CEnRealTransport : public CEnTransport
   {

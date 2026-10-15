@@ -1,6 +1,6 @@
 # T017 proposal: persistent records for FAKE entry execution
 
-Status: design only; owner approval pending. Base: fe53c06. No implementation, terminal-file write, trade or merge in this step.
+Status: owner approved; implemented on base 761bd8e. FAKE transport remains fixed. Codex verification below; owner MT5 execution pending. No trade or merge.
 
 ## Goal
 Keep the entry executor's existing per-signal records across EA recreation, without importing real trading code into the FAKE orchestrator. A repeated signal must remain consumed even if the orchestrator baseline is deliberately bypassed in a regression test.
@@ -38,3 +38,18 @@ Real order activation, broker reconciliation of FAKE tickets, recovery of all or
 
 ## Self-review
 The store extraction preserves the existing interface. Namespace separation is mandatory before connecting file storage to FAKE execution. Restart claims are limited to per-signal records. All missing strategic policies continue blocking. No production record is deleted or migrated.
+
+## Implementation and verification (Codex)
+- Extracted CEnRealStore into src/include/EntryStateFile.mqh. Normalized body comparisons against 761bd8e confirm both the file-store implementation and CEnRealTransport are unchanged. Static hashes pin these bodies.
+- CEnFakeFileStore maps valid logical entry names to fixed VELO_T016_FAKE_ physical names. SELFTEST uses VELO_T017_SELFTEST_. Invalid paths, suffixes, non-ASCII names and oversized names fail closed. The adapter rejects nested acquisition and wrong-key release.
+- XauUsdEntryOrchestrator v1.01 uses CEnFakeFileStore and still uses only CEoTerminalFake. No real transport is included, selected or called. Market/balance reads remain read-only; only isolated FAKE entry records are written.
+- Nine new Python tests use real temporary disk I/O and the existing entry executor. BUY/SELL replay, all ten consumed states, corruption, leftover temporary files, unreadable files, contention, invalid names, namespace separation and injected write/readback failures pass. A separate Python process sees DUPLICATE with zero sends and zero reconstructed virtual orders.
+- The first restart regressions failed against the former in-memory store (BUY and SELL both sent again). The implemented store passes.
+- 137 targeted Python tests pass across entry_store, eo, spb, entry_gate and entry_executor. This is not a claim that the entire remote project suite was run in the local source export.
+- EntryPersistenceTest, XauUsdEntryOrchestrator, EntryExecutorRealCompile, EntryOrchestratorTest and EntryExecutorTest each compile in MetaEditor with 0 errors / 0 warnings.
+- New entry-persistence-static-checks.py passes with nine negative controls and traverses 37 reachable source files from the EA and MQL test, finding no trading API or real transport. Existing orchestrator, bridge, executor and gate static scripts pass; their Git-base sections were SKIPPED because the local export lacks Git objects.
+- Protected-file pins exclude EntryTransportReal where the compatible extraction is intentional. The gate's stale SetupPlanBridge pin is also removed because that API was deliberately refactored in fe53c06. New exact-body checks protect the extracted store/transport behavior.
+- Independent review found no actionable functional issue. The stale EA comment about memory-only records was corrected.
+
+## Owner action
+Run EntryPersistenceTest in MT5 and send the final T017 line. It writes and removes only its exact SELFTEST files and uses fake transport; no real orders or positions are used. This run verifies terminal file/lock behavior. It is not a full MT5 restart of the orchestrator EA, nor complete recovery of baseline/halt/fake-order state.

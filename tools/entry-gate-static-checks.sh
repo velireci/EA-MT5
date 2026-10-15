@@ -54,7 +54,7 @@ echo "=== G3: the test never includes a real transport ==="
 grep -nE 'EntryTransportReal|ExitTransportReal|OrderSend' $TS >/dev/null && { echo "  FAIL the test touches the real side"; FAIL=1; } || echo "  PASS the test uses the fake transport and the fake store only"
 
 echo "=== G4: protected modules are untouched since $BASE ==="
-for p in src/include/EntryTransport.mqh src/include/EntryTransportFake.mqh src/include/EntryTransportReal.mqh src/include/SetupPlanBridge.mqh src/include/TradePlanning.mqh \
+for p in src/include/EntryTransport.mqh src/include/EntryTransportFake.mqh src/include/TradePlanning.mqh \
          src/include/BrokerLossCheck.mqh src/include/DailyBridge.mqh src/include/DailyLimits.mqh src/include/DailyPreviewGate.mqh src/include/DailyBalanceStore.mqh src/include/M15Confirmation.mqh \
          src/include/ExitExecutor.mqh src/include/ExitTickDriver.mqh src/XauUsdTradePreview.mq5 src/XauUsdT011DemoOpenPosition.mq5; do
   if git cat-file -e $BASE:$p 2>/dev/null; then
@@ -90,3 +90,4 @@ expect_assert "$NEG/g2.py" "$NEG/I.mqh" "a deadline counted from the decision ti
 
 [ $FAIL -eq 0 ] && echo "ENTRY GATE STATIC CHECKS: ALL PASS (static only; MetaEditor compile and MT5 run UNVERIFIED)" || echo "ENTRY GATE STATIC CHECKS: FAILURES"
 exit $FAIL
+

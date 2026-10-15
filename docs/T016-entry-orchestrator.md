@@ -8,9 +8,9 @@ closed H4/M15 observer state (T004) -> `SPB_Build` (T014) -> broker probe + `EG_
 It is not a diagnostic panel. It draws nothing; it logs one status line and sets the chart comment.
 
 ## Fixed in this delivery
-- The transport is the in-memory fake (`CEoTerminalFake : CEnFakeTransport`) and the store is `CEnFakeStore`. `EntryTransportReal.mqh` is not included and no input selects a transport (static check O3).
+- The transport is the in-memory fake (`CEoTerminalFake : CEnFakeTransport`). T017 replaces the memory store with CEnFakeFileStore in a fixed isolated namespace; FAKE per-signal records now survive recreation. `EntryTransportReal.mqh` is not included and no input selects a transport (static check O3).
 - Every virtual request is logged and returned with `EO_FAKE_LABEL` ("FAKE EXECUTION: a virtual request, nothing is sent to the terminal").
-- Read-only terminal use: closed bars, symbol / quote / account properties, `OrderCalcProfit`, calendar, deal history, `DBS_Load` (LOAD only: no CAPTURE, no write, no T011 file).
+- Read-only market/account use: closed bars, symbol / quote / account properties, `OrderCalcProfit`, calendar, deal history, `DBS_Load` (LOAD only: no CAPTURE, no T011 file). T017 writes only isolated FAKE entry records.
 - Chart symbol only (`_Symbol`, so `XAUUSD.fx` works); the Strategy Tester is refused.
 
 ## Layers
@@ -34,7 +34,7 @@ It is not a diagnostic panel. It draws nothing; it logs one status line and sets
 1. The observer's `Build`/`CopyClosed`/`Snapshot` glue lives inside `XauUsdM15Observer.mq5` (an EA). It was COPIED into `EntryOrchestratorFeed.mqh`; it should be extracted to a shared header and the observer switched to it (changes a protected file).
 2. `ReadUsdCalendar` and the preview's daily/balance glue live inside `XauUsdTradePreview.mq5`; copied into the feed header (`EO_ReadUsdCalendar`, `CEoRealMarket::Daily`). Same extraction recommendation.
 3. `M4TimelineInfo` keeps the broken level's price but not its `known` time; the feed re-derives the broken level with `M4SelectSwingProposal` at the BOS bar and `SPB_Build` verifies id/price/time. A timeline field would be cleaner.
-4. `CEnRealStore` (file store) lives in `EntryTransportReal.mqh` together with the real transport, so a persistent store cannot be used without including `OrderSend` code. The EA therefore uses `CEnFakeStore` (memory); a restart forgets records and the baseline is the only protection. Split the file store into its own header before a persistent or real stage.
+4. Resolved by T017: file storage moved to EntryStateFile.mqh; the EA uses isolated CEnFakeFileStore without importing real transport. Only executor records persist; baseline/halt/fake orders remain in memory.
 5. Resolved: `SPB_Geometry` prepares geometry without sizing; the original `SPB_Build` API remains compatible. One `EN_Place` per `SEnRuntime` forces a fresh runtime per signal and an orchestrator-level halt.
 6. T011 management is not connected; exposure/counters are not derived from the account.
 
@@ -48,4 +48,4 @@ It is not a diagnostic panel. It draws nothing; it logs one status line and sets
 - Owner-relayed MT5 on fe53c06, XAUUSD.fx M15: EntryOrchestratorTest 97/0 at 19:05:58 and SetupPlanBridgeTest 77/0 at 19:06:09. These are owner runs, not Codex runs. No EA was attached and no trade was made by Codex.
 
 ## Next action
-Revised MT5 tests have passed per the owner logs. Next proposed technical block: docs/T017-entry-persistence-design.md; approval pending. The EA remains FAKE only. No real entry transport, persistent storage or T011 management integration was added.
+Revised MT5 tests have passed per the owner logs. T017 is implemented; owner MT5 EntryPersistenceTest is pending (see docs/T017-entry-persistence-design.md). The EA remains FAKE only. No real entry transport or T011 management integration was added. T017 adds isolated persistence of FAKE executor records only.

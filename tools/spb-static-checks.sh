@@ -60,7 +60,7 @@ grep -nE 'EntryTransportReal|ExitTransportReal|EntryExecutor|ExitExecutor|OrderS
 echo "=== B4: protected modules are untouched since $BASE ==="
 for p in src/include/TradePlanning.mqh src/include/TradeGeometry.mqh src/include/PositionSizing.mqh src/include/M15Confirmation.mqh src/include/M15SwingProposal.mqh src/include/M15Timeline.mqh \
          src/include/H4M15Bridge.mqh src/include/H4Bias.mqh src/include/H4Structure.mqh src/include/H4TouchContext.mqh src/include/EntryTransport.mqh \
-         src/include/EntryTransportFake.mqh src/include/EntryTransportReal.mqh src/include/ExitExecutor.mqh src/include/ExitTickDriver.mqh src/include/DailyBalanceStore.mqh src/XauUsdTradePreview.mq5 \
+         src/include/EntryTransportFake.mqh src/include/ExitExecutor.mqh src/include/ExitTickDriver.mqh src/include/DailyBalanceStore.mqh src/XauUsdTradePreview.mq5 \
          src/XauUsdM15Observer.mq5 src/XauUsdT011DemoOpenPosition.mq5; do
   if git cat-file -e $BASE:$p 2>/dev/null; then
     if git diff --quiet $BASE -- $p; then echo "  PASS $p identical to $BASE"; else echo "  FAIL $p differs from $BASE"; FAIL=1; fi

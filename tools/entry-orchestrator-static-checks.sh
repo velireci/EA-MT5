@@ -64,7 +64,7 @@ assert 'class CEoTerminalFake : public CEnFakeTransport' in ea, 'fake transport 
 assert ea.count('CEoTerminalFake g_tr;') == 1 and 'GetPointer(g_tr)' in ea, 'transport fixed'
 assert 'EO_FAKE_LABEL' in ea and 'CEnFakeTransport::Send(req,res)' in ea, 'virtual request label'
 assert 'MQL_TESTER' in ea and 'INIT_FAILED' in ea, 'tester refused'
-assert 'CEnFakeStore g_store;' in ea, 'in-memory store'
+assert 'CEnFakeFileStore g_store;' in ea, 'persistent FAKE store'
 assert 'g_cfg.exec.symbol=_Symbol;' in ea and 'XAUUSD' not in ea.replace('XauUsdEntryOrchestrator', ''), 'chart symbol only'
 inputs = re.findall(r'^input\s+\S+\s+(\w+)', ea, re.M)
 assert inputs, 'inputs'
@@ -76,7 +76,7 @@ for n in ('InpContextSource=EOI_SRC_UNSELECTED', 'InpM15Level=EOI_SWING_UNSELECT
           'InpPermitMaxAgeSeconds=-1', 'InpOpenPositions=-1', 'InpTradesToday=-1', 'InpExistingRisk=-1', 'InpMaxPositions=-1', 'InpMaxTrades=-1', 'InpCombinedRiskCap=-1', 'InpSessionClock=false',
           'InpNewsCalendar=false', 'InpMaxSpreadPoints=-1', 'InpDailyHistoryBridge=false', 'InpDailyServerOffsetSeconds=99999', 'InpDailyHistoryComplete=false', 'InpFilling=EOI_FILL_UNSET', 'InpExpiryMode=EOI_EXP_UNSET'):
     assert n in ea, 'default not UNSET: ' + n
-assert sorted(re.findall(r'#include "([^"]+)"', ea)) == ['include/EntryOrchestratorFeed.mqh', 'include/EntryTransportFake.mqh'], 'EA includes'
+assert sorted(re.findall(r'#include "([^"]+)"', ea)) == ['include/EntryOrchestratorFeed.mqh', 'include/EntryStateFile.mqh', 'include/EntryTransportFake.mqh'], 'EA includes'
 assert 'daily_on=InpDailyHistoryBridge' in ea
 daily = fd[fd.index('virtual bool Daily('):]
 assert 'EO_OffsetSeconds(mc.daily_offset_seconds,daily_offset)' in daily, 'offset validation'

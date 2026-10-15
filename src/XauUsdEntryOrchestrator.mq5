@@ -1,12 +1,13 @@
 // T016 ENTRY ORCHESTRATOR EA: H4/M15 observer flow (T004) -> SetupPlanBridge (T014) -> EntryGate (T015) -> EntryExecutor (T013) with a FAKE transport FIXED IN THIS DELIVERY.
 //   FAKE EXECUTION: a virtual request is logged and counted in memory; NOTHING is sent to the terminal. The real transport is NOT included in this file and is NOT selectable by any input.
-//   READ-ONLY terminal use: closed bars, symbol / quote / account properties, OrderCalcProfit, the calendar, the deal history and the T012 day-balance store with LOAD only (no CAPTURE, no write).
+//   Market/account reads: closed bars, symbol / quote properties, OrderCalcProfit, calendar, deal history and T012 balance LOAD only. Only isolated FAKE entry records are written.
 //   Every source / selection / policy input is UNSET by default and UNSET blocks. Exposure and counters are EXPLICIT inputs (-1 = unknown), nothing is accounted here. Chart symbol only (incl. XAUUSD.fx).
-//   NOT YET COMPILED OR RUN (UNVERIFIED): Codex compiles it, the owner runs it on a demo chart. The records / locks use the in-memory fake store, so a restart forgets them and the BASELINE protects a restart.
+//   FAKE entry records persist in VELO_T016_FAKE_ files. Baseline, halt and fake orders remain in memory; this is not complete orchestrator recovery or proof of broker execution.
 #property strict
-#property version "1.00"
+#property version "1.01"
 #include "include/EntryOrchestratorFeed.mqh"
 #include "include/EntryTransportFake.mqh"
+#include "include/EntryStateFile.mqh"
 
 enum ENUM_EO_SOURCE {EOI_SRC_UNSELECTED=0,EOI_SRC_T003_RECONF_PROPOSAL=1,EOI_SRC_T002_TOUCH_AFTER_LOSS_PROPOSAL=2,EOI_SRC_T002_TOUCH_FIRST_ONLY_PROPOSAL=3};
 enum ENUM_EO_SWING {EOI_SWING_UNSELECTED=0,EOI_SWING_LATEST_FRACTAL_PROPOSAL=1};
@@ -116,7 +117,7 @@ public:
 CEoFeed g_feed;
 CEoRealMarket g_market;
 CEoTerminalFake g_tr;
-CEnFakeStore g_store;
+CEnFakeFileStore g_store;
 COrchestrator g_orch;
 SEoConfig g_cfg;
 string g_last="";
