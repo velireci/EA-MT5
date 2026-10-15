@@ -22,8 +22,11 @@ def pending(**kw):
     return bound(**d)
 
 
-def rec(state, phase=p.SEND_NONE, orders=(), complete=False, gen=3, ident=IDENT):
-    return p.Record(gen, ident, state, phase, complete, list(orders))
+PLAN = dict(plan_set=True, plan_tp=4320.5, plan_vol_min=0.01, plan_vol_step=0.01, plan_vol_max=100.0)
+
+
+def rec(state, phase=p.SEND_NONE, orders=(), complete=False, gen=3, ident=IDENT, plan=False):
+    return p.Record(gen, ident, state, phase, complete, list(orders), **(PLAN if plan else {}))
 
 
 def text_of(r):
@@ -40,11 +43,12 @@ def reseal(text, old, new):
     return body + 'CRC=%08X\n' % p.crc32(body)
 
 
-def row(name, text, verdict, status, new_req=0, recon=0, reason='', kind='text', canon=0, conf=0, executed=0, ident=IDENT, nord=0, gen=0):
+def row(name, text, verdict, status, new_req=0, recon=0, reason='', kind='text', canon=0, conf=0, executed=0, ident=IDENT, nord=0, gen=0, plan=0):
     ROWS.append(dict(name=name, kind=kind, text=text, ident=ident, verdict=verdict, status=status, new_req=new_req, recon=recon, reason=reason, canon=canon, conf=conf,
-                     executed=executed, nord=nord, gen=gen))
+                     executed=executed, nord=nord, gen=gen, plan=plan))
 
 
+PZ = 'PLAN_SET=0\nPLAN_TP=0.000000000000\nPLAN_VOL_MIN=0.000000000000\nPLAN_VOL_STEP=0.000000000000\nPLAN_VOL_MAX=0.000000000000\n'
 U, R, B, X = p.USABLE_IDLE, p.USABLE_REQUEST, p.USABLE_BLOCKED, p.RECOVERY_REQUIRED
 # ---- usable records
 t_idle0 = text_of(rec(act.State(), gen=1))
@@ -82,7 +86,21 @@ row('STATUS_EDITED_WITHOUT_CRC', t_pend.replace('STATUS=1', 'STATUS=2', 1), X, '
 row('TRAILING_GARBAGE', t_pend + 'X', X, 'BLOCKED', reason='TRUNCATED')
 row('TWO_RECORDS_CONCATENATED', t_pend + t_pend, X, 'BLOCKED', reason='TRUNCATED')
 row('GARBAGE_TEXT', 'not a state file\n', X, 'BLOCKED', reason='TRUNCATED')
-row('WRONG_VERSION_WITH_VALID_CRC', reseal(t_pend, 'VERSION=1', 'VERSION=2'), X, 'BLOCKED', reason='UNSUPPORTED_VERSION')
+row('WRONG_VERSION_WITH_VALID_CRC', reseal(t_pend, 'VERSION=2', 'VERSION=3'), X, 'BLOCKED', reason='UNSUPPORTED_VERSION')
+# a genuine version 1 record: the same text without the PLAN block, version 1, valid CRC. It has no complete plan and is NEVER migrated.
+_b1 = '\n'.join(l for l in t_pend[:t_pend.index('CRC=')].split('\n') if not l.startswith('PLAN_')).replace('VERSION=2', 'VERSION=1', 1)
+row('OLD_VERSION_1_RECORD_WITHOUT_A_PLAN_IS_NOT_MIGRATED', _b1 + 'CRC=%08X\n' % p.crc32(_b1), X, 'BLOCKED', reason='UNSUPPORTED_VERSION: 1')
+t_reg = text_of(rec(bound(), gen=1, plan=True))
+t_pend_plan = text_of(rec(pending(), p.SEND_MAPPED, [111222], gen=4, plan=True))
+row('REGISTERED_IDLE_WITH_THE_AUTHORISED_PLAN', t_reg, U, 'IDLE', new_req=1, canon=1, gen=1, plan=1)
+row('PENDING_KEEPS_THE_AUTHORISED_PLAN', t_pend_plan, R, 'REQUEST_PENDING', recon=1, canon=1, nord=1, gen=4, plan=1)
+row('PLAN_TP_ZERO_WITH_VALID_CRC', reseal(t_reg, 'PLAN_TP=4320.500000000000', 'PLAN_TP=0.000000000000'), X, 'BLOCKED', reason='INVALID_PLAN')
+row('PLAN_MAX_BELOW_MIN_WITH_VALID_CRC', reseal(t_reg, 'PLAN_VOL_MAX=100.000000000000', 'PLAN_VOL_MAX=0.001000000000'), X, 'BLOCKED', reason='INVALID_PLAN')
+row('PLAN_VALUES_WITHOUT_PLAN_SET', reseal(t_idle1, 'PLAN_TP=0.000000000000', 'PLAN_TP=1.000000000000'), X, 'BLOCKED', reason='INVALID_PLAN: values without plan_set')
+row('PLAN_SET_ON_AN_UNBOUND_STATE', reseal(t_idle0, 'PLAN_SET=0\nPLAN_TP=0.000000000000\nPLAN_VOL_MIN=0.000000000000\nPLAN_VOL_STEP=0.000000000000\nPLAN_VOL_MAX=0.000000000000',
+                                            'PLAN_SET=1\nPLAN_TP=1.000000000000\nPLAN_VOL_MIN=0.010000000000\nPLAN_VOL_STEP=0.010000000000\nPLAN_VOL_MAX=1.000000000000'),
+    X, 'BLOCKED', reason='INVALID_PLAN: a plan needs a bound state')
+row('PLAN_STEP_DIFFERS_FROM_THE_REQUEST_STEP', reseal(t_pend_plan, 'PLAN_VOL_STEP=0.010000000000', 'PLAN_VOL_STEP=0.020000000000'), X, 'BLOCKED', reason='INVALID_PLAN: the request step differs')
 row('WRONG_HEADER_WITH_VALID_CRC', reseal(t_pend, 'VELO_EXIT_STATE', 'VELO_OTHER_STATE'), X, 'BLOCKED', reason='BAD_HEADER')
 row('FIELDS_OUT_OF_ORDER_WITH_VALID_CRC', reseal(t_pend, 'GEN=4\nSERVER=MetaQuotes-Demo', 'SERVER=MetaQuotes-Demo\nGEN=4'), X, 'BLOCKED', reason='BAD_FIELD_ORDER')
 row('LEADING_ZERO_NUMBER_WITH_VALID_CRC', reseal(t_pend, 'GEN=4', 'GEN=04'), X, 'BLOCKED', reason='BAD_NUMBER')
@@ -97,9 +115,9 @@ row('OTHER_POSITION', t_pend, X, 'BLOCKED', reason='IDENTITY_MISMATCH', ident=p.
 row('DONE_WITHOUT_CONFIRMATION', reseal(t_done, 'CONFIRMATIONS=1', 'CONFIRMATIONS=0'), X, 'BLOCKED', reason='INVALID_STATE: DONE without exactly one confirmation')
 row('DONE_WITH_TWO_CONFIRMATIONS', reseal(t_done, 'CONFIRMATIONS=1', 'CONFIRMATIONS=2'), X, 'BLOCKED', reason='INVALID_STATE: executed steps or confirmations')
 row('PENDING_WITH_A_CONFIRMATION', reseal(t_pend, 'CONFIRMATIONS=0', 'CONFIRMATIONS=1'), X, 'BLOCKED', reason='INVALID_STATE: PENDING with executions or a confirmation')
-row('PENDING_WITHOUT_SEND_INTENT', reseal(t_pend, 'SEND_PHASE=2\nMAP_COMPLETE=0\nMAP_N=1\nMAP_ORDER_0=111222\n', 'SEND_PHASE=0\nMAP_COMPLETE=0\nMAP_N=0\n'), X, 'BLOCKED',
+row('PENDING_WITHOUT_SEND_INTENT', reseal(t_pend, 'SEND_PHASE=2\nMAP_COMPLETE=0\n' + PZ + 'MAP_N=1\nMAP_ORDER_0=111222\n', 'SEND_PHASE=0\nMAP_COMPLETE=0\n' + PZ + 'MAP_N=0\n'), X, 'BLOCKED',
     reason='INVALID_STATE: request without a persisted send intent')
-row('MAPPED_PHASE_WITHOUT_ORDER', reseal(t_pend, 'SEND_PHASE=2\nMAP_COMPLETE=0\nMAP_N=1\nMAP_ORDER_0=111222\n', 'SEND_PHASE=2\nMAP_COMPLETE=0\nMAP_N=0\n'), X, 'BLOCKED',
+row('MAPPED_PHASE_WITHOUT_ORDER', reseal(t_pend, 'SEND_PHASE=2\nMAP_COMPLETE=0\n' + PZ + 'MAP_N=1\nMAP_ORDER_0=111222\n', 'SEND_PHASE=2\nMAP_COMPLETE=0\n' + PZ + 'MAP_N=0\n'), X, 'BLOCKED',
     reason='INVALID_MAP: send phase MAPPED without an order ticket')
 row('DUPLICATE_ORDER_TICKETS', reseal(t_done, 'MAP_ORDER_1=111223', 'MAP_ORDER_1=111222'), X, 'BLOCKED', reason='INVALID_MAP')
 row('REQUEST_ID_OF_ANOTHER_POSITION', reseal(t_pend, 'REQUEST_ID=X2R80-987654', 'REQUEST_ID=X2R80-987655'), X, 'BLOCKED', reason='INVALID_STATE: request id or 80% steps do not match the plan')
@@ -138,5 +156,6 @@ def emit_mql():
     arr('long', 'X_EXEC', [str(r['executed']) for r in ROWS])
     arr('int', 'X_NORD', [str(r['nord']) for r in ROWS])
     arr('int', 'X_GEN', [str(r['gen']) for r in ROWS])
+    arr('int', 'X_PLAN', [str(r['plan']) for r in ROWS])
     out.append('// END GENERATED FIXTURES')
     return '\n'.join(out)

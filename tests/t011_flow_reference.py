@@ -43,6 +43,11 @@ class FlowResult:
     request_produced: bool = False                              # always False: no path produces a request
 
 
+def _rec(o, generation, identity, st):
+    """the record of a request-bearing state with its order map AND the authorised plan carried over unchanged from the restore"""
+    return p.Record(generation, identity, st, p.SEND_MAPPED, bool(o.map_complete), list(o.orders), o.plan_set, o.plan_tp, o.plan_vol_min, o.plan_vol_step, o.plan_vol_max)
+
+
 def run(store, name, identity, raw_a=None, raw_b=None, fail_save=False):
     out = FlowResult(RECOVERY_REQUIRED)
     o = store.load(name, identity)
@@ -73,7 +78,7 @@ def run(store, name, identity, raw_a=None, raw_b=None, fail_save=False):
         out.final, out.reason = BLOCKED, 'SNAPSHOT_BLOCK: ' + res.reason
         return out
     disk = copy.deepcopy(st)
-    before_ok, before_text = p.encode(p.Record(o.generation, identity, st, p.SEND_MAPPED, bool(o.map_complete), list(o.orders)))
+    before_ok, before_text = p.encode(_rec(o, o.generation, identity, st))
     outcome = rec.reconcile(st, res.snapshot)
     out.reconcile_called = True
     out.decision = outcome.decision
@@ -81,7 +86,7 @@ def run(store, name, identity, raw_a=None, raw_b=None, fail_save=False):
         out.state = disk
         out.reason = 'RECONCILE_INVALID_INPUT: ' + outcome.reason
         return out
-    after_ok, after_text = p.encode(p.Record(o.generation, identity, st, p.SEND_MAPPED, bool(o.map_complete), list(o.orders)))
+    after_ok, after_text = p.encode(_rec(o, o.generation, identity, st))
     out.save_needed = not (before_ok and after_ok and before_text == after_text)
     if out.save_needed:
         if not after_ok:
@@ -90,7 +95,7 @@ def run(store, name, identity, raw_a=None, raw_b=None, fail_save=False):
         if fail_save:
             ok, why = False, 'TEST_SAVE_FAILURE'
         else:
-            ok, why = store.save(name, p.Record(o.generation + 1, identity, st, p.SEND_MAPPED, bool(o.map_complete), list(o.orders)))
+            ok, why = store.save(name, _rec(o, o.generation + 1, identity, st))
         if not ok:
             out.state, out.reason = disk, 'SAVE_FAILED: ' + why + '; the reconciled state was NOT persisted'
             return out

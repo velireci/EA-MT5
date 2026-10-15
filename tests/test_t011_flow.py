@@ -152,7 +152,7 @@ class Mutants(unittest.TestCase):
             ('adapter BLOCK bypassed', "    if res.verdict == ad.BLOCK:", "    if False:"),
             ('save skipped', "    if out.save_needed:\n        if not after_ok:", "    if False:\n        if not after_ok:"),
             ('save failure ignored', "        if not ok:\n            out.state, out.reason = disk,", "        if False:\n            out.state, out.reason = disk,"),
-            ('generation not incremented', "p.Record(o.generation + 1, identity, st,", "p.Record(o.generation, identity, st,"),
+            ('generation not incremented', "_rec(o, o.generation + 1, identity, st)", "_rec(o, o.generation, identity, st)"),
             ('unsaved state exposed after a failure', "            out.state, out.reason = disk, 'SAVE_FAILED: ' + why", "            out.state, out.reason = st, 'SAVE_FAILED: ' + why"),
             ('DONE trusted from the file', "    if not o.orders:\n        out.reason", "    if st.status == act.DONE:\n        out.final = DONE\n        return out\n    if not o.orders:\n        out.reason"),
             ('always save', "    out.save_needed = not (before_ok and after_ok and before_text == after_text)", "    out.save_needed = True"),

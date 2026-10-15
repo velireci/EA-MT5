@@ -7,7 +7,7 @@ WHAT IS STORED (one record per position, text, versioned, fully validated, check
               volume, initial steps, executed steps, CONFIRMATIONS, duplicates, reason)  -> a restore neither adds a confirmation nor forgets the request
   send      : send phase NONE | INTENT | MAPPED and the executor's order tickets (the request -> order map) with its completeness flag
   generation: positive counter, +1 per save
-FORMAT: lines KEY=VALUE in a fixed order, header VELO_EXIT_STATE, VERSION=1, ..., END, then CRC=<8 hex> (CRC-32 of everything up to and including "END\\n")
+FORMAT: lines KEY=VALUE in a fixed order, header VELO_EXIT_STATE, VERSION=2, ..., END, then CRC=<8 hex> (CRC-32 of everything up to and including "END\\n")
 and a final newline. Strings are escaped (only A-Z a-z 0-9 . _ - literal, everything else %XXXX of the UTF-16 code unit). Doubles are written with 12 decimals
 and ONLY if that text parses back to the identical double (otherwise the encode is refused: the executor must pass price/volume values normalised to the symbol,
 because the activation compares level / volume with ==). A truncated, edited, empty, oversized, unknown-version or out-of-order text is rejected.
@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 
 import t011_activation_reference as act
 
-VERSION = 1
+VERSION = 2          # 2 adds the authorised PLAN block; version 1 records have no plan and are never migrated
 HEADER = 'VELO_EXIT_STATE'
 STATUSES = [act.IDLE, act.REQUEST_PENDING, act.DONE, act.NEEDS_RECONCILIATION, act.BLOCKED]
 SEND_NONE, SEND_INTENT, SEND_MAPPED = 0, 1, 2
@@ -61,6 +61,11 @@ class Record:
     send_phase: int = SEND_NONE
     map_complete: bool = False
     orders: list = field(default_factory=list)
+    plan_set: bool = False         # the AUTHORISED plan stored at registration: direction / level 2R / initial volume live in the bound state, TP and min / step / max here
+    plan_tp: float = 0.0
+    plan_vol_min: float = 0.0
+    plan_vol_step: float = 0.0
+    plan_vol_max: float = 0.0
 
 
 @dataclass
@@ -73,6 +78,11 @@ class Restore:
     orders: list = field(default_factory=list)
     map_complete: bool = False
     generation: int = 0
+    plan_set: bool = False
+    plan_tp: float = 0.0
+    plan_vol_min: float = 0.0
+    plan_vol_step: float = 0.0
+    plan_vol_max: float = 0.0
 
 
 def crc32(text):
@@ -169,6 +179,21 @@ def validate(rec):
         return 'INVALID_STATE: bound state does not match the identity or lacks direction/level/volume'
     if not st.bound and (st.position_id or st.direction or st.level or st.volume_initial):
         return 'INVALID_STATE: unbound state carries values'
+    if not isinstance(rec.plan_set, bool):
+        return 'INVALID_PLAN: plan_set'
+    for name in ('plan_tp', 'plan_vol_min', 'plan_vol_step', 'plan_vol_max'):
+        v = getattr(rec, name)
+        if fnum(v) is None or v < 0:
+            return 'INVALID_PLAN: ' + name
+    if not rec.plan_set and (rec.plan_tp or rec.plan_vol_min or rec.plan_vol_step or rec.plan_vol_max):
+        return 'INVALID_PLAN: values without plan_set'
+    if rec.plan_set:
+        if not st.bound:
+            return 'INVALID_PLAN: a plan needs a bound state (direction, level, initial volume)'
+        if rec.plan_tp <= 0 or rec.plan_vol_min <= 0 or rec.plan_vol_step <= 0 or rec.plan_vol_max < rec.plan_vol_min:
+            return 'INVALID_PLAN: tp and the volume parameters must be positive and min <= max'
+        if st.status not in (act.IDLE, act.BLOCKED) and st.volume_step != rec.plan_vol_step:
+            return 'INVALID_PLAN: the request step differs from the authorised plan step'
     if st.status == act.BLOCKED:
         return '' if st.reason else 'INVALID_STATE: BLOCKED without a reason'
     if st.status == act.IDLE:
@@ -205,7 +230,9 @@ def encode(rec):
              'DIRECTION=%d' % st.direction, 'LEVEL=' + fnum(st.level), 'VOLUME_INITIAL=' + fnum(st.volume_initial), 'VOLUME_STEP=' + fnum(st.volume_step),
              'REQUEST_ID=' + esc(st.request_id), 'REQUEST_STEPS=%d' % st.request_steps, 'CLOSE_VOLUME=' + fnum(st.close_volume), 'INITIAL_STEPS=%d' % st.initial_steps,
              'EXECUTED_STEPS=%d' % st.executed_steps, 'CONFIRMATIONS=%d' % st.confirmations, 'DUPLICATES=%d' % st.duplicates_ignored,
-             'REASON=' + esc(st.reason), 'SEND_PHASE=%d' % rec.send_phase, 'MAP_COMPLETE=%d' % int(rec.map_complete), 'MAP_N=%d' % len(rec.orders)]
+             'REASON=' + esc(st.reason), 'SEND_PHASE=%d' % rec.send_phase, 'MAP_COMPLETE=%d' % int(rec.map_complete),
+             'PLAN_SET=%d' % int(rec.plan_set), 'PLAN_TP=' + fnum(rec.plan_tp), 'PLAN_VOL_MIN=' + fnum(rec.plan_vol_min), 'PLAN_VOL_STEP=' + fnum(rec.plan_vol_step),
+             'PLAN_VOL_MAX=' + fnum(rec.plan_vol_max), 'MAP_N=%d' % len(rec.orders)]
     lines += ['MAP_ORDER_%d=%d' % (k, o) for k, o in enumerate(rec.orders)]
     lines.append('END')
     body = '\n'.join(lines) + '\n'
@@ -247,7 +274,12 @@ def decode(text):
     if not lines or lines[0] != HEADER:
         return False, 'BAD_HEADER'
     keys = ['VERSION', 'GEN', 'SERVER', 'LOGIN', 'SYMBOL', 'POSITION', 'STATUS', 'BOUND', 'STATE_POSITION', 'DIRECTION', 'LEVEL', 'VOLUME_INITIAL', 'VOLUME_STEP',
-            'REQUEST_ID', 'REQUEST_STEPS', 'CLOSE_VOLUME', 'INITIAL_STEPS', 'EXECUTED_STEPS', 'CONFIRMATIONS', 'DUPLICATES', 'REASON', 'SEND_PHASE', 'MAP_COMPLETE', 'MAP_N']
+            'REQUEST_ID', 'REQUEST_STEPS', 'CLOSE_VOLUME', 'INITIAL_STEPS', 'EXECUTED_STEPS', 'CONFIRMATIONS', 'DUPLICATES', 'REASON', 'SEND_PHASE', 'MAP_COMPLETE',
+            'PLAN_SET', 'PLAN_TP', 'PLAN_VOL_MIN', 'PLAN_VOL_STEP', 'PLAN_VOL_MAX', 'MAP_N']
+    if len(lines) < 2 or not lines[1].startswith('VERSION='):
+        return False, 'BAD_FIELD_ORDER: expected VERSION'
+    if _geti(lines[1][len('VERSION='):]) != VERSION:
+        return False, 'UNSUPPORTED_VERSION: %s (a record without the authorised plan is never migrated)' % lines[1][len('VERSION='):][:20]
     if len(lines) < 1 + len(keys) + 1:
         return False, 'TRUNCATED: missing fields'
     vals = {}
@@ -273,8 +305,8 @@ def decode(text):
             return False, 'BAD_NUMBER: MAP_ORDER_%d' % k2
         orders.append(o)
     ints = {k2: _geti(vals[k2]) for k2 in ('GEN', 'LOGIN', 'POSITION', 'STATUS', 'BOUND', 'STATE_POSITION', 'DIRECTION', 'REQUEST_STEPS', 'INITIAL_STEPS', 'EXECUTED_STEPS',
-                                            'CONFIRMATIONS', 'DUPLICATES', 'SEND_PHASE', 'MAP_COMPLETE')}
-    dbls = {k2: _getd(vals[k2]) for k2 in ('LEVEL', 'VOLUME_INITIAL', 'VOLUME_STEP', 'CLOSE_VOLUME')}
+                                            'CONFIRMATIONS', 'DUPLICATES', 'SEND_PHASE', 'MAP_COMPLETE', 'PLAN_SET')}
+    dbls = {k2: _getd(vals[k2]) for k2 in ('LEVEL', 'VOLUME_INITIAL', 'VOLUME_STEP', 'CLOSE_VOLUME', 'PLAN_TP', 'PLAN_VOL_MIN', 'PLAN_VOL_STEP', 'PLAN_VOL_MAX')}
     for k2, v in list(ints.items()) + list(dbls.items()):
         if v is None:
             return False, 'BAD_NUMBER: ' + k2
@@ -282,13 +314,14 @@ def decode(text):
     for k2, v in strs.items():
         if v is None:
             return False, 'BAD_STRING: ' + k2
-    if not 0 <= ints['STATUS'] < len(STATUSES) or ints['BOUND'] not in (0, 1) or ints['MAP_COMPLETE'] not in (0, 1):
+    if not 0 <= ints['STATUS'] < len(STATUSES) or ints['BOUND'] not in (0, 1) or ints['MAP_COMPLETE'] not in (0, 1) or ints['PLAN_SET'] not in (0, 1):
         return False, 'BAD_ENUM'
     st = act.State(status=STATUSES[ints['STATUS']], bound=bool(ints['BOUND']), position_id=ints['STATE_POSITION'], direction=ints['DIRECTION'], level=dbls['LEVEL'],
                    volume_initial=dbls['VOLUME_INITIAL'], volume_step=dbls['VOLUME_STEP'], request_id=strs['REQUEST_ID'], request_steps=ints['REQUEST_STEPS'],
                    close_volume=dbls['CLOSE_VOLUME'], initial_steps=ints['INITIAL_STEPS'], executed_steps=ints['EXECUTED_STEPS'], confirmations=ints['CONFIRMATIONS'],
                    duplicates_ignored=ints['DUPLICATES'], reason=strs['REASON'])
-    rec = Record(ints['GEN'], Identity(strs['SERVER'], ints['LOGIN'], strs['SYMBOL'], ints['POSITION']), st, ints['SEND_PHASE'], bool(ints['MAP_COMPLETE']), orders)
+    rec = Record(ints['GEN'], Identity(strs['SERVER'], ints['LOGIN'], strs['SYMBOL'], ints['POSITION']), st, ints['SEND_PHASE'], bool(ints['MAP_COMPLETE']), orders,
+               bool(ints['PLAN_SET']), dbls['PLAN_TP'], dbls['PLAN_VOL_MIN'], dbls['PLAN_VOL_STEP'], dbls['PLAN_VOL_MAX'])
     bad = validate(rec)
     if bad:
         return False, bad
@@ -314,7 +347,8 @@ def restore(text, expected, tmp_present=False):
     if rec.identity != expected:
         return Restore(RECOVERY_REQUIRED, 'IDENTITY_MISMATCH: the record belongs to another server / account / symbol / position', _blocked('IDENTITY_MISMATCH'))
     st = rec.state
-    out = Restore(RECOVERY_REQUIRED, '', st, False, False, list(rec.orders), rec.map_complete, rec.generation)
+    out = Restore(RECOVERY_REQUIRED, '', st, False, False, list(rec.orders), rec.map_complete, rec.generation, rec.plan_set, rec.plan_tp, rec.plan_vol_min, rec.plan_vol_step,
+                  rec.plan_vol_max)
     if st.status == act.BLOCKED:
         out.verdict, out.reason = USABLE_BLOCKED, 'BLOCKED restored as stored'
         return out

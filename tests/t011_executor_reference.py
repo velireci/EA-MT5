@@ -26,13 +26,14 @@ from dataclasses import dataclass, field
 
 import t011_activation_reference as act
 import t011_persist_reference as p
+import t011_split_reference as es
 
 AUTH_PHRASE = 'I_AUTHORISE_T011_DEMO_PARTIAL_CLOSE'
 FILL_UNSET, FILL_FOK, FILL_IOC, FILL_RETURN = 0, 1, 2, 3
 POL_UNSET, POL_IGNORE, POL_NEEDS_CLEAR = 0, 1, 2
 FS_UNKNOWN, FS_CLEAR, FS_BLOCKED = 0, 1, 2
 SAVE_NONE, SAVE_BEFORE, SAVE_AFTER = 0, 1, 2
-BLOCKED, RECOVERY_REQUIRED, NOT_IDLE, NO_REQUEST, SENT_MAPPED = 'BLOCKED', 'RECOVERY_REQUIRED', 'NOT_IDLE', 'NO_REQUEST', 'SENT_MAPPED'
+BLOCKED, RECOVERY_REQUIRED, NOT_IDLE, NO_REQUEST, SENT_MAPPED, REGISTERED = 'BLOCKED', 'RECOVERY_REQUIRED', 'NOT_IDLE', 'NO_REQUEST', 'SENT_MAPPED', 'REGISTERED'
 ACCEPT_RETCODES = (10008, 10009, 10010)
 
 
@@ -193,6 +194,11 @@ def _save(cfg, rt, store, name, rec):
     return store.save(name, rec)
 
 
+def _rec(gen, identity, st, phase, o, complete=False, orders=()):
+    """a record that carries the authorised plan unchanged from the loaded one"""
+    return p.Record(gen, identity, st, phase, complete, list(orders), o.plan_set, o.plan_tp, o.plan_vol_min, o.plan_vol_step, o.plan_vol_max)
+
+
 def process(cfg, tr, rt, store, name, identity, q):
     res = Result(BLOCKED)
 
@@ -273,7 +279,14 @@ def process(cfg, tr, rt, store, name, identity, q):
     if o.verdict != p.USABLE_IDLE:
         res.final, res.reason = NOT_IDLE, 'The record is not IDLE (%s): no send; use the restart flow' % o.verdict
         return res
+    if not o.plan_set:
+        return recovery('PLAN_MISSING: the IDLE record carries no authorised plan (an unregistered or old record); it is never filled in from the current inputs', latch=False)
     st = o.state
+    for field_, stored, now in (('direction', st.direction, q.direction), ('level_2R', st.level, q.level_2r), ('initial_volume', st.volume_initial, q.volume_initial),
+                                ('tp', o.plan_tp, cfg.tp_price), ('volume_min', o.plan_vol_min, sym.vol_min), ('volume_step', o.plan_vol_step, sym.vol_step),
+                                ('volume_max', o.plan_vol_max, sym.vol_max)):
+        if stored != now:
+            return block('PLAN_CHANGED: %s differs from the authorised plan (stored %r, now %r); nothing is persisted or sent' % (field_, stored, now))
     r = act.on_quote(st, identity.position_id, q.direction, q.level_2r, q.bid, q.ask, q.volume_initial, pos.volume, sym.vol_min, sym.vol_step, sym.vol_max)
     if r.action != act.REQUEST_ACTION:
         if r.event == 'OK':
@@ -285,7 +298,7 @@ def process(cfg, tr, rt, store, name, identity, q):
     if not tr.precheck(req):
         return block('PRECHECK_FAILED: nothing persisted, nothing sent')
     gen = o.generation + 1
-    ok, why = _save(cfg, rt, store, name, p.Record(gen, identity, st, p.SEND_INTENT))
+    ok, why = _save(cfg, rt, store, name, _rec(gen, identity, st, p.SEND_INTENT, o))
     if not ok:
         return recovery('INTENT_SAVE_FAILED: %s; the file may or may not hold the new record; nothing is sent' % why)
     chk = store.load(name, identity)
@@ -302,8 +315,90 @@ def process(cfg, tr, rt, store, name, identity, q):
         return recovery('SEND_UNCERTAIN: returned_true=%s result=%s retcode=%d order=%d; no retry, no resend, the intent stays on disk' %
                         (sr.returned_true, sr.have_result, sr.retcode, sr.order))
     res.order_ticket = sr.order
-    ok, why = _save(cfg, rt, store, name, p.Record(gen + 1, identity, st, p.SEND_MAPPED, True, [sr.order]))
+    ok, why = _save(cfg, rt, store, name, _rec(gen + 1, identity, st, p.SEND_MAPPED, o, True, [sr.order]))
     if not ok:
         return recovery('MAP_NOT_SAVED: %s; order ticket %d must be recorded by hand; the intent (or the map) is what the next load shows' % (why, sr.order))
     res.final, res.reason = SENT_MAPPED, 'sent once; order %d mapped; run the restart flow to reconcile (returned true is not a fill proof)' % sr.order
+    return res
+
+
+def register(cfg, tr, rt, store, name, identity, q):
+    """REGISTRATION of the authorised plan (explicit; the executor never creates a file by itself): the bound IDLE record with direction, level 2R, initial volume (in the state) and
+    TP, volume min / step / max (the plan block). Never adopts a manual or unproven position; never overwrites; the position's magic must equal the configured one (> 0)."""
+    res = Result(BLOCKED)
+
+    def block(reason):
+        res.final, res.reason = BLOCKED, reason
+        return res
+
+    if not cfg.enabled:
+        return block('DISABLED: the executor is off by default')
+    if not _int(cfg.filling) or cfg.filling not in (FILL_UNSET, FILL_FOK, FILL_IOC, FILL_RETURN):
+        return block('INVALID_INPUT: filling is not a known value')
+    if not _int(cfg.filter_policy) or cfg.filter_policy not in (POL_UNSET, POL_IGNORE, POL_NEEDS_CLEAR):
+        return block('INVALID_INPUT: exit_filter_policy is not a known value')
+    if not _int(cfg.filter_state) or cfg.filter_state not in (FS_UNKNOWN, FS_CLEAR, FS_BLOCKED):
+        return block('INVALID_INPUT: exit_filter_state is not a known value')
+    if not _int(cfg.test_save_fault) or cfg.test_save_fault not in (SAVE_NONE, SAVE_BEFORE, SAVE_AFTER):
+        return block('INVALID_INPUT: test_save_fault is not a known value')
+    if not _int(q.direction) or q.direction not in (1, -1):
+        return block('INVALID_INPUT: direction must be 1 (BUY) or -1 (SELL)')
+    if cfg.ea_magic <= 0:
+        return block('INPUT_UNSET: ea_magic')
+    if not cfg.tp_set:
+        return block('TP_UNKNOWN')
+    if rt.latched:
+        return block('LATCHED: an earlier uncertainty on this executor; restart and recover first')
+    acct = tr.read_account()
+    if tr.is_real():
+        if not (cfg.real_authorised and cfg.authorisation == AUTH_PHRASE):
+            return block('REAL_NOT_AUTHORISED')
+        if not acct.read_ok or not acct.demo:
+            return block('REAL_REQUIRES_DEMO_ACCOUNT')
+    if not acct.read_ok:
+        return block('ACCOUNT_UNREADABLE')
+    if acct.login != identity.login or acct.server != identity.server:
+        return block('ACCOUNT_IDENTITY_MISMATCH')
+    if acct.margin_mode != 2:
+        return block('UNSUPPORTED_ACCOUNT_MODE: only HEDGING')
+    sym = tr.read_symbol(identity.symbol)
+    if not sym.read_ok or sym.tick_size <= 0:
+        return block('SYMBOL_UNREADABLE')
+    if not _on_grid(q.level_2r, sym.tick_size):
+        return block('PLAN_NOT_ON_SYMBOL_GRID: level_2R is refused, not rounded')
+    if not _on_grid(cfg.tp_price, sym.tick_size):
+        return block('PLAN_NOT_ON_SYMBOL_GRID: TP is refused, not rounded')
+    if p.fnum(q.level_2r) is None or p.fnum(cfg.tp_price) is None or p.fnum(q.volume_initial) is None:
+        return block('PLAN_NOT_REPRESENTABLE_IN_RECORD: level_2R, TP or the initial volume does not round-trip through 12 decimals; nothing is rounded or persisted')
+    if abs(cfg.tp_price - q.level_2r) < sym.tick_size / 2:
+        return block('TP_EQUALS_2R: the interaction is an open decision')
+    if (q.direction == 1 and cfg.tp_price < q.level_2r) or (q.direction == -1 and cfg.tp_price > q.level_2r):
+        return block('TP_BEFORE_2R: inconsistent with the minimum of 2R')
+    pos = tr.find_position(identity.position_id)
+    if not pos.found or pos.ticket <= 0 or pos.identifier != identity.position_id:
+        return block('POSITION_NOT_FOUND')
+    if pos.symbol != identity.symbol or pos.magic != cfg.ea_magic or pos.type != (0 if q.direction == 1 else 1):
+        return block('OWNERSHIP_NOT_PROVEN: a manual or foreign position is never adopted (symbol, magic or direction differ)')
+    if pos.volume != q.volume_initial:
+        return block('POSITION_VOLUME_DIFFERS_FROM_THE_PLAN: the initial volume must equal the volume of the position')
+    sp = es.split(q.volume_initial, sym.vol_min, sym.vol_step, sym.vol_max)
+    if sp.status != 'OK':
+        return block('REGISTRATION_REFUSED: the 80/20 split is not realisable (%s): %s' % (sp.status, sp.reason))
+    if store.exists(name) or store.exists(name + '.tmp'):
+        return block('ALREADY_EXISTS: a state file exists; registration never overwrites')
+    st = act.State()
+    st.bound, st.position_id, st.direction, st.level, st.volume_initial = True, identity.position_id, q.direction, q.level_2r, q.volume_initial
+    rec = p.Record(1, identity, st, p.SEND_NONE, False, [], True, cfg.tp_price, sym.vol_min, sym.vol_step, sym.vol_max)
+    ok, why = _save(cfg, rt, store, name, rec)
+    if not ok:
+        rt.latched = True
+        res.final, res.reason = RECOVERY_REQUIRED, 'REGISTRATION_SAVE_FAILED: %s; the file may or may not exist; nothing else is done' % why
+        return res
+    chk = store.load(name, identity)
+    if not (chk.verdict == p.USABLE_IDLE and chk.generation == 1 and chk.plan_set and chk.plan_tp == cfg.tp_price and chk.state.direction == q.direction and chk.state.level == q.level_2r
+            and chk.state.volume_initial == q.volume_initial and (chk.plan_vol_min, chk.plan_vol_step, chk.plan_vol_max) == (sym.vol_min, sym.vol_step, sym.vol_max)):
+        rt.latched = True
+        res.final, res.reason = RECOVERY_REQUIRED, 'REGISTRATION_NOT_VERIFIED: the re-load does not show the registered plan'
+        return res
+    res.final, res.reason = REGISTERED, 'registered: the authorised plan is stored; a request may only be made against exactly this plan'
     return res

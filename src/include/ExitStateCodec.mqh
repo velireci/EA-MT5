@@ -9,7 +9,7 @@
 
 #include "ExitActivation.mqh"
 
-#define ESC_VERSION 1
+#define ESC_VERSION 2             // 2 adds the authorised PLAN block; a version 1 record has no plan and is never migrated
 #define ESC_HEADER "VELO_EXIT_STATE"
 #define ESC_MAX_ORDERS 8          // equals XA_MAX_ORDERS of ExitSnapshotAdapter.mqh (checked statically; that header is not included here)
 #define ESC_MAX_TEXT 4096
@@ -46,6 +46,11 @@ struct SEsRecord
    bool map_complete;
    int n_orders;
    ulong orders[ESC_MAX_ORDERS];
+   bool plan_set;             // the AUTHORISED plan stored at registration: direction / level 2R / initial volume live in the bound state, TP and min / step / max here
+   double plan_tp;
+   double plan_vol_min;
+   double plan_vol_step;
+   double plan_vol_max;
   };
 
 struct SEsRestore
@@ -58,6 +63,11 @@ struct SEsRestore
    int n_orders;
    ulong orders[ESC_MAX_ORDERS];
    int generation;
+   bool plan_set;
+   double plan_tp;
+   double plan_vol_min;
+   double plan_vol_step;
+   double plan_vol_max;
   };
 
 string ESC_VerdictName(const ENUM_ESC_VERDICT v)
@@ -85,6 +95,11 @@ void ESC_RecordInit(SEsRecord &r)
    r.n_orders=0;
    for(int i=0;i<ESC_MAX_ORDERS;i++)
       r.orders[i]=0;
+   r.plan_set=false;
+   r.plan_tp=0.0;
+   r.plan_vol_min=0.0;
+   r.plan_vol_step=0.0;
+   r.plan_vol_max=0.0;
   }
 
 bool ESC_IdentityEqual(const SEsIdentity &a,const SEsIdentity &b)
@@ -243,6 +258,17 @@ string ESC_Validate(const SEsRecord &r)
       return("INVALID_STATE: bound state does not match the identity or lacks direction/level/volume");
    if(!st.bound && (st.position_id!=0 || st.direction!=0 || st.level!=0.0 || st.volume_initial!=0.0))
       return("INVALID_STATE: unbound state carries values");
+   if(!ESC_FiniteNonNegative(r.plan_tp) || !ESC_FiniteNonNegative(r.plan_vol_min) || !ESC_FiniteNonNegative(r.plan_vol_step) || !ESC_FiniteNonNegative(r.plan_vol_max))
+      return("INVALID_PLAN: a value is not finite and non-negative");
+   if(!ESC_Fnum(r.plan_tp,t) || !ESC_Fnum(r.plan_vol_min,t) || !ESC_Fnum(r.plan_vol_step,t) || !ESC_Fnum(r.plan_vol_max,t))
+      return("INVALID_PLAN: a value is not exactly representable with 12 decimals");
+   if(!r.plan_set && (r.plan_tp!=0.0 || r.plan_vol_min!=0.0 || r.plan_vol_step!=0.0 || r.plan_vol_max!=0.0)) return("INVALID_PLAN: values without plan_set");
+   if(r.plan_set)
+     {
+      if(!st.bound) return("INVALID_PLAN: a plan needs a bound state (direction, level, initial volume)");
+      if(r.plan_tp<=0.0 || r.plan_vol_min<=0.0 || r.plan_vol_step<=0.0 || r.plan_vol_max<r.plan_vol_min) return("INVALID_PLAN: tp and the volume parameters must be positive and min <= max");
+      if(st.status!=EA_ST_IDLE && st.status!=EA_ST_BLOCKED && st.volume_step!=r.plan_vol_step) return("INVALID_PLAN: the request step differs from the authorised plan step");
+     }
    if(st.status==EA_ST_BLOCKED)
       return(st.reason!="" ? "" : "INVALID_STATE: BLOCKED without a reason");
    if(st.status==EA_ST_IDLE)
@@ -302,6 +328,16 @@ bool ESC_Encode(const SEsRecord &r,string &text,string &reason)
    b+="REASON="+ESC_Escape(st.reason)+"\n";
    b+="SEND_PHASE="+IntegerToString(r.send_phase)+"\n";
    b+="MAP_COMPLETE="+IntegerToString(r.map_complete ? 1 : 0)+"\n";
+   string ptp,pmin,pstep,pmax;
+   ESC_Fnum(r.plan_tp,ptp);
+   ESC_Fnum(r.plan_vol_min,pmin);
+   ESC_Fnum(r.plan_vol_step,pstep);
+   ESC_Fnum(r.plan_vol_max,pmax);
+   b+="PLAN_SET="+IntegerToString(r.plan_set ? 1 : 0)+"\n";
+   b+="PLAN_TP="+ptp+"\n";
+   b+="PLAN_VOL_MIN="+pmin+"\n";
+   b+="PLAN_VOL_STEP="+pstep+"\n";
+   b+="PLAN_VOL_MAX="+pmax+"\n";
    b+="MAP_N="+IntegerToString(r.n_orders)+"\n";
    for(int k=0;k<r.n_orders;k++)
       b+="MAP_ORDER_"+IntegerToString(k)+"="+IntegerToString((long)r.orders[k])+"\n";
@@ -376,16 +412,20 @@ bool ESC_Decode(const string text,SEsRecord &rec,string &reason)
    if(ESC_Lines(body,lines)<0) {reason="BAD_HEADER"; return(false);}
    if(ArraySize(lines)<1 || lines[0]!=ESC_HEADER) {reason="BAD_HEADER"; return(false);}
    string keys[]={"VERSION","GEN","SERVER","LOGIN","SYMBOL","POSITION","STATUS","BOUND","STATE_POSITION","DIRECTION","LEVEL","VOLUME_INITIAL","VOLUME_STEP",
-                  "REQUEST_ID","REQUEST_STEPS","CLOSE_VOLUME","INITIAL_STEPS","EXECUTED_STEPS","CONFIRMATIONS","DUPLICATES","REASON","SEND_PHASE","MAP_COMPLETE","MAP_N"};
+                  "REQUEST_ID","REQUEST_STEPS","CLOSE_VOLUME","INITIAL_STEPS","EXECUTED_STEPS","CONFIRMATIONS","DUPLICATES","REASON","SEND_PHASE","MAP_COMPLETE","PLAN_SET","PLAN_TP","PLAN_VOL_MIN","PLAN_VOL_STEP","PLAN_VOL_MAX","MAP_N"};
    int nk=ArraySize(keys);
+   string vtext;
+   if(ArraySize(lines)<2 || !ESC_Field(lines,1,"VERSION",vtext)) {reason="BAD_FIELD_ORDER: expected VERSION"; return(false);}
+   long vnum=0;
+   if(!ESC_ParseInt(vtext,vnum) || vnum!=ESC_VERSION) {reason="UNSUPPORTED_VERSION: "+StringSubstr(vtext,0,20)+" (a record without the authorised plan is never migrated)"; return(false);}
    if(ArraySize(lines)<1+nk+1) {reason="TRUNCATED: missing fields"; return(false);}
-   string v[24];
+   string v[29];
    for(int i=0;i<nk;i++)
       if(!ESC_Field(lines,1+i,keys[i],v[i])) {reason="BAD_FIELD_ORDER: expected "+keys[i]; return(false);}
    long x=0;
    if(!ESC_ParseInt(v[0],x) || x!=ESC_VERSION) {reason="UNSUPPORTED_VERSION: "+StringSubstr(v[0],0,20); return(false);}
    long n=0;
-   if(!ESC_ParseInt(v[23],n) || n<0 || n>ESC_MAX_ORDERS) {reason="BAD_MAP_COUNT"; return(false);}
+   if(!ESC_ParseInt(v[28],n) || n<0 || n>ESC_MAX_ORDERS) {reason="BAD_MAP_COUNT"; return(false);}
    if(ArraySize(lines)!=1+nk+(int)n+1 || lines[ArraySize(lines)-1]!="END") {reason="BAD_LENGTH: the number of lines does not match"; return(false);}
    rec.n_orders=(int)n;
    for(int i=0;i<(int)n;i++)
@@ -411,6 +451,13 @@ bool ESC_Decode(const string text,SEsRecord &rec,string &reason)
    if(!ESC_ParseInt(v[19],dup)) {reason="BAD_NUMBER: DUPLICATES"; return(false);}
    if(!ESC_ParseInt(v[21],phase)) {reason="BAD_NUMBER: SEND_PHASE"; return(false);}
    if(!ESC_ParseInt(v[22],mcomp)) {reason="BAD_NUMBER: MAP_COMPLETE"; return(false);}
+   long pset=0;
+   double ptp=0.0,pmin=0.0,pstep=0.0,pmax=0.0;
+   if(!ESC_ParseInt(v[23],pset)) {reason="BAD_NUMBER: PLAN_SET"; return(false);}
+   if(!ESC_ParseDouble(v[24],ptp)) {reason="BAD_NUMBER: PLAN_TP"; return(false);}
+   if(!ESC_ParseDouble(v[25],pmin)) {reason="BAD_NUMBER: PLAN_VOL_MIN"; return(false);}
+   if(!ESC_ParseDouble(v[26],pstep)) {reason="BAD_NUMBER: PLAN_VOL_STEP"; return(false);}
+   if(!ESC_ParseDouble(v[27],pmax)) {reason="BAD_NUMBER: PLAN_VOL_MAX"; return(false);}
    double level=0.0,vinit=0.0,vstep=0.0,cvol=0.0;
    if(!ESC_ParseDouble(v[10],level)) {reason="BAD_NUMBER: LEVEL"; return(false);}
    if(!ESC_ParseDouble(v[11],vinit)) {reason="BAD_NUMBER: VOLUME_INITIAL"; return(false);}
@@ -421,7 +468,7 @@ bool ESC_Decode(const string text,SEsRecord &rec,string &reason)
    if(!ESC_Unescape(v[4],symbol)) {reason="BAD_STRING: SYMBOL"; return(false);}
    if(!ESC_Unescape(v[13],request_id)) {reason="BAD_STRING: REQUEST_ID"; return(false);}
    if(!ESC_Unescape(v[20],why)) {reason="BAD_STRING: REASON"; return(false);}
-   if(status<0 || status>(long)EA_ST_BLOCKED || (bound!=0 && bound!=1) || (mcomp!=0 && mcomp!=1)) {reason="BAD_ENUM"; return(false);}
+   if(status<0 || status>(long)EA_ST_BLOCKED || (bound!=0 && bound!=1) || (mcomp!=0 && mcomp!=1) || (pset!=0 && pset!=1)) {reason="BAD_ENUM"; return(false);}
    if(gen<1 || gen>ESC_MAX_GEN) {reason="INVALID_GENERATION"; return(false);}
    rec.generation=(int)gen;
    rec.id.server=server;
@@ -445,6 +492,11 @@ bool ESC_Decode(const string text,SEsRecord &rec,string &reason)
    rec.state.reason=why;
    rec.send_phase=(int)phase;
    rec.map_complete=(mcomp==1);
+   rec.plan_set=(pset==1);
+   rec.plan_tp=ptp;
+   rec.plan_vol_min=pmin;
+   rec.plan_vol_step=pstep;
+   rec.plan_vol_max=pmax;
    reason=ESC_Validate(rec);
    return(reason=="");
   }
@@ -460,6 +512,11 @@ void ESC_RestoreInit(SEsRestore &o)
    for(int i=0;i<ESC_MAX_ORDERS;i++)
       o.orders[i]=0;
    o.generation=0;
+   o.plan_set=false;
+   o.plan_tp=0.0;
+   o.plan_vol_min=0.0;
+   o.plan_vol_step=0.0;
+   o.plan_vol_max=0.0;
   }
 
 void ESC_Blocked(SEaState &st,SEsRestore &o,const string reason)
@@ -503,6 +560,11 @@ void ESC_Restore(const bool have_text,const string text,const SEsIdentity &expec
    for(int i=0;i<rec.n_orders;i++)
       o.orders[i]=rec.orders[i];
    o.generation=rec.generation;
+   o.plan_set=rec.plan_set;
+   o.plan_tp=rec.plan_tp;
+   o.plan_vol_min=rec.plan_vol_min;
+   o.plan_vol_step=rec.plan_vol_step;
+   o.plan_vol_max=rec.plan_vol_max;
    if(st.status==EA_ST_BLOCKED)
      {
       o.verdict=ESC_USABLE_BLOCKED;

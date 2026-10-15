@@ -49,7 +49,8 @@ enum ENUM_EX_FINAL
    EX_RECOVERY_REQUIRED,
    EX_NOT_IDLE,
    EX_NO_REQUEST,
-   EX_SENT_MAPPED
+   EX_SENT_MAPPED,
+   EX_REGISTERED
   };
 
 struct SExConfig
@@ -101,6 +102,7 @@ string EX_FinalName(const ENUM_EX_FINAL f)
       case EX_NOT_IDLE: return("NOT_IDLE");
       case EX_NO_REQUEST: return("NO_REQUEST");
       case EX_SENT_MAPPED: return("SENT_MAPPED");
+      case EX_REGISTERED: return("REGISTERED");
      }
    return("UNKNOWN");
   }
@@ -221,6 +223,31 @@ bool EX_Process(const SExConfig &cfg,CExitTransport *tr,SExRuntime &rt,const str
       res.reason="The record is not IDLE ("+ESC_VerdictName(o.verdict)+"): no send; use the restart flow";
       return(false);
      }
+   if(!o.plan_set)
+     {
+      res.final_state=EX_RECOVERY_REQUIRED;
+      res.reason="PLAN_MISSING: the IDLE record carries no authorised plan (an unregistered or old record); it is never filled in from the current inputs";
+      return(false);
+     }
+   string changed="";
+   if(st.direction!=q.direction) changed="direction";
+   else
+      if(st.level!=q.level_2r) changed="level_2R";
+      else
+         if(st.volume_initial!=q.volume_initial) changed="initial_volume";
+         else
+            if(o.plan_tp!=cfg.tp_price) changed="tp";
+            else
+               if(o.plan_vol_min!=sym.vol_min) changed="volume_min";
+               else
+                  if(o.plan_vol_step!=sym.vol_step) changed="volume_step";
+                  else
+                     if(o.plan_vol_max!=sym.vol_max) changed="volume_max";
+   if(changed!="")
+     {
+      res.reason="PLAN_CHANGED: "+changed+" differs from the authorised plan; nothing is persisted or sent";
+      return(false);
+     }
    SEaResult r;
    bool request=EA_OnQuote(st,id.position_id,q.direction,q.level_2r,q.bid,q.ask,q.volume_initial,pos.volume,sym.vol_min,sym.vol_step,sym.vol_max,r);
    if(!request)
@@ -253,6 +280,11 @@ bool EX_Process(const SExConfig &cfg,CExitTransport *tr,SExRuntime &rt,const str
    rec.id=id;
    rec.state=st;
    rec.send_phase=ESC_SEND_INTENT;
+   rec.plan_set=o.plan_set;
+   rec.plan_tp=o.plan_tp;
+   rec.plan_vol_min=o.plan_vol_min;
+   rec.plan_vol_step=o.plan_vol_step;
+   rec.plan_vol_max=o.plan_vol_max;
    string why;
    if(!EX_Save(cfg,rt,name,rec,why))
      {
@@ -300,6 +332,11 @@ bool EX_Process(const SExConfig &cfg,CExitTransport *tr,SExRuntime &rt,const str
    mapped.map_complete=true;
    mapped.n_orders=1;
    mapped.orders[0]=sr.order;
+   mapped.plan_set=o.plan_set;
+   mapped.plan_tp=o.plan_tp;
+   mapped.plan_vol_min=o.plan_vol_min;
+   mapped.plan_vol_step=o.plan_vol_step;
+   mapped.plan_vol_max=o.plan_vol_max;
    if(!EX_Save(cfg,rt,name,mapped,why))
      {
       rt.latched=true;
@@ -309,6 +346,102 @@ bool EX_Process(const SExConfig &cfg,CExitTransport *tr,SExRuntime &rt,const str
      }
    res.final_state=EX_SENT_MAPPED;
    res.reason=StringFormat("sent once; order %I64u mapped; run the restart flow to reconcile (returned true is not a fill proof)",sr.order);
+   return(true);
+  }
+
+// REGISTRATION of the authorised plan (explicit; the executor never starts a file by itself). Stores the bound IDLE state (direction, level 2R, initial volume) and the plan block
+// (TP, volume min / step / max). Never adopts a manual or unproven position (magic == the configured magic > 0, symbol, direction, volume equal to the plan's initial volume),
+// never overwrites, never rounds. Returns true only for REGISTERED.
+bool EX_Register(const SExConfig &cfg,CExitTransport *tr,SExRuntime &rt,const string name,const SEsIdentity &id,const SExQuote &q,SExResult &res)
+  {
+   res.final_state=EX_BLOCKED;
+   res.reason="";
+   res.sends=0;
+   res.order_ticket=0;
+   if(!cfg.enabled) {res.reason="DISABLED: the executor is off by default"; return(false);}
+   if((int)cfg.filling<(int)EX_FILL_UNSET || (int)cfg.filling>(int)EX_FILL_RETURN) {res.reason="INVALID_INPUT: filling is not a known value"; return(false);}
+   if((int)cfg.filter_policy<(int)EX_POL_UNSET || (int)cfg.filter_policy>(int)EX_POL_NEEDS_CLEAR) {res.reason="INVALID_INPUT: exit_filter_policy is not a known value"; return(false);}
+   if((int)cfg.filter_state<(int)EX_FS_UNKNOWN || (int)cfg.filter_state>(int)EX_FS_BLOCKED) {res.reason="INVALID_INPUT: exit_filter_state is not a known value"; return(false);}
+   if((int)cfg.test_save_fault<(int)EX_SAVE_NONE || (int)cfg.test_save_fault>(int)EX_SAVE_AFTER) {res.reason="INVALID_INPUT: test_save_fault is not a known value"; return(false);}
+   if(q.direction!=1 && q.direction!=-1) {res.reason="INVALID_INPUT: direction must be 1 (BUY) or -1 (SELL)"; return(false);}
+   if(cfg.ea_magic<=0) {res.reason="INPUT_UNSET: ea_magic"; return(false);}
+   if(!cfg.tp_set) {res.reason="TP_UNKNOWN"; return(false);}
+   if(rt.latched) {res.reason="LATCHED: an earlier uncertainty on this executor; restart and recover first"; return(false);}
+   SExAccount acct;
+   tr.ReadAccount(acct);
+   if(tr.IsReal())
+     {
+      if(!(cfg.real_authorised && cfg.authorisation==EX_AUTH_PHRASE)) {res.reason="REAL_NOT_AUTHORISED"; return(false);}
+      if(!acct.read_ok || !acct.demo) {res.reason="REAL_REQUIRES_DEMO_ACCOUNT"; return(false);}
+     }
+   if(!acct.read_ok) {res.reason="ACCOUNT_UNREADABLE"; return(false);}
+   if(acct.login!=id.login || acct.server!=id.server) {res.reason="ACCOUNT_IDENTITY_MISMATCH"; return(false);}
+   if(acct.margin_mode!=2) {res.reason="UNSUPPORTED_ACCOUNT_MODE: only HEDGING"; return(false);}
+   SExSymbol sym;
+   tr.ReadSymbol(id.symbol,sym);
+   if(!sym.read_ok || sym.tick_size<=0.0) {res.reason="SYMBOL_UNREADABLE"; return(false);}
+   if(!EX_OnGrid(q.level_2r,sym.tick_size)) {res.reason="PLAN_NOT_ON_SYMBOL_GRID: level_2R is refused, not rounded"; return(false);}
+   if(!EX_OnGrid(cfg.tp_price,sym.tick_size)) {res.reason="PLAN_NOT_ON_SYMBOL_GRID: TP is refused, not rounded"; return(false);}
+   string exact;
+   if(!ESC_Fnum(q.level_2r,exact) || !ESC_Fnum(cfg.tp_price,exact) || !ESC_Fnum(q.volume_initial,exact))
+     {
+      res.reason="PLAN_NOT_REPRESENTABLE_IN_RECORD: level_2R, TP or the initial volume does not round-trip through 12 decimals; nothing is rounded or persisted";
+      return(false);
+     }
+   if(MathAbs(cfg.tp_price-q.level_2r)<sym.tick_size/2.0) {res.reason="TP_EQUALS_2R: the interaction is an open decision"; return(false);}
+   if((q.direction==1 && cfg.tp_price<q.level_2r) || (q.direction==-1 && cfg.tp_price>q.level_2r)) {res.reason="TP_BEFORE_2R: inconsistent with the minimum of 2R"; return(false);}
+   SExPosition pos;
+   tr.FindPosition(id.position_id,pos);
+   if(!pos.found || pos.ticket==0 || pos.identifier!=id.position_id) {res.reason="POSITION_NOT_FOUND"; return(false);}
+   if(pos.symbol!=id.symbol || pos.magic!=cfg.ea_magic || pos.type!=(q.direction==1 ? 0 : 1))
+     {
+      res.reason="OWNERSHIP_NOT_PROVEN: a manual or foreign position is never adopted (symbol, magic or direction differ)";
+      return(false);
+     }
+   if(pos.volume!=q.volume_initial) {res.reason="POSITION_VOLUME_DIFFERS_FROM_THE_PLAN: the initial volume must equal the volume of the position"; return(false);}
+   SEsResult sp;
+   ES_Split(q.volume_initial,sym.vol_min,sym.vol_step,sym.vol_max,sp);
+   if(sp.status!=ES_OK)
+     {
+      res.reason="REGISTRATION_REFUSED: the 80/20 split is not realisable ("+ES_StatusName(sp.status)+"): "+sp.reason;
+      return(false);
+     }
+   if(ESF_Exists(name) || ESF_Exists(name+ESF_TMP_SUFFIX)) {res.reason="ALREADY_EXISTS: a state file exists; registration never overwrites"; return(false);}
+   SEsRecord rec;
+   ESC_RecordInit(rec);
+   rec.generation=1;
+   rec.id=id;
+   rec.state.bound=true;
+   rec.state.position_id=id.position_id;
+   rec.state.direction=q.direction;
+   rec.state.level=q.level_2r;
+   rec.state.volume_initial=q.volume_initial;
+   rec.plan_set=true;
+   rec.plan_tp=cfg.tp_price;
+   rec.plan_vol_min=sym.vol_min;
+   rec.plan_vol_step=sym.vol_step;
+   rec.plan_vol_max=sym.vol_max;
+   string why;
+   if(!EX_Save(cfg,rt,name,rec,why))
+     {
+      rt.latched=true;
+      res.final_state=EX_RECOVERY_REQUIRED;
+      res.reason="REGISTRATION_SAVE_FAILED: "+why+"; the file may or may not exist; nothing else is done";
+      return(false);
+     }
+   SEaState st2;
+   SEsRestore o2;
+   ESF_Load(name,id,st2,o2);
+   if(!(o2.verdict==ESC_USABLE_IDLE && o2.generation==1 && o2.plan_set && o2.plan_tp==cfg.tp_price && st2.direction==q.direction && st2.level==q.level_2r &&
+        st2.volume_initial==q.volume_initial && o2.plan_vol_min==sym.vol_min && o2.plan_vol_step==sym.vol_step && o2.plan_vol_max==sym.vol_max))
+     {
+      rt.latched=true;
+      res.final_state=EX_RECOVERY_REQUIRED;
+      res.reason="REGISTRATION_NOT_VERIFIED: the re-load does not show the registered plan";
+      return(false);
+     }
+   res.final_state=EX_REGISTERED;
+   res.reason="registered: the authorised plan is stored; a request may only be made against exactly this plan";
    return(true);
   }
 

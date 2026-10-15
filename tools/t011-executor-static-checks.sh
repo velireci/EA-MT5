@@ -5,7 +5,7 @@ set -u
 cd "$(dirname "$0")/.."
 FAIL=0
 NEG=$(mktemp -d); trap 'rm -rf "$NEG"' EXIT
-BASE=a70fde6
+BASE=129a267
 SEAM=src/include/ExitTransport.mqh
 FAKE=src/include/ExitTransportFake.mqh
 REAL=src/include/ExitTransportReal.mqh
@@ -69,6 +69,18 @@ for need in ('(int)cfg.filling>(int)EX_FILL_RETURN', '(int)cfg.filter_policy>(in
     assert need in c, need
 real = re.sub(r'//[^\n]*', '', open('src/include/ExitTransportReal.mqh', encoding='ascii').read())
 assert 'else return(false);' in real and not re.search(r'else\s+r\.type_filling\s*=\s*ORDER_FILLING_RETURN', real), 'an unknown filling must not map to RETURN'
+for need in ('bool EX_Register(', 'if(!o.plan_set)', 'PLAN_CHANGED', 'st.direction!=q.direction', 'st.level!=q.level_2r', 'st.volume_initial!=q.volume_initial', 'o.plan_tp!=cfg.tp_price',
+             'o.plan_vol_min!=sym.vol_min', 'o.plan_vol_step!=sym.vol_step', 'o.plan_vol_max!=sym.vol_max', 'rec.plan_set=o.plan_set;', 'mapped.plan_set=o.plan_set;',
+             'ESF_Exists(name) || ESF_Exists(name+ESF_TMP_SUFFIX)', 'ES_Split(q.volume_initial,sym.vol_min,sym.vol_step,sym.vol_max,sp)', 'pos.magic!=cfg.ea_magic'):
+    assert need in c, need
+body_ = c[c.index('bool EX_Process('):c.index('bool EX_Register(')]
+assert body_.index('if(!o.plan_set)') < body_.index('EA_OnQuote(') and body_.index('PLAN_CHANGED') < body_.index('tr.PreCheck(') < body_.index('EX_Save('), 'the plan is compared before any persist or send'
+reg_ = c[c.index('bool EX_Register('):c.index('bool EX_Reconcile(')]
+assert 'tr.Send(' not in reg_ and 'rt.send_calls' not in reg_ and 'ESF_InitFresh' not in reg_, 'registration never sends'
+cod = re.sub(r'//[^\n]*', '', open('src/include/ExitStateCodec.mqh', encoding='ascii').read())
+assert '#define ESC_VERSION 2' in cod and all(k in cod for k in ('"PLAN_SET="', '"PLAN_TP="', '"PLAN_VOL_MIN="', '"PLAN_VOL_STEP="', '"PLAN_VOL_MAX="', '"PLAN_SET","PLAN_TP","PLAN_VOL_MIN","PLAN_VOL_STEP","PLAN_VOL_MAX"')), 'codec plan block'
+flw = re.sub(r'//[^\n]*', '', open('src/include/ExitRestartFlow.mqh', encoding='ascii').read())
+assert all(k in flw for k in ('rec.plan_set=o.plan_set;', 'rec.plan_tp=o.plan_tp;', 'rec.plan_vol_min=o.plan_vol_min;', 'rec.plan_vol_step=o.plan_vol_step;', 'rec.plan_vol_max=o.plan_vol_max;')), 'the flow must carry the plan over'
 assert not re.search(r'FileOpen|FileMove|FileWrite|FileRead|FileDelete|TimeCurrent|TimeGMT|TimeLocal|Sleep\s*\(|[rR]etry\w*\s*(=|\(|\+\+)|NormalizeDouble|MathRound\(\s*q\.', c), 'forbidden code in the core'
 PYEOF
 
@@ -113,7 +125,7 @@ PYEOF
 
 echo "=== S6: verified modules unchanged since $BASE ==="
 if git cat-file -e "$BASE^{commit}" 2>/dev/null; then
-  for p in src/include/ExitSplit.mqh src/include/ExitActivation.mqh src/include/ExitReconciliation.mqh src/include/ExitSnapshotAdapter.mqh src/include/ExitStateCodec.mqh src/include/ExitStateFile.mqh src/include/ExitRestartFlow.mqh src/XauUsdTradePreview.mq5; do
+  for p in src/include/ExitSplit.mqh src/include/ExitActivation.mqh src/include/ExitReconciliation.mqh src/include/ExitSnapshotAdapter.mqh src/include/ExitStateFile.mqh src/XauUsdTradePreview.mq5; do
     git diff --quiet "$BASE" -- "$p" && echo "  PASS $p identical to $BASE" || { echo "  FAIL $p differs from $BASE"; FAIL=1; }
   done
 else

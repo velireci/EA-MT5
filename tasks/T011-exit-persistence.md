@@ -47,3 +47,6 @@ ExitSnapshotAdapter, DailyBridge, the preview.
   injected faults, 17 mutants, and equality of the MQL5 fixture block with the generator.
 * MQL5 `src/tests/T011_PersistTest.mq5` (pure, same rows + real `EA_OnQuote` / `EA_OnReport` / `ER_Reconcile` flows) and `src/tests/T011_PersistFileTest.mq5` (sandbox files named `VELO_T011_PERSIST_SELFTEST_*`, deleted before and after).
 * `tools/t011-persist-static-checks.sh`.
+
+## Update (base 129a267): format VERSION 2 and the authorised plan
+The record now carries the authorised plan block (`PLAN_SET`, `PLAN_TP`, `PLAN_VOL_MIN`, `PLAN_VOL_STEP`, `PLAN_VOL_MAX`) next to the bound state's direction / level / initial volume; see docs/T011-executor-contract.md section 10. VERSION 1 records are rejected (UNSUPPORTED_VERSION), never migrated.

@@ -83,3 +83,15 @@ The executor makes ONE trading call per request and never repeats it (no retry l
   every other answer, including a clear-looking reject code, leaves the intent on disk and is RECOVERY_REQUIRED without retry. A rejection table may be added only after the return codes are verified.
 * Returned true is not a fill proof; a fill is proven only by the reconciliation. The executor never calls `EA_OnReport(FULL)`.
 * Implemented (detached, DISABLED by default, fake transport in tests, real transport never executed): `ExitExecutor.mqh`, `ExitTransport.mqh`, `ExitTransportFake.mqh`, `ExitTransportReal.mqh`. Open points: docs/T011-executor-api-verification.md.
+
+## 10. The authorised plan (executor stage, base 129a267)
+Gap closed: a change of the plan or of the volume parameters between the registration of a position and the 2R quote could pass undetected, because nothing but the bound direction / level / initial volume was stored.
+* What was already stored (not duplicated): the bound `SEaState` of an IDLE record holds direction, level 2R and initial volume (and the position id). What was missing, and is now stored: TP and the symbol volume minimum / step / maximum.
+* Codec change (necessary): record format VERSION 2 adds `PLAN_SET`, `PLAN_TP`, `PLAN_VOL_MIN`, `PLAN_VOL_STEP`, `PLAN_VOL_MAX` before the order map. Validation: a plan needs a bound state, positive values, min <= max, exact 12-decimal values, and for a request-bearing state the request step must equal the plan step.
+  `ExitRestartFlow` carries the plan over unchanged when it saves. A VERSION 1 record has no plan: it is rejected as UNSUPPORTED_VERSION (RECOVERY_REQUIRED) and is NEVER migrated or completed from the current inputs; an IDLE record of version 2 without a plan is PLAN_MISSING (RECOVERY_REQUIRED).
+* Registration (`EX_Register`, explicit, never automatic): requires the executor enabled, the position found by identifier with magic == the configured magic (> 0), the same symbol and direction, a volume equal to the plan's initial volume, level and TP exactly on the tick grid and
+  exactly representable in the record, TP beyond 2R, a realisable 80/20 split (`ES_Split`), HEDGING, the real-transport authorisation and a DEMO account when the transport is real; it never overwrites an existing file or temporary file, never rounds, saves generation 1 and re-loads it to verify.
+  A manual or foreign position (magic 0 or another magic) is never adopted. Without a file the executor never starts from scratch: `EX_Process` returns RECOVERY_REQUIRED (LOAD_UNUSABLE: MISSING).
+* Before every request `EX_Process` compares direction, level 2R, initial volume, TP and the live volume min / step / max with the stored plan (exact equality). A difference is BLOCKED ("PLAN_CHANGED: <field>") with zero sends and NO new INTENT; a missing plan is RECOVERY_REQUIRED.
+* Not changed: exit policies, the activation / reconciliation modules, the strategy.
+* Ownership proof remains the magic number plus the registration by the executor; a magic collision with another instance or script cannot be detected.

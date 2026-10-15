@@ -89,6 +89,11 @@ void ERF_FillRecord(SEsRecord &rec,const int generation,const SEsIdentity &id,co
    rec.state=st;
    rec.send_phase=ESC_SEND_MAPPED;
    rec.map_complete=o.map_complete;
+   rec.plan_set=o.plan_set;
+   rec.plan_tp=o.plan_tp;
+   rec.plan_vol_min=o.plan_vol_min;
+   rec.plan_vol_step=o.plan_vol_step;
+   rec.plan_vol_max=o.plan_vol_max;
    rec.n_orders=o.n_orders;
    for(int i=0;i<o.n_orders;i++)
       rec.orders[i]=o.orders[i];

@@ -26,19 +26,18 @@ def strip_comments(t):
     return re.sub(r'//[^\n]*', '', re.sub(r'(?s)/\*.*?\*/', '', t))
 
 
-def prepare(store, kind):
-    if kind != fx.K_MISSING:
-        ok, t = p.encode(fx.start_record(kind))
-        assert ok, t
+def prepare(store, kind, inputs=None):
+    t = fx.start_text(kind, inputs)
+    if t is not None:
         with open(store.path(NAME), 'wb') as f:
             f.write(t.encode('latin-1'))
 
 
 def disk(store):
     if not store.exists(NAME):
-        return '', 0, 0
+        return '', 0, 0, 0
     ok, rc = p.decode(store.read(NAME))
-    return (rc.state.status, rc.generation, len(rc.orders)) if ok else ('CORRUPT', 0, 0)
+    return (rc.state.status, rc.generation, len(rc.orders), int(rc.plan_set)) if ok else ('CORRUPT', 0, 0, 0)
 
 
 def run_rows(mod_ex):
@@ -46,14 +45,14 @@ def run_rows(mod_ex):
     for r in fx.ROWS:
         with tempfile.TemporaryDirectory() as d:
             store = p.FileStore(d)
-            prepare(store, r['start'])
             cfg, tr, q = fx.setup(r['tweak'], r['resp'])
+            prepare(store, r['start'], None if fx.uses_default_plan(r['tweak']) else (cfg, tr, q))
             if r['fault']:
                 cfg.test_save_fault, cfg.test_fault_save_no = r['fault'], r['fault_no']
-            res = mod_ex.process(cfg, tr, mod_ex.Runtime(), store, NAME, fx.IDENT, q)
-            dk, gen, orders = disk(store)
-            got = (res.final, len(tr.sends), dk, gen, orders)
-            exp = (r['final'], r['sends'], r['disk'], r['gen'], r['orders'])
+            res = (mod_ex.register if r['reg'] else mod_ex.process)(cfg, tr, mod_ex.Runtime(), store, NAME, fx.IDENT, q)
+            dk, gen, orders, plan = disk(store)
+            got = (res.final, len(tr.sends), dk, gen, orders, plan)
+            exp = (r['final'], r['sends'], r['disk'], r['gen'], r['orders'], r['plan'])
             if got != exp or r['reason'] not in res.reason or store.exists(NAME + '.tmp') or res.sends != len(tr.sends):
                 bad.append((r['name'], got, exp, res.reason))
     return bad
@@ -92,6 +91,19 @@ def run_behaviour(mod_ex):
         b = mod_ex.process(cfg, tr, rt, store, NAME, fx.IDENT, q)
         if not (a.final == mod_ex.RECOVERY_REQUIRED and b.final == mod_ex.BLOCKED and not tr.sends):
             bad.append(('latch', a.final, b.final, len(tr.sends)))
+    with tempfile.TemporaryDirectory() as d:
+        store = p.FileStore(d)
+        cfg, tr, q = fx.setup(0, 0)
+        tr.position.magic = 0
+        r1 = mod_ex.register(cfg, tr, mod_ex.Runtime(), store, NAME, fx.IDENT, q)
+        cfg, tr, q = fx.setup(0, 0)
+        r2 = mod_ex.register(cfg, tr, mod_ex.Runtime(), store, NAME, fx.IDENT, q)
+        r3 = mod_ex.register(cfg, tr, mod_ex.Runtime(), store, NAME, fx.IDENT, q)
+        c2, t2, q2 = fx.setup(0, 0)
+        q2.level_2r, q2.bid, q2.ask = 2000.5, 2000.5, 2000.8
+        n = mod_ex.process(c2, t2, mod_ex.Runtime(), store, NAME, fx.IDENT, q2)
+        if not (r1.final == mod_ex.BLOCKED and r2.final == mod_ex.REGISTERED and r3.final == mod_ex.BLOCKED and n.final == mod_ex.BLOCKED and not t2.sends):
+            bad.append(('registration / plan', r1.final, r2.final, r3.final, n.final))
     with tempfile.TemporaryDirectory() as d:
         store = Lying(d)
         prepare(store, fx.K_IDLE)
@@ -238,10 +250,70 @@ class Sequences(unittest.TestCase):
         cfg.tp_price = 1980.0
         with tempfile.TemporaryDirectory() as d2:
             st2 = p.FileStore(d2)
-            prepare(st2, fx.K_IDLE)
+            prepare(st2, fx.K_IDLE, (cfg, tr, q))
             a = ex.process(cfg, tr, ex.Runtime(), st2, NAME, fx.IDENT, q)
             self.assertEqual(a.final, ex.SENT_MAPPED)
             self.assertEqual((tr.sends[0].type, tr.sends[0].price), (0, 1989.4))
+
+
+class Registration(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = p.FileStore(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_register_then_restart_before_2r_then_the_unchanged_flow_sends_once(self):
+        cfg, tr, q = fx.setup(0, 0)
+        r = ex.register(cfg, tr, ex.Runtime(), self.store, NAME, fx.IDENT, q)
+        self.assertEqual((r.final, len(tr.sends), disk(self.store)), (ex.REGISTERED, 0, ('IDLE', 1, 0, 1)))
+        # "restart" before 2R: a new runtime, quotes below the level produce no request and change nothing on disk
+        before = self.store.read(NAME)
+        below = ex.Quote(1, 2000.0, 1999.0, 1999.3, 0.5)
+        for _ in range(3):
+            n = ex.process(cfg, tr, ex.Runtime(), self.store, NAME, fx.IDENT, below)
+            self.assertEqual((n.final, len(tr.sends)), (ex.NO_REQUEST, 0))
+        self.assertEqual(self.store.read(NAME), before)
+        # the plan has not changed: the flow is unchanged and sends exactly once, the plan survives the INTENT and the MAP records
+        a = ex.process(cfg, tr, ex.Runtime(), self.store, NAME, fx.IDENT, q)
+        self.assertEqual((a.final, len(tr.sends), disk(self.store)), (ex.SENT_MAPPED, 1, ('REQUEST_PENDING', 3, 1, 1)))
+        res = fl.run(self.store, NAME, fx.IDENT, ffx.PROFILES[ffx.PI['FULL']][1])
+        self.assertEqual((res.final, res.saved), (fl.DONE, True))
+        self.assertEqual(disk(self.store)[3], 1)                                  # the restart flow carries the plan over
+
+    def test_a_plan_change_after_a_restart_before_2r_blocks_with_zero_sends(self):
+        cfg, tr, q = fx.setup(0, 0)
+        ex.register(cfg, tr, ex.Runtime(), self.store, NAME, fx.IDENT, q)
+        before = self.store.read(NAME)
+        for name, mut in (('level', lambda c, t, qq: setattr(qq, 'level_2r', 2000.5) or setattr(qq, 'bid', 2000.5) or setattr(qq, 'ask', 2000.8)),
+                          ('tp', lambda c, t, qq: setattr(c, 'tp_price', 2020.0)), ('direction', lambda c, t, qq: (setattr(qq, 'direction', -1), setattr(t.position, 'type', 1),
+                                                                                                                 setattr(c, 'tp_price', 1990.0), setattr(qq, 'bid', 1999.7), setattr(qq, 'ask', 2000.0))),
+                          ('initial volume', lambda c, t, qq: (setattr(qq, 'volume_initial', 0.6), setattr(t.position, 'volume', 0.6))),
+                          ('min', lambda c, t, qq: setattr(t.symbol, 'vol_min', 0.05)), ('step', lambda c, t, qq: setattr(t.symbol, 'vol_step', 0.05)),
+                          ('max', lambda c, t, qq: setattr(t.symbol, 'vol_max', 10.0))):
+            c2, t2, q2 = fx.setup(0, 0)
+            mut(c2, t2, q2)
+            n = ex.process(c2, t2, ex.Runtime(), self.store, NAME, fx.IDENT, q2)
+            self.assertEqual((n.final, len(t2.sends)), (ex.BLOCKED, 0), name)
+            self.assertIn('PLAN_CHANGED', n.reason, name)
+            self.assertEqual(self.store.read(NAME), before, name)                 # no INTENT, nothing written
+
+    def test_registration_never_adopts_a_manual_position_or_overwrites(self):
+        cfg, tr, q = fx.setup(0, 0)
+        tr.position.magic = 0
+        r = ex.register(cfg, tr, ex.Runtime(), self.store, NAME, fx.IDENT, q)
+        self.assertEqual((r.final, self.store.exists(NAME)), (ex.BLOCKED, False))
+        cfg, tr, q = fx.setup(0, 0)
+        self.assertEqual(ex.register(cfg, tr, ex.Runtime(), self.store, NAME, fx.IDENT, q).final, ex.REGISTERED)
+        again = ex.register(cfg, tr, ex.Runtime(), self.store, NAME, fx.IDENT, q)
+        self.assertEqual(again.final, ex.BLOCKED)
+        self.assertIn('ALREADY_EXISTS', again.reason)
+
+    def test_without_a_file_the_executor_never_starts_from_scratch(self):
+        cfg, tr, q = fx.setup(0, 0)
+        n = ex.process(cfg, tr, ex.Runtime(), self.store, NAME, fx.IDENT, q)
+        self.assertEqual((n.final, len(tr.sends), self.store.exists(NAME)), (ex.RECOVERY_REQUIRED, 0, False))
 
 
 class Mutants(unittest.TestCase):
@@ -277,6 +349,14 @@ class Mutants(unittest.TestCase):
             ('wide grid tolerance', "8 * sys.float_info.epsilon * max(1.0, abs(r))", "1e-6 * max(1.0, abs(r))"),
             ('non finite price on the grid', "    if not _finite(x) or not _finite(tick) or x <= 0 or tick <= 0:\n        return False", "    if False:\n        return False"),
             ('non representable plan persisted', "    if p.fnum(q.level_2r) is None or p.fnum(cfg.tp_price) is None:", "    if False:"),
+            ('plan not compared', "        if stored != now:", "        if False:"),
+            ('missing plan filled in', "    if not o.plan_set:", "    if False:"),
+            ('plan not carried into the intent record', "return p.Record(gen, identity, st, phase, complete, list(orders), o.plan_set, o.plan_tp, o.plan_vol_min, o.plan_vol_step, o.plan_vol_max)",
+             "return p.Record(gen, identity, st, phase, complete, list(orders))"),
+            ('registration adopts any magic', "    if pos.symbol != identity.symbol or pos.magic != cfg.ea_magic or pos.type != (0 if q.direction == 1 else 1):\n        return block('OWNERSHIP_NOT_PROVEN: a manual", "    if False:\n        return block('OWNERSHIP_NOT_PROVEN: a manual"),
+            ('registration overwrites', "    if store.exists(name) or store.exists(name + '.tmp'):\n        return block('ALREADY_EXISTS", "    if False:\n        return block('ALREADY_EXISTS"),
+            ('registration of a position with another volume', "    if pos.volume != q.volume_initial:", "    if False:"),
+            ('registration save failure ignored', "    if not ok:\n        rt.latched = True\n        res.final, res.reason = RECOVERY_REQUIRED, 'REGISTRATION_SAVE_FAILED", "    if False:\n        rt.latched = True\n        res.final, res.reason = RECOVERY_REQUIRED, 'REGISTRATION_SAVE_FAILED"),
             ('trading permission ignored', "    if not acct.trade_allowed:", "    if False:"),
             ('login not compared', "    if acct.login != identity.login or acct.server != identity.server:", "    if False:"),
         ]
