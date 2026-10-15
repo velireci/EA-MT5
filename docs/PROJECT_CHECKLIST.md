@@ -2,7 +2,25 @@
 
 Përditësuar më 15.10.2026. Pamje e evidencës së njohur, jo kontroll i ri i GitHub. Nuk matet përqindja nga numri i testeve. Programuar ≠ testuar plotësisht ≠ validuar nga klienti.
 
-## Ku jemi
+## Statusi aktual — 15.10.2026
+
+Kjo përmbledhje zëvendëson statuset e vjetra të kompilimit dhe MT5 në shënimet historike më poshtë. Shenja [x] tregon vetëm bllokun/testin e përshkruar, jo që EA-ja është përfunduar.
+
+- [x] T013/T015: ekzekutuesi dhe porta e hyrjes me transport FAKE; pronari MT5 EntryExecutorTest 170/0 dhe EntryGateTest 134/0.
+- [x] T016 në fe53c06: orkestruesi FAKE; pronari MT5 EntryOrchestratorTest 97/0, SetupPlanBridgeTest 77/0.
+- [x] T017 në e2d20db: rekordet FAKE ruhen në disk; pronari MT5 EntryPersistenceTest 99/0.
+- [x] T018 në c009dbf: ekspozimi dhe korrigjimet; Codex dy kompilime 0/0, 115 teste Python të zinxhirit kaluan; pronari MT5 ExposureReaderTest 53/0. Leximi real nga EA ende pa vëzhgim.
+- [ ] T019 në 3d1e084: kodi i lifecycle-it është i shkruar; Codex EntryLifecycleTest dhe EA 0 errors / 0 warnings, 12 teste Python lifecycle kaluan. Rishikimi riprodhoi dy boshllëqe që bllokojnë dorëzimin.
+- [ ] T019: indeksi duhet ruajtur dhe verifikuar PARA dërgimit; ndërprerja mes dërgimit dhe LC_Register nuk duhet të lërë rekord pa indeks. Indeks i plotë ose ruajtje/rilexim i dështuar duhet të japë zero dërgime. Bllokimi në portë nuk konsumon sinjalin.
+- [ ] T019: pronësi ekskluzive e instancës për indeksin, përpara ngarkimit dhe veprimeve. Dy instanca nuk duhet të humbasin sinjalet e njëra-tjetrës; instanca pa kyçje nuk vepron.
+- [ ] Pas korrigjimit të përbashkët T019: rikompilim dhe një raund i përmbledhur MT5. Versioni 3d1e084 nuk ka ekzekutim MT5 të raportuar.
+- [ ] Lidhja e mbushjes me menaxhimin T011, duke ruajtur kontratën e SL/pronësisë; ndryshimet e kontratës kërkojnë marrëveshje të pronarit.
+- [ ] Vendimet strategjike: lista e vetme me 19 pika është në docs/EA_INTEGRATION_PLAN.md. Politikat e pazgjidhura mbeten UNSET=BLOCK.
+- [ ] Aktivizimi real dhe prova demo e rrjedhës së plotë kërkojnë autorizim të veçantë. EA-ja mbetet me transport FAKE; T011 dhe T012 nuk shpallen të mbyllura.
+
+**Ritmi i miratuar:** bashko pjesët e lidhura në një paketë, testo/korrigjo gjatë ndërtimit, përditëso dokumentet në fund dhe jep një raund MT5 për pronarin. Pa task-e, skedarë ose diagnostikë të panevojshme. Përparimi matet nga EA-ja e integruar që funksionon, jo nga numri i testeve/skedarëve.
+
+## Baza e ndërtuar — shënime historike
 
 H4 → M15 → FVG → kthim është ndërtuar dhe vëzhguar në replay. T005 u dorëzua te 67f02e5; Codex Python 39/0, MetaEditor 0/0; pronari MT5 572/0. T006 (sizing i pastër me buxhet risku të dhënë) te 559794a: Codex Python 47/0 dhe MetaEditor 0/0; pronari MT5 14.10.2026 18:42:14: 710 passed, 0 failed (të përcjella, jo ekzekutim i Claude). Moduli i pastër është verifikuar; integrimi me brokerin jo. T007 (plan i pastër, kontrolle lejeje dhe kërkesë anulimi, pa urdhra) është programuar me teste Python 34/0 të ekzekutuara nga Claude dhe kontrolle statike; kompilimi MetaEditor dhe MT5 janë UNVERIFIED dhe moduli nuk është i lidhur. Robot që hap dhe menaxhon urdhra: ende jo.
 
@@ -211,8 +229,8 @@ Mbetet: orari nuk dërgon ende anulime ose mbyllje; persistence/catchup/lajmet t
 - [x] T016: orkestruesi FAKE i korrigjuar: rikuperimi i të dhënave rinis baseline, M4ContextEqual krahason kontekstin e plotë, sizing-u përdor sondën e brokerit pas gjeometrisë. Codex: 128 Python OK, pesë kompilime 0 errors / 0 warnings, kontrollet statike me 23 kontrolle negative kalojnë; kontrollet e bazës Git u kapërcyen në eksportin lokal.
 - [x] T016: pronari MT5 në fe53c06, XAUUSD.fx M15: EntryOrchestratorTest 97/0 (19:05:58), SetupPlanBridgeTest 77/0 (19:06:09), 15.10.2026. Evidencë e përcjellë; FAKE vetëm, pa provë live të EA-së dhe pa integrim T011.
 - [x] T018: lexuesi i ekspozimit dhe korrigjimet u verifikuan në c009dbf: Codex dy kompilime 0/0, 115 teste Python të zinxhirit kalojnë; pronari MT5 15.10.2026 20:57:51.401, XAUUSD.fx M15: ExposureReaderTest 53 passed / 0 failed. Evidencë e përcjellë. Transporti mbetet FAKE; leximi real nga EA kërkon ende vëzhgim.
-- [x] T019: cikli i jetës i hyrjeve (indeks + ndalesë e ruajtur, reconcile në nisje/timer, anulim vetëm për ngjarje të aktivizuar nga pronari, FILLED_UNMANAGED) i lidhur në EA v1.04; lista e vetme e vendimeve bllokuese te docs/EA_INTEGRATION_PLAN.md; sandbox, kompilimi/MT5 UNVERIFIED; lidhja me T011 NUK u bë (kërkon marrëveshje)
-- [x] T019 korrigjim: indeksi i ruajtur dhe i rilexuar para çdo dërgimi (çengeli i portës CEgPreSend; indeks i plotë/i dëmtuar/dështim ruajtjeje = zero dërgime, porta që bllokon nuk rezervon) dhe kyçje ekskluzive e indeksit (VELO_T013_LOCK_INDEX_<login>; vetëm pronari e çliron); EA v1.05; sandbox, kompilimi/MT5 UNVERIFIED
+- [ ] T019: lifecycle i lidhur në EA v1.04, por jo i miratuar për dorëzim. Codex në 3d1e084: dy kompilime 0/0 dhe 12 teste Python kaluan; rishikimi riprodhoi indeksim pas dërgimit dhe humbje përditësimesh nga instanca konkurruese. Të dyja kërkojnë korrigjim/regresione bashkë, pastaj një raund MT5. T011 mbetet i palidhur; transporti FAKE.
+- [ ] T019 korrigjim (i dorëzuar; pret kompilimin Codex dhe raundin MT5): indeksi i ruajtur dhe i rilexuar para çdo dërgimi (çengeli i portës CEgPreSend; indeks i plotë/i dëmtuar/dështim ruajtjeje = zero dërgime, porta që bllokon nuk rezervon) dhe kyçje ekskluzive e indeksit (VELO_T013_LOCK_INDEX_<login>; vetëm pronari e çliron); EA v1.05; sandbox, kompilimi/MT5 UNVERIFIED
 - [x] T017: ruajtje në disk për rekordet FAKE, namespace i veçuar dhe kyçje; transporti mbetet FAKE. Codex: 137 Python OK, pesë kompilime 0/0, kontrolle statike me 9 kontrolle negative të reja.
 - [x] T017: pronari MT5 në e2d20db, XAUUSD.fx M15, 15.10.2026 20:38:57.500: EntryPersistenceTest 99 passed / 0 failed. Evidencë e përcjellë. Nuk pretendohet rikuperim i plotë i orkestruesit ose ekzekutim real.
 - [x] T014 (e përcjellë): Codex 0/0 + 27 Python, MT5 SetupPlanBridgeTest 77/0
