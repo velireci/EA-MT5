@@ -312,6 +312,7 @@ public:
         }
       string md;
       int ms=manager.Manage(rec,idn,name,md);
+      if(ms==LC_SINK_CONFIRMED) manager.Forget(rec.position_id);     // finished: the slot is released (the T011 record stays; a restart before the index is saved recovers the DONE from it)
       if(ms==LC_SINK_CONFIRMED) detail=detail_in+" | "+md;
       else
          if(ms==LC_SINK_ACTIVE) detail=(md=="ACTIVE" ? md : detail_in+" | MANAGEMENT "+md);

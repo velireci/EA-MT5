@@ -157,6 +157,7 @@ cmp_ = rg[rg.index('int Compare('):rg.index('int Attempt(')]
 for need in ('phrase!=EX_AUTH_PHRASE', '!acct.demo', 'acct.margin_mode!=2', 'rec.magic==magic', 'pos.magic!=magic', 'EX_Geometry(', 'o.plan_e_src==pos.price_open', 'st.level==geo.level_2r', 'o.plan_vol_step==sym.vol_step'):
     assert need in cmp_, 'the comparison of an existing record lacks: ' + need
 assert 'ESF_Save' not in cmp_ and 'ETD_Register' not in cmp_, 'the comparison never writes'
+assert 'if(ms==LC_SINK_CONFIRMED) manager.Forget(rec.position_id);' in rg and 'if(n>=MH_MAX_SLOTS) {detail="MANAGEMENT_SLOTS_FULL"' in t, 'a finished management releases its slot; the capacity is enforced'
 assert 'q.level_2r=0.0;' in rg, 'the 2R level is computed by T011 itself from the real open price (R_GEOM), never supplied'
 assert 'TP_EQUALS_2R' not in t and 'tp_equals' not in t.lower(), 'the TP / 2R rule is T011 own and is not touched or interpreted here'
 PYEOF
@@ -316,6 +317,9 @@ mut ZJ.mqh $EA 's/   g_registrar.manager=GetPointer(g_mgr);/   \/\/ none/;s/    
 expect_assert "$NEG/l3.py" "$NEG/ZJ.mqh" "a registrar that never hands over to the management" "management is wired"
 mut ZK.mqh $MH 's/         if(ETD_Tick(slots\[i\].cfg,tr,slots\[i\].rt,slots\[i\].name,slots\[i\].id,q,slots\[i\].st,res)) sent++;/         if(EX_Process(slots[i].cfg,tr,slots[i].rt,slots[i].name,slots[i].id,q,res)) sent++;/'
 expect_assert "$NEG/l6.py" "$NEG/ZK.mqh" "a request path that bypasses the driver" "forbidden: EX_Process"
+
+mut ZL.mqh $MH 's/      if(ms==LC_SINK_CONFIRMED) manager.Forget(rec.position_id);.*$/      \/\/ none/'
+expect_assert "$NEG/l6.py" "$NEG/ZL.mqh" "a slot that outlives its finished management" "releases its slot"
 
 [ $FAIL -eq 0 ] && echo "LIFECYCLE STATIC CHECKS: ALL PASS (static only; MetaEditor compile and MT5 run UNVERIFIED)" || echo "LIFECYCLE STATIC CHECKS: FAILURES"
 exit $FAIL

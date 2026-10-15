@@ -300,6 +300,7 @@ class Registrar:
             return status, detail
         mstatus, mdetail = self.manager.manage(rec, ident, name)
         if mstatus == SINK_CONFIRMED:
+            self.manager.forget(rec.position_id)       # finished: the slot is released (the T011 record stays; a restart before the index is saved recovers the DONE from it)
             return mstatus, detail + ' | ' + mdetail
         return mstatus, (mdetail if mdetail == 'ACTIVE' or mstatus != SINK_ACTIVE else detail + ' | MANAGEMENT ' + mdetail)
 
@@ -361,6 +362,8 @@ class Manager:
     T011 record is DONE or the position is proven closed, so after a restart the sweep hands every indexed fill back to manage(), which runs the driver's recovery before anything can arm.
     A blocked / unrecoverable record, a position that cannot be proven and an exhausted lock halt the layer through the registrar's REFUSED path. It never touches a position that has no T011 record."""
 
+    MAX_SLOTS = 16                                 # mirrors MH_MAX_SLOTS; a slot is released as soon as the management is confirmed finished
+
     def __init__(self, tr, store, locks, cfg_for, raw=None):
         self.tr, self.store, self.locks, self.cfg_for = tr, store, locks, cfg_for
         self.raw = raw or (lambda: (None, None))      # fixtures for the FAKE transport; a live transport ignores them
@@ -390,6 +393,8 @@ class Manager:
     def manage(self, rec, ident, name):
         slot = self.slots.get(rec.position_id)
         if slot is None:
+            if len(self.slots) >= self.MAX_SLOTS:
+                return SINK_REFUSED, 'MANAGEMENT_SLOTS_FULL'
             slot = self.slots[rec.position_id] = Slot(ident, name, rec)
         if slot.blocked:
             return SINK_REFUSED, slot.blocked

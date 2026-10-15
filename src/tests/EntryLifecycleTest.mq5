@@ -4,7 +4,7 @@
 // NOT YET COMPILED OR RUN (UNVERIFIED): Codex compiles it, the owner runs it in MT5.
 #property strict
 #property script_show_inputs
-#property version "1.04"
+#property version "1.05"
 #include "../include/EntryLifecycle.mqh"
 #include "../include/EntryTransportFake.mqh"
 #include "../include/ExitTransportFake.mqh"
@@ -1400,6 +1400,84 @@ void Scenario_managed_failures_block_and_lock_at_the_level(void)
      }
   }
 
+void Scenario_managed_slots_released_and_capacity(void)
+  {
+   for(int d=0;d<2;d++)
+     {
+      int dir=(d==0 ? 1 : -1);
+      double beyond=(d==0 ? 2005.0 : 1995.0);
+      SXaRaw full,nyet;
+      BuildRawFacts(full,dir,true);
+      BuildRawFacts(nyet,dir,false);
+      CMhManager shared;                                       // one process, one manager, more cycles than slots
+      bool all_ok=true;
+      for(int cycle=0;cycle<MH_MAX_SLOTS+3;cycle++)
+        {
+         CRegWorld r;
+         r.Build(dir,beyond,EX_AUTH_PHRASE);
+         r.BindMgr(shared,EX_AUTH_PHRASE);
+         r.reg.manager=GetPointer(shared);
+         shared.raw_a=nyet;
+         shared.raw_b=nyet;
+         bool reg=Has(r.Tick(),"REGISTERED_WITH_T011") && shared.n==1;
+         double bid,ask;
+         LevelQuote(dir,bid,ask);
+         bool sent=(shared.OnQuote(bid,ask)==1);
+         shared.raw_a=full;
+         shared.raw_b=full;
+         r.m.position.volume=0.02;
+         bool timer=(shared.OnTimer()==1);
+         bool done=Has(r.Tick(),"MANAGEMENT_DONE");
+         if(!(r.ok && reg && sent && timer && done && shared.n==0 && r.w.g.st.n==0 && r.w.g.st.halted=="" && r.m.sends==1))
+           {
+            all_ok=false;
+            PrintFormat("dir %d cycle %d: reg %d sent %d timer %d done %d slots %d ids %d halted [%s] sends %d",dir,cycle,(int)reg,(int)sent,(int)timer,(int)done,shared.n,r.w.g.st.n,r.w.g.st.halted,r.m.sends);
+           }
+         RegClean(r.login);
+         if(!all_ok) break;
+        }
+      Check(all_ok,StringFormat("dir %d: %d consecutive cycles in one process; every slot is released with its index entry",dir,MH_MAX_SLOTS+3));
+      // the capacity itself: MH_MAX_SLOTS slots in use refuse the next position, one less accepts it
+      CRegWorld f;
+      f.Build(dir,beyond,EX_AUTH_PHRASE);
+      f.reg.manager=GetPointer(f.mgr);
+      for(int i=0;i<MH_MAX_SLOTS;i++) f.mgr.slots[i].pid=1000+i;
+      f.mgr.n=MH_MAX_SLOTS;
+      string tf=f.Tick();
+      Check(Has(tf,"MANAGEMENT_SLOTS_FULL") && Has(f.w.g.st.halted,"MANAGEMENT_REGISTRATION_REFUSED") && f.m.sends==0,StringFormat("dir %d: a full manager refuses the next position and halts",dir));
+      RegClean(f.login);
+      CRegWorld g;
+      g.Build(dir,beyond,EX_AUTH_PHRASE);
+      g.reg.manager=GetPointer(g.mgr);
+      for(int i=0;i<MH_MAX_SLOTS-1;i++) g.mgr.slots[i].pid=1000+i;
+      g.mgr.n=MH_MAX_SLOTS-1;
+      Check(Has(g.Tick(),"REGISTERED_WITH_T011"),StringFormat("dir %d: one free slot accepts it",dir));
+      RegClean(g.login);
+      // a restart between DONE and the saved index: the DONE is recovered from the T011 record, no new send
+      CRegWorld r2;
+      r2.Build(dir,beyond,EX_AUTH_PHRASE);
+      LC_Release(GetPointer(r2.w.s),r2.w.g.st);
+      CProc p1;
+      p1.Boot(r2,r2.w.s,nyet);
+      double bid2,ask2;
+      LevelQuote(dir,bid2,ask2);
+      bool sent2=(p1.mgr.OnQuote(bid2,ask2)==1);
+      p1.mgr.raw_a=full;
+      p1.mgr.raw_b=full;
+      r2.m.position.volume=0.02;
+      bool timer2=(p1.mgr.OnTimer()==1);
+      string detail;
+      int conf=p1.reg.OnFilled(r2.login,SIG,detail);
+      bool released=(p1.mgr.n==0 && p1.st.n==1);                // the process dies here: the index was not saved
+      p1.Stop();
+      CProc p2;
+      p2.Boot(r2,p1.s,full);
+      Check(sent2 && timer2 && conf==LC_SINK_CONFIRMED && released && p2.st.n==0 && p2.st.halted=="" && p2.mgr.n==0 && r2.m.sends==1,StringFormat("dir %d: restart between DONE and the saved index recovers the DONE without a send",dir));
+      p2.Stop();
+      RegClean(r2.login);
+     }
+  }
+
 void OnStart()
   {
    Print("T019 ENTRY LIFECYCLE TEST: fake transport and fake store only; no terminal read, no order, no file.");
@@ -1434,6 +1512,7 @@ void OnStart()
    Scenario_managed_closed_position_released_without_management();
    Scenario_managed_manual_foreign_and_synthetic_untouched();
    Scenario_managed_failures_block_and_lock_at_the_level();
+   Scenario_managed_slots_released_and_capacity();
    PrintFormat("T019 ENTRY LIFECYCLE TEST finished: %d passed, %d failed",g_pass,g_fail);
   }
 

@@ -24,7 +24,7 @@ SCENARIOS = ['index_codec_and_damage', 'register_and_save_failure', 'startup_cle
              'auto_registration_confirms_once', 'auto_registration_idempotent_after_crash', 'auto_registration_refusals_keep_the_t011_contracts', 'auto_registration_transient_and_locks',
              'auto_registration_acknowledge_and_instances', 'auto_registration_existing_record_needs_the_full_base', 'auto_registration_idempotent_after_management_started',
         'auto_registration_synthetic_fill_is_rejected', 'managed_fill_registration_management_to_done', 'managed_restart_in_every_critical_window',
-        'managed_closed_position_released_without_management', 'managed_manual_foreign_and_synthetic_untouched', 'managed_failures_block_and_lock_at_the_level']
+        'managed_closed_position_released_without_management', 'managed_manual_foreign_and_synthetic_untouched', 'managed_failures_block_and_lock_at_the_level', 'managed_slots_released_and_capacity']
 EV_ALL_ENABLED = tp.EV_SESSION_END | tp.EV_NEWS_BLOCK | tp.EV_DAILY_LIMIT
 
 
@@ -1056,6 +1056,54 @@ class ManagedFlow(unittest.TestCase):
             self.assertEqual((rw.st.ids, len(rw.xtr.sends), rw.st.halted), ([], 1, ''), tag + ' (d): released from the persisted DONE, no new send')
             self.assertNotEqual(rw.xstore.read(rw.name), saved)
 
+    def test_slots_are_released_after_done_and_the_capacity_is_enforced(self):
+        for d in (1, -1):
+            shared = None
+            for cycle in range(lc.Manager.MAX_SLOTS + 3):                 # more cycles than slots, one process, one manager
+                rw = MgmtWorld(self, d)
+                if shared is None:
+                    shared = rw.mgr
+                shared.tr, shared.store, shared.locks, shared.cfg_for, shared.raw = rw.xtr, rw.xstore, rw.locks, rw.cfg_for, rw.mgr.raw
+                rw.mgr = shared
+                rw.reg.inner.manager = shared
+                tag = 'dir %d cycle %d' % (d, cycle)
+                self.assertIn('REGISTERED_WITH_T011', ' '.join(rw.tick()), tag)
+                self.assertEqual(len(shared.slots), 1, tag)
+                self.assertEqual([r.final for _, r in shared.on_quote(*rw.level_quote())], [ex.SENT_MAPPED], tag + ': a stale slot of an earlier cycle must not swallow the request')
+                rw.raw_now = raw_full(d)
+                rw.xtr.position.volume = 0.1
+                shared.raw = lambda rw=rw: (rw.raw_now, rw.raw_now)
+                self.assertEqual([f.final for _, f in shared.on_timer()], [fl.DONE], tag)
+                self.assertTrue(any('MANAGEMENT_DONE' in n for n in rw.tick()), tag)
+                self.assertEqual((rw.st.ids, rw.st.halted, shared.slots, len(rw.xtr.sends)), ([], '', {}, 1), tag + ': the slot is released with the index entry')
+            # the capacity itself: 16 slots in use refuse the next position, 15 accept it
+            rw = MgmtWorld(self, d)
+            for i in range(lc.Manager.MAX_SLOTS):
+                rw.mgr.slots[1000 + i] = lc.Slot(None, '', None)
+            text = ' '.join(rw.tick())
+            self.assertIn('MANAGEMENT_SLOTS_FULL', text)
+            self.assertIn('MANAGEMENT_REGISTRATION_REFUSED', rw.st.halted)
+            self.assertEqual(rw.xtr.sends, [])
+            rw2 = MgmtWorld(self, d)
+            for i in range(lc.Manager.MAX_SLOTS - 1):
+                rw2.mgr.slots[1000 + i] = lc.Slot(None, '', None)
+            self.assertIn('REGISTERED_WITH_T011', ' '.join(rw2.tick()))
+
+    def test_restart_between_done_and_the_saved_index_recovers_without_a_send(self):
+        for d in (1, -1):
+            rw = MgmtWorld(self, d)
+            rw.tick()
+            self.assertEqual([r.final for _, r in rw.mgr.on_quote(*rw.level_quote())], [ex.SENT_MAPPED])
+            rw.raw_now = raw_full(d)
+            rw.xtr.position.volume = 0.1
+            self.assertEqual([f.final for _, f in rw.mgr.on_timer()], [fl.DONE])
+            self.assertEqual(rw.reg.on_filled(rw.login, SIG)[0], lc.SINK_CONFIRMED)      # DONE is confirmed and the slot released ...
+            self.assertEqual(rw.mgr.slots, {})
+            self.assertEqual(rw.st.ids, [SIG], 'the process dies here: the index was not saved')
+            rw.restart()                                                                   # ... the restart finds the id, the T011 record says DONE
+            self.assertEqual((rw.st.ids, rw.st.halted, len(rw.xtr.sends), rw.mgr.slots), ([], '', 1, {}))
+            self.assertEqual(index_ids(rw.w.store, rw.login), [])
+
     def test_a_closed_position_before_the_level_is_released_without_management(self):
         for d in (1, -1):
             rw = MgmtWorld(self, d)
@@ -1213,6 +1261,8 @@ class Mutants(unittest.TestCase):
                 ("            if sid in st.unmanaged or verdict(en.reconcile(cfg, tr, store, sid)) == HALT:", "            if verdict(en.reconcile(cfg, tr, store, sid)) == HALT:"),
                 ("        if rec.state != en.ST_FILLED or rec.linked != 1 or rec.position_id <= 0:\n            return SINK_REFUSED, 'FILL_NOT_PROVEN'", "        if False:\n            return SINK_REFUSED, 'FILL_NOT_PROVEN'"),
                 # management inside the orchestrator
+                ("            self.manager.forget(rec.position_id)       # finished: the slot is released (the T011 record stays; a restart before the index is saved recovers the DONE from it)\n", ""),
+                ("            if len(self.slots) >= self.MAX_SLOTS:\n                return SINK_REFUSED, 'MANAGEMENT_SLOTS_FULL'\n", ""),
                 ("            if flow.final == fl.DONE:\n                slot.done = True\n                return SINK_CONFIRMED, 'MANAGEMENT_DONE: recovered as DONE'", "            if False:\n                return SINK_CONFIRMED, 'MANAGEMENT_DONE: recovered as DONE'"),
                 ("        if status != SINK_CONFIRMED or self.manager is None:\n            return status, detail\n", "        if self.manager is None:\n            return status, detail\n"),
                 ("            if self.absent(ident.position_id):", "            if True:"),
