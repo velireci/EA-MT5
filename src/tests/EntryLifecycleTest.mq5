@@ -706,7 +706,7 @@ void Scenario_fill_report_and_registration_inputs(void)
       string notes3;
       LC_Tick(w.cfg,GetPointer(w.t),GetPointer(s2),st2,0,0,notes3);
       Check(again && st2.n==0,StringFormat("dir %d: reported again after the restart, forgotten on the next tick",dir));
-      // a TP that is not strictly beyond 2R is reported as not registrable
+      // planned geometry cannot prove refusal: an improved fill changes actual 2R
       CWorld e;
       e.InitTp(dir,2000.0);
       e.Own();
@@ -715,7 +715,11 @@ void Scenario_fill_report_and_registration_inputs(void)
       e.t.orders[0].position_id=4242;
       string n4;
       LC_Tick(e.cfg,GetPointer(e.t),GetPointer(e.s),e.g.st,0,0,n4);
-      Check(placed2 && Has(n4,"NOT_REGISTRABLE") && Has(n4,"TP_EQUALS_2R"),StringFormat("dir %d: TP == 2R (what the 2R-minimum target rule produces) is reported as not registrable",dir));
+      Check(placed2 && !Has(n4,"NOT_REGISTRABLE") && Has(n4,"LIVE_CHECK_REQUIRED") && Has(n4,"PLANNED_GEOMETRY") && Has(n4,"TP_EQUALS_2R"),StringFormat("dir %d: planned TP == 2R requires live verification, never a definitive refusal",dir));
+      double actual_entry=(d==0 ? 1989.0 : 2011.0);
+      STgResult actual_geo;
+      TG_Compute(d==0 ? TG_BUY : TG_SELL,actual_entry,e.plan.s_out,false,0.0,0.01,2,0.01,0,false,0.0,0.0,actual_geo);
+      Check(actual_geo.status==TG_OK && dir*(2000.0-actual_geo.level_2r)>0.0,StringFormat("dir %d: improved fill puts TP beyond actual 2R despite equality in the plan",dir));
       CWorld b;
       b.InitTp(dir,(d==0 ? 1999.0 : 2001.0));
       b.Own();
@@ -724,7 +728,7 @@ void Scenario_fill_report_and_registration_inputs(void)
       b.t.orders[0].position_id=4242;
       string n5;
       LC_Tick(b.cfg,GetPointer(b.t),GetPointer(b.s),b.g.st,0,0,n5);
-      Check(placed3 && Has(n5,"TP_BEFORE_2R"),StringFormat("dir %d: a TP before 2R is reported as not registrable",dir));
+      Check(placed3 && Has(n5,"LIVE_CHECK_REQUIRED") && !Has(n5,"NOT_REGISTRABLE") && Has(n5,"TP_BEFORE_2R"),StringFormat("dir %d: a TP before planned 2R is a planned diagnostic only",dir));
       // a record of another magic is blocked by the executor's own identity proof and never reported for registration
       CWorld m;
       m.InitTp(dir,beyond);
@@ -762,3 +766,4 @@ void OnStart()
    Scenario_fill_report_and_registration_inputs();
    PrintFormat("T019 ENTRY LIFECYCLE TEST finished: %d passed, %d failed",g_pass,g_fail);
   }
+

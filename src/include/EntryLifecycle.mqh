@@ -257,12 +257,12 @@ string LC_Proposal(CEnTransport *tr,CEnStore *store,const long login,const strin
    STgResult geo;
    TG_Compute(buy ? TG_BUY : TG_SELL,rec.e,rec.s,false,0.0,sym.tick_size,sym.digits,sym.point,sym.stops_level,false,0.0,0.0,geo);
    if(geo.status!=TG_OK) reasons+=(reasons=="" ? "" : "; ")+"GEOMETRY_REFUSED: "+TG_StatusName(geo.status);
-   else if(MathAbs(rec.tp-geo.level_2r)<sym.tick_size/2.0) reasons+=(reasons=="" ? "" : "; ")+"TP_EQUALS_2R: T011 refuses a TP that is not strictly beyond the 2R level (the remainder behaviour is an open decision)";
-   else if((buy && rec.tp<geo.level_2r) || (!buy && rec.tp>geo.level_2r)) reasons+=(reasons=="" ? "" : "; ")+"TP_BEFORE_2R: inconsistent with the minimum of 2R";
+   else if(MathAbs(rec.tp-geo.level_2r)<sym.tick_size/2.0) reasons+=(reasons=="" ? "" : "; ")+"TP_EQUALS_2R: planned entry only; actual fill can change the 2R level";
+   else if((buy && rec.tp<geo.level_2r) || (!buy && rec.tp>geo.level_2r)) reasons+=(reasons=="" ? "" : "; ")+"TP_BEFORE_2R: planned entry only; actual fill must be checked";
    string out="T011_REGISTRATION_INPUTS (the explicit script; the owner asserts the initial SL): InpEnabled=true InpRPolicy=R_GEOM InpEaMagic="+IntegerToString(rec.magic)+" InpPositionId="+IntegerToString((long)rec.position_id)+
               " InpSymbol="+rec.symbol+" InpDirection="+(buy ? "BUY" : "SELL")+" InpInitialSl="+DoubleToString(rec.s,8)+" InpTpPrice="+DoubleToString(rec.tp,8)+" InpVolumeInitial="+DoubleToString(rec.volume,8)+
               " (planned entry "+DoubleToString(rec.e,8)+"; R_GEOM is derived from the real open price)";
-   return(out+(reasons!="" ? " | NOT_REGISTRABLE: "+reasons : ""));
+   return(out+" | LIVE_CHECK_REQUIRED: actual open price, ownership, initial SL and volume are not proven by this report"+(reasons!="" ? " | PLANNED_GEOMETRY: "+reasons : ""));
   }
 
 // reconcile every indexed id (never a send); the open pending orders are returned
@@ -438,3 +438,4 @@ public:
      }
   };
 #endif
+

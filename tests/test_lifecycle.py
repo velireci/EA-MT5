@@ -635,11 +635,16 @@ class FillHandoff(unittest.TestCase):
             self.assertEqual(set(w.store.files) - set(rec_before), set(), 'the report writes nothing of T011 and creates no file')
             self.assertEqual((w.tr.sends, w.tr.cancels), (1, 0))
 
-    def test_a_tp_that_is_not_beyond_2r_is_reported_as_not_registrable(self):
+    def test_planned_geometry_requires_live_registration_check(self):
         for direction in (1, -1):
             w, st = self.filled(direction)                  # the default plan: TP == the 2R level (what the 2R-minimum target rule produces)
             text = ' '.join(lc.tick(w.cfg, w.tr, w.store, st, 0, 0))
-            self.assertIn('NOT_REGISTRABLE', text)
+            self.assertNotIn('NOT_REGISTRABLE', text)
+            self.assertIn('LIVE_CHECK_REQUIRED', text)
+            self.assertIn('PLANNED_GEOMETRY', text)
+            actual_entry = 1989.0 if direction == 1 else 2011.0
+            actual_level = actual_entry + direction * 2 * abs(actual_entry - w.rec().s)
+            self.assertGreater(direction * (w.rec().tp - actual_level), 0, 'improved fill makes TP beyond actual 2R')
             self.assertIn('TP_EQUALS_2R', text)
             w3, st3 = self.filled(direction, tp=1999.0 if direction == 1 else 2001.0)
             self.assertIn('TP_BEFORE_2R', ' '.join(lc.tick(w3.cfg, w3.tr, w3.store, st3, 0, 0)))
@@ -751,3 +756,4 @@ class Mutants(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+

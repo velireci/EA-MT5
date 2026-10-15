@@ -43,7 +43,7 @@ Pyetje për pronarin vetëm për këtë hap: të autorizohet ndërtimi i ekzekut
 
 **Ndërtuar dhe në EA-në `XauUsdEntryOrchestrator.mq5` (transport FAKE i fiksuar):** H4/M15 → SetupPlanBridge → EntryGate → EntryExecutor (T014–T016), rekordet e hyrjeve në disk (T017), ekspozimi i llogarisë vetëm-lexim (T018), cikli i jetës (T019): indeks + flamur ndalese të ruajtur, reconcile në nisje dhe në çdo timer, anulim i pending-it të provuar vetëm për ngjarje të dalë E të aktivizuar nga pronari, mbushje e raportuar FILLED_UNMANAGED. Baseline rindërtohet në çdo nisje.
 
-**Lidhja mbushje → T011 (15.10.2026, mbi f349aae):** mbushja raportohet tani me inputet e sakta të skriptit të regjistrimit eksplicit T011 (`FILLED_UNMANAGED ... T011_REGISTRATION_INPUTS ...`), me çdo arsye pse T011 do ta refuzonte (`NOT_REGISTRABLE`: TP_EQUALS_2R, TP_BEFORE_2R, ...); raporti është at-least-once dhe nuk shkruan asgjë të T011. Regjistrimi AUTOMATIK nuk është ndërtuar: kërkon ndryshimet K1–K8 më poshtë dhe vendimet 17–21 të listës. Transporti real mbetet i çaktivizuar. Tiketat FAKE nuk lidhen kurrë me pozicione reale.
+**Lidhja mbushje → T011 (15.10.2026, mbi f349aae):** mbushja raportohet tani me inputet e sakta të skriptit të regjistrimit eksplicit T011 (`FILLED_UNMANAGED ... T011_REGISTRATION_INPUTS ...`), me diagnostikë vetëm për gjeometrinë e planit (`PLANNED_GEOMETRY`) dhe `LIVE_CHECK_REQUIRED`; çmimi real i mbushjes mund ta ndryshojë nivelin 2R; raporti është at-least-once dhe nuk shkruan asgjë të T011. Regjistrimi AUTOMATIK nuk është ndërtuar: kërkon ndryshimet K1–K8 më poshtë dhe vendimet 17–21 të listës. Transporti real mbetet i çaktivizuar. Tiketat FAKE nuk lidhen kurrë me pozicione reale.
 
 **Vendimet që bllokojnë (çdo rresht = një input që sot është UNSET dhe bllokon; asnjë nuk është zgjedhur nga Claude):**
 
@@ -66,7 +66,7 @@ Pyetje për pronarin vetëm për këtë hap: të autorizohet ndërtimi i ekzekut
 | 15 | Skadimi i pending-it, ri-hyrja, cooldown, sinjal i kundërt | `InpExpiryMode`, `InpExpirySeconds` (+ asgjë tjetër ende) | Q09 |
 | 16 | Cilat ngjarje anulojnë pending-in: fund seance, lajm, kufi ditor; si dhe zhvlerësimi i FVG / ndryshimi i drejtimit (nuk ka ende ngjarje) | `InpCancelOnSessionEnd`, `InpCancelOnNewsBlock`, `InpCancelOnDailyLimit` | Q09, Q11 |
 | 17 | Menaxhimi pas mbushjes: 80% në 2R kundrejt niveleve, kuptimi i +0.2%/break-even, TP | T011 (jashtë EA-së së hyrjes) | Q07 |
-| 18 | **TP dhe 2R:** rregulli i targetit `NONE_2R_MINIMUM` jep TP = nivelit 2R (TG_Compute); T011 e refuzon TP = 2R (`TP_EQUALS_2R: the interaction is an open decision`). Ose një algoritëm targeti PËRTEJ 2R (vendim 7), ose rregull T011 për 20% e mbetur kur TP = 2R | `InpTargetRule` / T011 | Q05, Q07 |
+| 18 | **TP dhe 2R:** rregulli i targetit `NONE_2R_MINIMUM` jep TP = nivelit 2R (TG_Compute); T011 refuzon TP = 2R të llogaritur nga çmimi REAL i hapjes. Barazia me 2R të planit nuk provon barazi pas mbushjes; kërkohet kontroll live. Ose një algoritëm targeti PËRTEJ 2R (vendim 7), ose rregull T011 për 20% e mbetur kur TP = 2R | `InpTargetRule` / T011 | Q05, Q07 |
 | 19 | Marrëveshja K1–K3: burimi i SL-së fillestare (rekordi i planit në vend të pronarit), regjistruesi (orkestruesi, jo skripti), autorizimi i qëndrueshëm (fraza si input i EA-së) | kontrata T011 e regjistrimit | Q07 |
 | 20 | K7: niveli 2R i menaxhuar del nga çmimi REAL i hapjes (mund të jetë më i mirë se limiti i planit); cili qeveris: plani apo hapja reale | T011 R_GEOM | Q07 |
 | 21 | K8: çfarë ndodh kur regjistrimi refuzohet ose mungon (pozicion pa menaxhim): vetëm alarm, apo ndalim i hyrjeve të reja | politikë | Q07, Q11 |
@@ -90,3 +90,5 @@ Pa 1–9 EA-ja nuk prodhon plan; pa 10–14 porta bllokon; 15 dhe 16 nuk ndalojn
 
 Deri te vendimet: mbushja raportohet me inputet e sakta dhe regjistrimi bëhet nga pronari me skriptin eksplicit; asgjë tjetër nuk ndryshon.
 
+
+**Codex correction, 15.10.2026 (on 6ef9533):** planned TP/2R diagnostics require live verification, without definitive T011 refusal. BUY/SELL improved-fill regressions failed before the correction. Targeted Python: 74 passed. Lifecycle test and orchestrator EA: each compiled with 0 errors / 0 warnings. Lifecycle static checks and the new negative control passed; Git-base comparisons skipped in this source export. Owner MT5 rerun pending; automatic T011 registration remains unimplemented.

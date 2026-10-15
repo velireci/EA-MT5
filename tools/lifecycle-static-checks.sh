@@ -59,6 +59,7 @@ assert 'if(!LC_Owned(s)) return(false);' in per and per.index('if(!LC_Owned(s)) 
 assert 'LC_DiskCheck(store,s,why)' in per and per.index('LC_DiskCheck(') < per.index('LC_Save(') and 'return(false);' in per[per.index('LC_DiskCheck('):per.index('LC_Save(')], 'persist validates the existing index first'
 pr = t[t.index('string LC_Proposal('):t.index('void LC_Sweep(')]
 assert 'Write' not in pr and 'Delete' not in pr and 'ETD_' not in pr and 'EX_Register' not in pr and 'Send' not in pr and 'Cancel' not in pr, 'the registration report only reads'
+assert 'LIVE_CHECK_REQUIRED' in pr and 'PLANNED_GEOMETRY' in pr and ' | NOT_REGISTRABLE: ' not in pr, 'planned geometry cannot prove live registration refusal'
 assert pr.count('TG_Compute(') == 1 and 'EN_Load(store,EN_FileName(login,id),rec,why)!=1' in pr and 'TP_EQUALS_2R' in pr and 'TP_BEFORE_2R' in pr and 'InpInitialSl=' in pr, 'report content'
 sw = t[t.index('void LC_Sweep('):t.index('bool LC_Startup(')]
 assert 'v==LC_V_FILLED && LC_NotedIndex(s,id)<0' in sw and sw.index('LC_Proposal(') < sw.index('LC_Remove(s,i)'), 'a fill is reported first and forgotten on a later sweep'
@@ -180,5 +181,9 @@ expect_assert "$NEG/l3.py" "$NEG/R.mqh" "a lock that is never released" "release
 cp $EA "$NEG/S.mqh"; sed -i 's/^   Poll();$/   LC_Register(GetPointer(g_store),g_guard.st,"x",startup_notes); Poll();/' "$NEG/S.mqh"
 expect_assert "$NEG/l3.py" "$NEG/S.mqh" "an index entry written by the EA after the fact" "never indexes after the fact"
 
+mut Y.mqh $HD 's/ | LIVE_CHECK_REQUIRED:/ | FINAL_REGISTRATION_VERDICT:/'
+expect_assert "$NEG/l2.py" "$NEG/Y.mqh" "a planned report presented as a final verdict" "planned geometry cannot prove"
+
 [ $FAIL -eq 0 ] && echo "LIFECYCLE STATIC CHECKS: ALL PASS (static only; MetaEditor compile and MT5 run UNVERIFIED)" || echo "LIFECYCLE STATIC CHECKS: FAILURES"
 exit $FAIL
+

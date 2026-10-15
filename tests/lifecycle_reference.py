@@ -190,7 +190,7 @@ def verdict(res):
 
 def proposal(cfg, tr, store, login, sid):
     """the fill is NOT registered with T011 (the registration stays the explicit, owner-asserted script): this is the exact input set of that script, read from the executor record,
-    with every reason T011 would refuse it. It writes nothing and calls nothing of T011."""
+    with planned geometry diagnostics only; actual registration needs live proof. It writes nothing and calls nothing of T011."""
     ok, text = store.read(en.file_name(login, sid))
     ok, rec = en.decode(text) if ok else (False, None)
     if not ok:
@@ -204,13 +204,13 @@ def proposal(cfg, tr, store, login, sid):
     if geo.status != tg.OK:
         why.append('GEOMETRY_REFUSED: ' + geo.status)
     elif abs(rec.tp - geo.level_2r) < sym.tick_size / 2.0:
-        why.append('TP_EQUALS_2R: T011 refuses a TP that is not strictly beyond the 2R level (the remainder behaviour is an open decision)')
+        why.append('TP_EQUALS_2R: planned entry only; actual fill can change the 2R level')
     elif (buy and rec.tp < geo.level_2r) or (not buy and rec.tp > geo.level_2r):
-        why.append('TP_BEFORE_2R: inconsistent with the minimum of 2R')
+        why.append('TP_BEFORE_2R: planned entry only; actual fill must be checked')
     out = ('T011_REGISTRATION_INPUTS (the explicit script; the owner asserts the initial SL): InpEnabled=true InpRPolicy=R_GEOM InpEaMagic=%d InpPositionId=%d InpSymbol=%s InpDirection=%s '
            'InpInitialSl=%.8f InpTpPrice=%.8f InpVolumeInitial=%.8f (planned entry %.8f; R_GEOM is derived from the real open price)'
            % (rec.magic, rec.position_id, rec.symbol, 'BUY' if buy else 'SELL', rec.s, rec.tp, rec.volume, rec.e))
-    return out + (' | NOT_REGISTRABLE: ' + '; '.join(why) if why else '')
+    return out + ' | LIVE_CHECK_REQUIRED: actual open price, ownership, initial SL and volume are not proven by this report' + (' | PLANNED_GEOMETRY: ' + '; '.join(why) if why else '')
 
 
 def _sweep(cfg, tr, store, st, notes):
@@ -344,3 +344,4 @@ class Guard:
             st.ids.remove(signal_id)
             _persist(self.store, st, self.notes)
         self.new = False
+
