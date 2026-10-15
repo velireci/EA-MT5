@@ -1,0 +1,10 @@
+; XauUsdT012BalanceStore - CAPTURE WINDOW_EMPTY: a CONDITIONAL proof over a history the OWNER declares complete. NOT confirmed by default (InpConfirmCapture=false), offset and completeness unset.
+; The owner fills in the server offset (seconds from UTC, a multiple of 900) and sets InpHistoryComplete=true only after checking the history, then InpConfirmCapture=true. Base = ACCOUNT_BALANCE.
+; InpEaMagic only satisfies the history configuration; the emptiness check covers every magic and every deal type. Complete preset: every input is listed once.
+InpAction=1
+InpConfirmCapture=false
+InpEaMagic=777
+InpServerOffsetSeconds=2147483647
+InpHistoryComplete=false
+InpOwnerAmount=0
+InpOwnerDay=0

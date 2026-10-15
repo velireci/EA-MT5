@@ -1,0 +1,9 @@
+; XauUsdT012BalanceStore - CAPTURE OWNER_ASSERTED: the owner states the balance at the start of the CURRENT Tirane day. A separate source, never promoted to WINDOW_EMPTY. NOT confirmed by default.
+; The owner fills in InpOwnerAmount (> 0) and InpOwnerDay (yyyymmdd of the current Tirane day), then InpConfirmCapture=true. Complete preset: every input is listed once.
+InpAction=2
+InpConfirmCapture=false
+InpEaMagic=0
+InpServerOffsetSeconds=2147483647
+InpHistoryComplete=false
+InpOwnerAmount=0
+InpOwnerDay=0

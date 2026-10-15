@@ -1,0 +1,9 @@
+; XauUsdT012BalanceStore - LOAD: strictly read-only, never creates a file (the default). Complete preset: every input is listed once.
+; InpAction 0 LOAD, 1 CAPTURE_WINDOW_EMPTY, 2 CAPTURE_OWNER_ASSERTED
+InpAction=0
+InpConfirmCapture=false
+InpEaMagic=0
+InpServerOffsetSeconds=2147483647
+InpHistoryComplete=false
+InpOwnerAmount=0
+InpOwnerDay=0
