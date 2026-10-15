@@ -52,40 +52,57 @@ assert inc == ['EntryGate.mqh'], inc
 PYEOF
 python3 -I "$NEG/o2.py" $CORE && echo "  PASS call sites, no terminal / file / clock / real transport, order, baseline, probe, shared instant and digest, fresh runtime, halt, label" || { echo "  FAIL"; FAIL=1; }
 
-echo "=== O3: the EA and the feed: fake transport fixed, read-only, LOAD only, labelled ==="
+echo "=== O3: the EA and the feed: fake transport by default, real transports only by explicit authorised inputs, read-only feed, LOAD only, labelled ==="
 cat > "$NEG/o3.py" <<'PYEOF'
 import re, sys
 ea = re.sub(r'//[^\n]*', '', open(sys.argv[1], encoding='ascii').read())
 fd = re.sub(r'//[^\n]*', '', open(sys.argv[2], encoding='ascii').read())
 for name, t in (('EA', ea), ('feed', fd)):
     for w in ('OrderSend', 'OrderSendAsync', 'OrderCheck', 'OrderDelete', 'PositionClose', 'CTrade', 'DBS_Capture', 'DBS_Write', 'CAPTURE', 'TP_Authorize', 'DG_FinalPreview', 'FileOpen', 'FileWrite', 'FileDelete',
-              'GlobalVariableSet', 'EntryTransportReal', 'ExitTransportReal', 'ExitStateFile', 'ExitExecutor', 'CEnRealTransport', 'CEnRealStore', 'ObjectCreate', 'real=true', 'real = true'):
+              'GlobalVariableSet', 'ExitStateFile', 'ExitExecutor', 'ObjectCreate', 'real=true', 'real = true'):
         assert w not in t, name + ': ' + w
+for w in ('EntryTransportReal', 'ExitTransportReal', 'CEnRealTransport', 'CEnRealStore', 'CRealTransport'):
+    assert w not in fd, 'feed: ' + w
 assert 'DBS_Load(' in fd and fd.count('DBS_Load(') == 1, 'the store is read with LOAD only'
 assert 'class CEoTerminalFake : public CEnFakeTransport' in ea, 'fake transport class'
-assert ea.count('CEoTerminalFake g_tr;') == 1 and 'GetPointer(g_tr)' in ea, 'transport fixed'
+assert ea.count('CEoTerminalFake g_tr;') == 1 and 'g_trp=GetPointer(g_tr);' in ea, 'the FAKE transport is the default'
 assert 'EO_FAKE_LABEL' in ea and 'CEnFakeTransport::Send(req,res)' in ea, 'virtual request label'
 assert 'MQL_TESTER' in ea and 'INIT_FAILED' in ea, 'tester refused'
 assert 'CEnFakeFileStore g_store;' in ea, 'persistent FAKE store'
 assert 'g_cfg.exec.symbol=_Symbol;' in ea and 'XAUUSD' not in ea.replace('XauUsdEntryOrchestrator', ''), 'chart symbol only'
 inputs = re.findall(r'^input\s+\S+\s+(\w+)', ea, re.M)
 assert inputs, 'inputs'
+SELECTORS = ('InpEntryTransport', 'InpEntryAuthorisation', 'InpManagementTransport', 'InpManagementConfirmAutoSend')
 for n in inputs:
-    assert not re.search(r'(?i)transport|real|live|send|order', n), 'a transport selector input: ' + n
+    if re.search(r'(?i)transport|real|live|send|order', n):
+        assert n in SELECTORS, 'a transport selector input: ' + n
+# the REAL transports are compiled in but selected only by the explicit, default-off, authorised inputs; the FAKE transport is the default
+for d in ('InpEntryTransport=EOI_ETR_FAKE', 'InpEntryAuthorisation=""', 'InpManagementTransport=EOI_MTR_READ_ONLY', 'InpManagementConfirmAutoSend=false', 'InpManagementRegistration=false', 'InpMgmtFilling=EX_FILL_UNSET',
+          'InpMgmtDeviation=-1', 'InpMgmtFilterPolicy=EX_POL_UNSET'):
+    assert d in ea, 'default not off / UNSET: ' + d
+assert ea.count('CEnRealTransport g_etr;') == 1 and ea.count('CRealTransport g_mreal;') == 1 and ea.count('GetPointer(g_etr)') == 1 and ea.count('GetPointer(g_mreal)') == 1, 'each real transport is declared once and selected at one place'
+conf = ea[ea.index('bool Configure(void)'):ea.index('// an unknown enum value') if '// an unknown enum value' in ea else ea.index('SEoFeedCfg fc;')]
+sel = conf[conf.index('if(InpEntryTransport==EOI_ETR_BROKER_DEMO)'):]
+assert 'if(InpEntryAuthorisation!=EN_AUTH_PHRASE || !InpManagementRegistration || InpEaMagic<=0 || InpFilling!=EOI_FILL_RETURN) return(false);' in sel, 'the real entry transport needs the phrase, registration, a magic and filling RETURN'
+assert sel.index('InpEntryAuthorisation!=EN_AUTH_PHRASE') < sel.index('GetPointer(g_etr)'), 'the phrase is checked before the real entry transport is selected'
+assert 'if(InpManagementTransport==EOI_MTR_BROKER_DEMO && (!InpManagementConfirmAutoSend || !InpManagementRegistration)) return(false);' in conf, 'real closing requests need the confirmation and registration'
+assert conf.index('!InpManagementConfirmAutoSend') < conf.index('GetPointer(g_mreal)'), 'the confirmation is checked before the real closing transport is selected'
+assert 'g_registrar.provenance=(g_real_entry ? MH_PROV_BROKER : MH_PROV_SYNTHETIC);' in conf, 'provenance follows the entry transport'
+assert 'g_cfg.exec.real_authorised=g_real_entry;' in ea, 'the executor authorisation follows the explicit selection'
 # every selection / policy input is UNSET by default
 for n in ('InpContextSource=EOI_SRC_UNSELECTED', 'InpM15Level=EOI_SWING_UNSELECTED', 'InpFvgTiming=EOI_TIMING_UNSELECTED', 'InpCandidate=EOI_CAND_UNSELECTED', 'InpEntryEdge=EOI_EDGE_UNSELECTED',
           'InpSlRule=EOI_SL_UNSELECTED', 'InpSlBuffer=-1', 'InpTargetRule=EOI_TGT_UNSELECTED', 'InpRiskBudget=-1', 'InpLotCap=-1', 'InpModelTolerance=-1', 'InpMaxQuoteAgeSeconds=-1', 'InpGateMaxAgeSeconds=-1',
           'InpPermitMaxAgeSeconds=-1', 'InpOpenPositions=-1', 'InpTradesToday=-1', 'InpExistingRisk=-1', 'InpMaxPositions=-1', 'InpMaxTrades=-1', 'InpCombinedRiskCap=-1', 'InpSessionClock=false',
           'InpNewsCalendar=false', 'InpMaxSpreadPoints=-1', 'InpDailyHistoryBridge=false', 'InpDailyServerOffsetSeconds=99999', 'InpDailyHistoryComplete=false', 'InpFilling=EOI_FILL_UNSET', 'InpExpiryMode=EOI_EXP_UNSET'):
     assert n in ea, 'default not UNSET: ' + n
-assert sorted(re.findall(r'#include "([^"]+)"', ea)) == sorted(['include/EntryOrchestratorFeed.mqh', 'include/EntryStateFile.mqh', 'include/EntryTransportFake.mqh', 'include/EntryLifecycle.mqh', 'include/EntryManagementHandoff.mqh', 'include/ExposureReaderReal.mqh']), 'EA includes'
+assert sorted(re.findall(r'#include "([^"]+)"', ea)) == sorted(['include/EntryOrchestratorFeed.mqh', 'include/EntryStateFile.mqh', 'include/EntryTransportFake.mqh', 'include/EntryLifecycle.mqh', 'include/EntryManagementHandoff.mqh', 'include/EntryTransportReal.mqh', 'include/ExitTransportReal.mqh', 'include/ExposureReaderReal.mqh']), 'EA includes'
 assert 'daily_on=InpDailyHistoryBridge' in ea
 daily = fd[fd.index('virtual bool Daily('):]
 assert 'EO_OffsetSeconds(mc.daily_offset_seconds,daily_offset)' in daily, 'offset validation'
 assert daily.index('EO_OffsetSeconds(mc.daily_offset_seconds,daily_offset)') < daily.index('hcfg.server_offset_seconds=daily_offset'), 'offset validation'
 assert 'CDbsRealPort port(mc.daily_magic,daily_offset,' in daily, 'validated store offset'
 PYEOF
-python3 -I "$NEG/o3.py" $EA $FEED && echo "  PASS no order / CAPTURE / file write / real transport, fixed fake transport, no transport selector, UNSET defaults, tester refused, chart symbol, LOAD only" || { echo "  FAIL"; FAIL=1; }
+python3 -I "$NEG/o3.py" $EA $FEED && echo "  PASS no direct order / CAPTURE / file write, the feed has no real transport, FAKE by default, real transports only behind the phrase and confirmations, UNSET defaults, tester refused, chart symbol, LOAD only" || { echo "  FAIL"; FAIL=1; }
 
 echo "=== O4: the test never includes a real transport or reads the terminal ==="
 grep -nE 'EntryTransportReal|ExitTransportReal|OrderSend|SymbolInfo|OrderCalcProfit|TimeCurrent|FileOpen|CopyRates|AccountInfo|DBS_' $TS >/dev/null && { echo "  FAIL the test touches the real side"; FAIL=1; } || echo "  PASS the test uses the fake transport, the fake store and a scripted market only"
@@ -126,8 +143,8 @@ mut G.mqh $CORE 's/      SPB_Build(sel,m,st,f,broken,cut,r2);   /      OrderSend
 expect_assert "$NEG/o2.py" "$NEG/G.mqh" "an order call in the core" "OrderSend"
 mut H.mqh $CORE 's/         out.label=EO_FAKE_LABEL;/         out.label="";/'
 expect_assert "$NEG/o2.py" "$NEG/H.mqh" "a virtual request without the label" "label\|request without label"
-mut I.mqh $EA 's/#include "include\/EntryTransportFake.mqh"/#include "include\/EntryTransportFake.mqh"\n#include "include\/EntryTransportReal.mqh"/'
-expect_assert "$NEG/o3.py" "$NEG/I.mqh $FEED" "the real transport included in the EA" "EntryTransportReal\|EA includes"
+mut I.mqh $EA 's/#include "include\/EntryTransportFake.mqh"/#include "include\/EntryTransportFake.mqh"\n#include "include\/EntryExecutorExtra.mqh"/'
+expect_assert "$NEG/o3.py" "$NEG/I.mqh $FEED" "an unexpected include in the EA" "EA includes"
 mut J.mqh $EA 's/^input long InpEaMagic=0; /input bool InpRealTransport=false; \/\/ x\ninput long InpEaMagic=0; /'
 expect_assert "$NEG/o3.py" "$NEG/J.mqh $FEED" "a transport selector input" "transport selector input"
 mut K.mqh $EA 's/^input double InpRiskBudget=-1; /input double InpRiskBudget=100; /'
@@ -144,6 +161,17 @@ mut P.mqh $CORE 's/!M4ContextEqual(st.context,previous_context)/k!=key/'
 expect_assert "$NEG/o2.py" "$NEG/P.mqh" "context comparison using IDs only" "missing step"
 mut Q.mqh $FEED 's/if(!EO_OffsetSeconds(mc.daily_offset_seconds,daily_offset))/if(false)/'
 expect_assert "$NEG/o3.py" "$EA $NEG/Q.mqh" "offset narrowed without validation" "offset\|substring not found"
+
+mut R1.mqh $EA 's/^input ENUM_EO_ENTRY_TRANSPORT InpEntryTransport=EOI_ETR_FAKE;/input ENUM_EO_ENTRY_TRANSPORT InpEntryTransport=EOI_ETR_BROKER_DEMO;/'
+expect_assert "$NEG/o3.py" "$NEG/R1.mqh $FEED" "real entry orders on by default" "default not off"
+mut R2.mqh $EA 's/InpEntryAuthorisation!=EN_AUTH_PHRASE || //'
+expect_assert "$NEG/o3.py" "$NEG/R2.mqh $FEED" "the real entry transport without the phrase" "needs the phrase"
+mut R3.mqh $EA 's/(!InpManagementConfirmAutoSend || !InpManagementRegistration)/(!InpManagementRegistration)/'
+expect_assert "$NEG/o3.py" "$NEG/R3.mqh $FEED" "real closing requests without the confirmation" "need the confirmation"
+mut R4.mqh $EA 's/g_registrar.provenance=(g_real_entry ? MH_PROV_BROKER : MH_PROV_SYNTHETIC);/g_registrar.provenance=MH_PROV_BROKER;/'
+expect_assert "$NEG/o3.py" "$NEG/R4.mqh $FEED" "a FAKE entry transport declared as a broker" "provenance follows"
+mut R5.mqh $FEED 's/      DBS_Load(port,stored);/      DBS_Load(port,stored); CEnRealTransport x;/'
+expect_assert "$NEG/o3.py" "$EA $NEG/R5.mqh" "the real transport in the feed" "feed: CEnRealTransport"
 
 [ $FAIL -eq 0 ] && echo "ENTRY ORCHESTRATOR STATIC CHECKS: ALL PASS (static only; MetaEditor compile and MT5 run UNVERIFIED)" || echo "ENTRY ORCHESTRATOR STATIC CHECKS: FAILURES"
 exit $FAIL

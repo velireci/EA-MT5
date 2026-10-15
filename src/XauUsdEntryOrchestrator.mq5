@@ -1,17 +1,23 @@
-// T016 ENTRY ORCHESTRATOR EA: H4/M15 observer flow (T004) -> SetupPlanBridge (T014) -> EntryGate (T015) -> EntryExecutor (T013) with a FAKE transport FIXED IN THIS DELIVERY.
-//   FAKE EXECUTION: a virtual request is logged and counted in memory; NOTHING is sent to the terminal. The real transport is NOT included in this file and is NOT selectable by any input.
-//   Market/account reads: closed bars, symbol / quote properties, OrderCalcProfit, calendar, deal history and T012 balance LOAD only. Only isolated FAKE entry records are written.
-//   Every source / selection / policy input is UNSET by default and UNSET blocks. Exposure: EXPLICIT inputs by default (-1 = unknown) or the opt-in READ-ONLY account reader (T018: this EA magic, hedging account, pending policy explicit); the trade counter stays an explicit input. Chart symbol only (incl. XAUUSD.fx).
-//   FAKE entry records and the T019 lifecycle index / halt flag persist in VELO_T016_FAKE_ files. The baseline is REBUILT at every start (a restart never revives a signal). The fake order book is in memory only, so after a
-//   restart a placed FAKE record cannot be proven and HALTS the layer until the owner acknowledges it. A filled order is registered AUTOMATICALLY with the existing T011 executor only when InpManagementRegistration is true (default false: it is then reported FILLED_UNMANAGED); the registrar only READS the terminal (its Send does nothing) and the entry transport above stays FAKE, so no real position exists to register until a real entry transport is chosen. Not proof of broker execution.
+// T016 ENTRY ORCHESTRATOR EA: H4/M15 observer flow (T004) -> SetupPlanBridge (T014) -> EntryGate (T015) -> EntryExecutor (T013) -> fill -> T011 registration -> T011 management (the existing driver).
+//   DEFAULT = FAKE ENTRY EXECUTION: a virtual request is logged and counted in memory; nothing is sent to the terminal; the management transport is READ-ONLY (every closing request is refused).
+//   The real transports are compiled in but are SELECTED only by explicit inputs: InpEntryTransport = BROKER_DEMO (pending orders; phrase EN_AUTH_PHRASE, registration on, magic, filling RETURN) and
+//   InpManagementTransport = BROKER_DEMO (closing requests at 2R; phrase EX_AUTH_PHRASE + InpManagementConfirmAutoSend). Both executors additionally refuse a non-demo account. The build does NOT enable real sending.
+//   Provenance: a FAKE entry transport's fills are SYNTHETIC and are never matched to a real position; only the real entry transport declares BROKER.
+//   Market/account reads: closed bars, symbol / quote properties, OrderCalcProfit, calendar, deal history and T012 balance LOAD only.
+//   Every source / selection / policy input is UNSET by default and UNSET blocks. Exposure: EXPLICIT inputs by default (-1 = unknown) or the opt-in READ-ONLY account reader (T018). Chart symbol only (incl. XAUUSD.fx).
+//   FAKE entry records and the T019 lifecycle index / halt flag persist in VELO_T016_FAKE_ files (real records: VELO_T013_ENTRY_ files). The baseline is REBUILT at every start (a restart never revives a signal).
+//   A filled order is registered with the existing T011 executor and then managed by the T011 driver inside this EA (OnTick = the 2R level, OnTimer = reconcile only) only when InpManagementRegistration is true;
+//   the registered fill stays in the lifecycle index until the T011 record is DONE or the position is proven closed (that index is the restart memory). Not proof of broker execution. UNVERIFIED: not compiled or run.
 #property strict
-#property version "1.06"
+#property version "1.07"
 #include "include/EntryOrchestratorFeed.mqh"
 #include "include/EntryTransportFake.mqh"
 #include "include/ExposureReaderReal.mqh"
 #include "include/EntryStateFile.mqh"
 #include "include/EntryLifecycle.mqh"
 #include "include/EntryManagementHandoff.mqh"
+#include "include/EntryTransportReal.mqh"   // compiled in, but selected ONLY by InpEntryTransport = BROKER_DEMO with the explicit phrase (default FAKE)
+#include "include/ExitTransportReal.mqh"    // compiled in, but selected ONLY by InpManagementTransport = BROKER_DEMO with the explicit phrase and confirmation (default READ_ONLY)
 
 enum ENUM_EO_SOURCE {EOI_SRC_UNSELECTED=0,EOI_SRC_T003_RECONF_PROPOSAL=1,EOI_SRC_T002_TOUCH_AFTER_LOSS_PROPOSAL=2,EOI_SRC_T002_TOUCH_FIRST_ONLY_PROPOSAL=3};
 enum ENUM_EO_SWING {EOI_SWING_UNSELECTED=0,EOI_SWING_LATEST_FRACTAL_PROPOSAL=1};
@@ -26,6 +32,8 @@ enum ENUM_EO_PENDING_RISK {EOI_PENDRISK_UNSET=0,EOI_PENDRISK_INCLUDE=1,EOI_PENDR
 enum ENUM_EO_FILLING {EOI_FILL_UNSET=0,EOI_FILL_RETURN=1};
 enum ENUM_EO_EXPIRY {EOI_EXP_UNSET=0,EOI_EXP_GTC=1,EOI_EXP_SECONDS=2};
 enum ENUM_EO_MGMT_RPOL {EOI_MGMT_RPOL_UNSET=0,EOI_MGMT_RPOL_R_GEOM=1};
+enum ENUM_EO_ENTRY_TRANSPORT {EOI_ETR_FAKE=0,EOI_ETR_BROKER_DEMO=1};
+enum ENUM_EO_MGMT_TRANSPORT {EOI_MTR_READ_ONLY=0,EOI_MTR_BROKER_DEMO=1};
 
 input ENUM_EO_SOURCE InpContextSource=EOI_SRC_UNSELECTED;
 input ENUM_EO_SWING InpM15Level=EOI_SWING_UNSELECTED;
@@ -86,6 +94,14 @@ input bool InpAcknowledgeLifecycleHalt=false; // owner acknowledgement at the ST
 input bool InpManagementRegistration=false;   // true = register a FILLED entry with the T011 executor automatically (the existing ETD_Register: ownership, initial SL, plan, never overwritten); false = report only
 input string InpManagementAuthorisation="";   // the T011 standing authorisation phrase (EX_AUTH_PHRASE); required when registration is on; the account must be a demo account (T011 gate)
 input ENUM_EO_MGMT_RPOL InpManagementRPolicy=EOI_MGMT_RPOL_UNSET; // required R_GEOM when registration is on; UNSET blocks
+input ENUM_EO_ENTRY_TRANSPORT InpEntryTransport=EOI_ETR_FAKE; // FAKE = in-memory virtual requests (default). BROKER_DEMO = REAL pending orders on a DEMO account: needs the phrase below, registration + management on, magic > 0 and filling RETURN. Real sending is NOT enabled by the build; it is the owner's explicit decision
+input string InpEntryAuthorisation="";         // EN_AUTH_PHRASE (I_AUTHORISE_REAL_ENTRY_ORDERS_ON_THIS_DEMO_ACCOUNT); required for BROKER_DEMO; the executor also refuses a non-demo account
+input ENUM_EO_MGMT_TRANSPORT InpManagementTransport=EOI_MTR_READ_ONLY; // READ_ONLY = reads the terminal, every closing request is refused (default). BROKER_DEMO = REAL partial-close requests at 2R on a DEMO account
+input bool InpManagementConfirmAutoSend=false; // must be true for BROKER_DEMO management: the EA may send a closing request on its own at the 2R level
+input ENUM_EX_FILLING InpMgmtFilling=EX_FILL_UNSET;            // filling of the closing request; UNSET blocks (required when registration is on)
+input long InpMgmtDeviation=-1;                // deviation of the closing request in points; -1 blocks (required when registration is on)
+input ENUM_EX_FILTER_POLICY InpMgmtFilterPolicy=EX_POL_UNSET;  // behaviour of the closing request towards spread / news / session filters; UNSET blocks (required when registration is on)
+input ENUM_EX_FILTER_STATE InpMgmtFilterState=EX_FS_UNKNOWN;   // state of those filters supplied by the owner (used only with NEEDS_CLEAR)
 input int InpPollSeconds=2;
 
 // FAKE transport: the execution side is the in-memory fake (every Send is a virtual request, logged with the label); the read side is READ-ONLY terminal state.
@@ -136,6 +152,16 @@ CEoFeed g_feed;
 CEoRealMarket g_market;
 CEoTerminalFake g_tr;
 CEnFakeFileStore g_store;
+CEnRealStore g_rstore;             // real entry records (BROKER_DEMO only)
+CEnRealStore g_rlockstore;
+CEnRealTransport g_etr;            // real entry transport (BROKER_DEMO only)
+CRealTransport g_mreal;            // real closing transport (BROKER_DEMO management only)
+CEnTransport *g_trp=NULL;          // the entry transport in use: g_tr (FAKE) unless BROKER_DEMO was selected explicitly
+CEnStore *g_storep=NULL;
+CEnStore *g_lockp=NULL;
+bool g_real_entry=false;
+CMhManager g_mgr;                  // T011 management inside the orchestrator (the existing driver)
+bool g_mgr_on=false;
 COrchestrator g_orch;
 SEoConfig g_cfg;
 CMhReadTransport g_xtr;               // READ-ONLY exit transport of the registrar (IsReal() = true keeps the T011 authorisation / demo gates; Send does nothing)
@@ -151,23 +177,53 @@ void Status(const string text)
    if(text==g_last) return;
    g_last=text;
    Print("T016 ",text);
-   Comment("T016 ENTRY ORCHESTRATOR - FAKE EXECUTION ONLY, nothing is sent to the terminal\n",text);
+   Comment(g_real_entry ? "T016 ENTRY ORCHESTRATOR - REAL DEMO ORDERS ENABLED BY THE OWNER\n" : "T016 ENTRY ORCHESTRATOR - FAKE EXECUTION ONLY, nothing is sent to the terminal\n",text);
   }
 
 bool Configure(void)
   {
    g_sink=NULL;
+   g_mgr_on=false;
+   g_real_entry=false;
+   g_trp=GetPointer(g_tr);
+   g_storep=GetPointer(g_store);
+   g_lockp=GetPointer(g_lockstore);
+   if((int)InpEntryTransport!=(int)EOI_ETR_FAKE && (int)InpEntryTransport!=(int)EOI_ETR_BROKER_DEMO) return(false);
+   if((int)InpManagementTransport!=(int)EOI_MTR_READ_ONLY && (int)InpManagementTransport!=(int)EOI_MTR_BROKER_DEMO) return(false);
+   if(InpEntryTransport==EOI_ETR_BROKER_DEMO)
+     {
+      // REAL pending orders (demo account only: the executor refuses anything else): every guard is explicit and UNSET blocks. The build does not enable sending; the owner does, by these inputs.
+      if(InpEntryAuthorisation!=EN_AUTH_PHRASE || !InpManagementRegistration || InpEaMagic<=0 || InpFilling!=EOI_FILL_RETURN) return(false);
+      g_real_entry=true;
+      g_trp=GetPointer(g_etr);
+      g_storep=GetPointer(g_rstore);
+      g_lockp=GetPointer(g_rlockstore);
+     }
+   if(InpManagementTransport==EOI_MTR_BROKER_DEMO && (!InpManagementConfirmAutoSend || !InpManagementRegistration)) return(false);
    if(InpManagementRegistration)
      {
-      // registration on: every input it needs is explicit, UNSET blocks, nothing is guessed
+      // registration (and the management that follows it) on: every input it needs is explicit, UNSET blocks, nothing is guessed
       if(InpManagementAuthorisation!=EX_AUTH_PHRASE || InpManagementRPolicy!=EOI_MGMT_RPOL_R_GEOM || InpEaMagic<=0) return(false);
-      g_registrar.entry_store=GetPointer(g_store);
+      if(InpMgmtFilling==EX_FILL_UNSET || (int)InpMgmtFilling<(int)EX_FILL_FOK || (int)InpMgmtFilling>(int)EX_FILL_RETURN || InpMgmtDeviation<0) return(false);
+      if(InpMgmtFilterPolicy==EX_POL_UNSET || (int)InpMgmtFilterPolicy<(int)EX_POL_IGNORE || (int)InpMgmtFilterPolicy>(int)EX_POL_NEEDS_CLEAR) return(false);
+      if((int)InpMgmtFilterState<(int)EX_FS_UNKNOWN || (int)InpMgmtFilterState>(int)EX_FS_BLOCKED) return(false);
+      g_registrar.entry_store=g_storep;
       g_registrar.exit_tr=GetPointer(g_xtr);
       g_registrar.magic=InpEaMagic;
       g_registrar.phrase=InpManagementAuthorisation;
       g_registrar.rpol=EX_RPOL_R_GEOM;
-      g_registrar.provenance=MH_PROV_SYNTHETIC;      // the entry transport of this EA is the FAKE one: its fills are never matched to real positions (a real entry transport must declare MH_PROV_BROKER)
+      g_registrar.provenance=(g_real_entry ? MH_PROV_BROKER : MH_PROV_SYNTHETIC);   // a FAKE entry transport's fills are never matched to real positions; only the real entry transport declares BROKER
       g_registrar.selftest=false;
+      if(InpManagementTransport==EOI_MTR_BROKER_DEMO) g_mgr.tr=GetPointer(g_mreal);
+      else g_mgr.tr=GetPointer(g_xtr);
+      g_mgr.magic=InpEaMagic;
+      g_mgr.phrase=InpManagementAuthorisation;
+      g_mgr.filling=(int)InpMgmtFilling;
+      g_mgr.deviation=InpMgmtDeviation;
+      g_mgr.filter_policy=(int)InpMgmtFilterPolicy;
+      g_mgr.filter_state=(int)InpMgmtFilterState;
+      g_registrar.manager=GetPointer(g_mgr);
+      g_mgr_on=true;
       g_sink=GetPointer(g_registrar);
      }
    // an unknown enum value (a preset or a hand-typed number) is refused here; it must never fall through to the manual exposure inputs
@@ -211,7 +267,9 @@ bool Configure(void)
    g_cfg.max_trades=InpMaxTrades;
    g_cfg.risk_cap=InpCombinedRiskCap;
    g_cfg.gate.max_age=InpGateMaxAgeSeconds;
-   g_cfg.exec.enabled=true;                       // enables the FAKE executor only; the transport below is fake and fixed
+   g_cfg.exec.enabled=true;                       // enables the executor; the transport is FAKE unless BROKER_DEMO was selected with the phrase
+   g_cfg.exec.real_authorised=g_real_entry;
+   g_cfg.exec.authorisation=(g_real_entry ? InpEntryAuthorisation : "");
    g_cfg.exec.ea_magic=InpEaMagic;
    g_cfg.exec.symbol=_Symbol;
    g_cfg.exec.filling=(InpFilling==EOI_FILL_RETURN ? EN_FILL_RETURN : EN_FILL_UNSET);
@@ -250,7 +308,7 @@ void SyncHalts(void)
   {
    string notes="";
    // only a halt caused by an executor outcome is persisted (a full handled list, for instance, is cured by the restart itself)
-   if(g_guard.st.login>0 && StringFind(g_orch.halted,"HALTED after")==0 && g_guard.st.halted=="") LC_Halt(GetPointer(g_store),g_guard.st,g_orch.halted,notes);
+   if(g_guard.st.login>0 && StringFind(g_orch.halted,"HALTED after")==0 && g_guard.st.halted=="") LC_Halt(g_storep,g_guard.st,g_orch.halted,notes);
    if(g_guard.st.halted!="" && g_orch.halted=="") g_orch.halted="LIFECYCLE: "+g_guard.st.halted;
    if(notes!="") Print("T019 ",notes);
   }
@@ -273,7 +331,8 @@ void Lifecycle()
       due=LC_DueEvents(session,news,present,(present && daily.cancel_pending_due));
      }
    string notes="";
-   LC_Tick(g_cfg.exec,GetPointer(g_tr),GetPointer(g_store),g_guard.st,due,enabled,notes,g_sink);
+   if(g_mgr_on) g_mgr.OnTimer();                       // reconcile only (the driver's timer): a DONE slot is released by the sweep below
+   LC_Tick(g_cfg.exec,g_trp,g_storep,g_guard.st,due,enabled,notes,g_sink);
    if(notes!="") Print("T019 LIFECYCLE | ",notes);
    SyncHalts();
   }
@@ -294,11 +353,11 @@ void Poll()
                   (int)ex.ok,ex.reason,ex.open_positions,ex.pending,ex.foreign_positions,ex.foreign_pending,(int)ex.risk_known,ex.existing_risk,ex.risk_reason);
      }
    SEoOutcome out;
-   g_orch.Step(g_cfg,GetPointer(g_market),feed_ok,g_feed.st,g_feed.f,g_feed.broken,g_feed.cut,GetPointer(g_tr),GetPointer(g_store),out,GetPointer(g_guard));      // the guard indexes the signal BEFORE the executor can send
+   g_orch.Step(g_cfg,GetPointer(g_market),feed_ok,g_feed.st,g_feed.f,g_feed.broken,g_feed.cut,g_trp,g_storep,out,GetPointer(g_guard));      // the guard indexes the signal BEFORE the executor can send
    if(g_guard.notes!="") {Print("T019 ",g_guard.notes); g_guard.notes="";}
    SyncHalts();
    string text=out.status+" | "+out.reason+" | cut "+TimeToString(g_feed.cut,TIME_DATE|TIME_MINUTES)+" | baseline "+TimeToString((datetime)g_orch.baseline,TIME_DATE|TIME_MINUTES)+
-               " | virtual requests "+IntegerToString(g_tr.sends)+" | lifecycle open "+IntegerToString(g_guard.st.n)+(g_guard.st.halted!="" ? " HALTED" : "");
+               (g_real_entry ? " | REAL DEMO" : " | virtual requests "+IntegerToString(g_tr.sends))+" | lifecycle open "+IntegerToString(g_guard.st.n)+(g_guard.st.halted!="" ? " HALTED" : "");
    if(out.request) text+=" | "+out.label+" | "+out.spb.signal_id;
    Status(text);
   }
@@ -307,17 +366,18 @@ int OnInit()
   {
    if(MQLInfoInteger(MQL_TESTER)) {Print("T016 REFUSED: the Strategy Tester is not a supported environment (terminal reads)."); return(INIT_FAILED);}
    if(!Configure()) {Print("T016 INIT FAILED: invalid or UNSET source / feed inputs (see docs/T016-entry-orchestrator.md)."); return(INIT_PARAMETERS_INCORRECT);}
-   Print("T016 FAKE EXECUTION ONLY: this EA has no order-sending call, the real transport is not included. Symbol ",_Symbol);
+   if(g_real_entry) Print("T016 REAL DEMO ORDER MODE selected explicitly by the owner (phrase given). Symbol ",_Symbol,". Management transport: ",(InpManagementTransport==EOI_MTR_BROKER_DEMO ? "REAL closing requests" : "read-only (closing requests refused)"));
+   else Print("T016 FAKE ENTRY EXECUTION: virtual requests only; the real entry transport is not selected. Symbol ",_Symbol,". Management transport: ",(InpManagementTransport==EOI_MTR_BROKER_DEMO ? "REAL closing requests" : "read-only (closing requests refused)"));
    string startup_notes="";
-   g_guard.Bind(GetPointer(g_store));
+   g_guard.Bind(g_storep);
    // exclusive ownership of the index comes FIRST (the existing lock mechanism); an instance that does not get it neither reads nor writes the index and never sends or cancels (the layer stays halted)
-   if(!LC_Startup(g_cfg.exec,GetPointer(g_tr),GetPointer(g_store),GetPointer(g_lockstore),InpAcknowledgeLifecycleHalt,g_guard.st,startup_notes,g_sink))
+   if(!LC_Startup(g_cfg.exec,g_trp,g_storep,g_lockp,InpAcknowledgeLifecycleHalt,g_guard.st,startup_notes,g_sink))
       Print("T019 LIFECYCLE startup: the account is not readable; the layer stays halted.");
    if(startup_notes!="") Print("T019 LIFECYCLE startup | ",startup_notes);
    if(g_guard.st.halted!="") g_orch.halted="LIFECYCLE: "+g_guard.st.halted;
    if(!EventSetTimer(InpPollSeconds))
      {
-      LC_Release(GetPointer(g_lockstore),g_guard.st);              // a failed start releases what this instance owns, and nothing else
+      LC_Release(g_lockp,g_guard.st);              // a failed start releases what this instance owns, and nothing else
       return(INIT_FAILED);
      }
    Poll();
@@ -326,8 +386,18 @@ int OnInit()
 void OnDeinit(const int reason)
   {
    EventKillTimer();
-   LC_Release(GetPointer(g_lockstore),g_guard.st);                  // only the owner releases, and only its own key
+   LC_Release(g_lockp,g_guard.st);                  // only the owner releases, and only its own key
    Comment("");
-   PrintFormat("T016 stopped (reason %d). %d virtual request(s), nothing was sent to the terminal.",reason,g_tr.sends);
+   if(g_real_entry) PrintFormat("T016 stopped (reason %d).",reason);
+   else PrintFormat("T016 stopped (reason %d). %d virtual request(s), nothing was sent to the terminal by the entry layer.",reason,g_tr.sends);
   }
 void OnTimer() {Poll();}
+// the quote loop of the T011 management: below the level no I/O (the driver's pre-filter); at the level the existing executor is the only request source
+void OnTick()
+  {
+   if(!g_mgr_on || g_mgr.n==0) return;
+   MqlTick t;
+   if(!SymbolInfoTick(_Symbol,t) || !(t.bid>0.0) || !(t.ask>0.0)) return;
+   int sent=g_mgr.OnQuote(t.bid,t.ask);
+   if(sent>0) PrintFormat("T011 MANAGEMENT: %d closing request(s) sent at the 2R level; the timer reconciles them",sent);
+  }

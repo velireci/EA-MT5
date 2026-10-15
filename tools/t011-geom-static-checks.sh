@@ -32,7 +32,7 @@ for name, code in (('executor', exe), ('driver', drv), ('ea', ea), ('register', 
 for name, code in (('driver', drv), ('ea', ea), ('register', reg)):
     assert not re.search(r'\bFile\w+\s*\(', code), (name, 'direct file access (records go through ExitStateFile only)')
 holders = sorted(f for f in glob.glob('src/**/*.mq[h5]', recursive=True) if re.search(r'#include\s+"[^"]*ExitTransportReal\.mqh"', open(f, encoding='ascii').read()))
-assert holders == ['src/XauUsdT011DemoHarness.mq5', 'src/XauUsdT011ExitManager.mq5', 'src/XauUsdT011ExitRegister.mq5', 'src/tests/T011_ExecutorRealCompile.mq5'], holders
+assert holders == ['src/XauUsdEntryOrchestrator.mq5', 'src/XauUsdT011DemoHarness.mq5', 'src/XauUsdT011ExitManager.mq5', 'src/XauUsdT011ExitRegister.mq5', 'src/tests/T011_ExecutorRealCompile.mq5'], holders
 assert 'ExitTransportReal' not in drv and 'ExitTransportReal' not in gt and 'ExitTransportReal' not in dt
 # registration is never done by OnInit / OnTick / OnTimer / the driver's init and tick
 assert 'EX_Register' not in ea and 'ETD_Register' not in ea

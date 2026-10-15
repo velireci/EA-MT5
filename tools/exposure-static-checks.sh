@@ -72,7 +72,7 @@ w = ea[ea.index('if(InpExposureSource==EOI_EXPOSURE_ACCOUNT_READ)'):ea.index('SE
 assert 'EX_Compute(InpEaMagic,_Symbol,(int)InpPendingPolicy,(int)InpPendingRiskPolicy,' in w and 'g_cfg.open_positions=EX_GatePositions(ex)' in w and 'g_cfg.existing_risk=EX_GateRisk(ex)' in w, 'wiring'
 assert 'InpOpenPositions' not in w and 'InpExistingRisk' not in w, 'a fallback to the manual exposure inputs'
 assert ea.count('EX_Compute(') == 1 and ea.count('CExRealPort') == 1, 'one read per build'
-assert 'OrderSend' not in ea and 'CEnRealTransport' not in ea
+assert 'OrderSend' not in ea and ea.count('CEnRealTransport') == 1, 'the EA names the real entry transport once (its declaration); the exposure wiring never uses it'
 PYEOF
 python3 -I "$NEG/x3.py" $REAL $EA && echo "  PASS read-only port, opt-in defaults, wiring without a manual fallback" || { echo "  FAIL"; FAIL=1; }
 

@@ -99,6 +99,173 @@ public:
      }
   };
 
+
+// ---- T011 MANAGEMENT inside the orchestrator. No state machine of its own: every step is the EXISTING driver (ETD_Init = recovery first and the arming proof, ETD_Tick = the one request source at the
+// 2R level, ETD_Timer = reconcile only) under the T011 per-position lock. The persistent memory of the managed set is the lifecycle INDEX: a registered fill stays indexed (LC_SINK_ACTIVE) until the
+// T011 record is DONE or the position is proven closed, so after a restart the sweep hands every indexed fill back to Manage(), which runs the driver's recovery before anything can arm.
+// A position that has no T011 record is never touched. Mirrors Manager in tests/lifecycle_reference.py.
+#define MH_MAX_SLOTS 16
+
+struct SMhSlot
+  {
+   ulong pid;
+   string name;
+   SEsIdentity id;
+   SExConfig cfg;
+   SEtdState st;
+   SExRuntime rt;
+   int direction;
+   double volume;
+   bool inited;
+   bool done;
+   string blocked;
+  };
+
+class CMhManager
+  {
+public:
+   CExitTransport *tr;          // the MANAGEMENT transport: read-only (its Send is refused) by default; the real closing transport only by explicit EA inputs
+   SXaRaw raw_a;                // fixtures for a non-live transport (tests); a live transport ignores them
+   SXaRaw raw_b;
+   long magic;
+   string phrase;
+   int filling;
+   long deviation;
+   int filter_policy;
+   int filter_state;
+   SMhSlot slots[MH_MAX_SLOTS];
+   int n;
+   CMhManager(void)
+     {
+      tr=NULL;
+      magic=0;
+      phrase="";
+      filling=EX_FILL_UNSET;
+      deviation=-1;
+      filter_policy=EX_POL_UNSET;
+      filter_state=EX_FS_UNKNOWN;
+      n=0;
+      XA_RawInit(raw_a);
+      XA_RawInit(raw_b);
+     }
+   int Find(const ulong pid)
+     {
+      for(int i=0;i<n;i++)
+         if(slots[i].pid==pid) return(i);
+      return(-1);
+     }
+   void Forget(const ulong pid)
+     {
+      int k=Find(pid);
+      if(k<0) return;
+      for(int i=k;i<n-1;i++) slots[i]=slots[i+1];
+      n--;
+     }
+   void MakeCfg(const SEnRecord &rec,SExConfig &c)
+     {
+      EX_ConfigInit(c);
+      c.enabled=true;
+      c.r_policy=EX_RPOL_R_GEOM;
+      c.real_authorised=(phrase==EX_AUTH_PHRASE);
+      c.authorisation=phrase;
+      c.ea_magic=magic;
+      c.filling=(ENUM_EX_FILLING)filling;
+      c.deviation=deviation;
+      c.filter_policy=(ENUM_EX_FILTER_POLICY)filter_policy;
+      c.filter_state=(ENUM_EX_FILTER_STATE)filter_state;
+      c.sl_initial_set=true;
+      c.sl_initial=rec.s;
+      c.tp_set=true;
+      c.tp_price=rec.tp;
+     }
+   int Classify(const int k,const bool armed,const SErfResult &flow,const bool have_flow,string &detail)
+     {
+      if(slots[k].done) {detail="MANAGEMENT_DONE: the T011 record is DONE"; return(LC_SINK_CONFIRMED);}
+      if(armed) {detail="ARMED"; return(LC_SINK_ACTIVE);}
+      if(have_flow)
+        {
+         if(flow.final_state==ERF_DONE) {slots[k].done=true; detail="MANAGEMENT_DONE: recovered as DONE"; return(LC_SINK_CONFIRMED);}
+         if(flow.final_state==ERF_STILL_OPEN) {detail="RECONCILING"; return(LC_SINK_ACTIVE);}
+         slots[k].blocked="MANAGEMENT_BLOCKED: the T011 record is "+ERF_FinalName(flow.final_state)+" ("+flow.reason+")";
+         detail=slots[k].blocked;
+         return(LC_SINK_REFUSED);
+        }
+      string reason=slots[k].st.reason;
+      if(StringFind(reason,"INIT_LOCK_FAILED")==0) {detail="MANAGEMENT_LOCK: "+reason; return(LC_SINK_PENDING);}
+      if(StringFind(reason,"INIT_POSITION_NOT_PROVEN: POSITION_NOT_FOUND")==0) {detail="MANAGEMENT_POSITION_NOT_FOUND: "+reason; return(LC_SINK_PENDING);}
+      slots[k].blocked="MANAGEMENT_NOT_ARMED: "+reason;
+      detail=slots[k].blocked;
+      return(LC_SINK_REFUSED);
+     }
+   int Manage(const SEnRecord &rec,const SEsIdentity &idn,const string name,string &detail)
+     {
+      if(tr==NULL) {detail="MANAGEMENT_NOT_BOUND"; return(LC_SINK_REFUSED);}
+      int k=Find(rec.position_id);
+      if(k<0)
+        {
+         if(n>=MH_MAX_SLOTS) {detail="MANAGEMENT_SLOTS_FULL"; return(LC_SINK_REFUSED);}
+         k=n;
+         n++;
+         slots[k].pid=rec.position_id;
+         slots[k].name=name;
+         slots[k].id=idn;
+         MakeCfg(rec,slots[k].cfg);
+         ETD_StateInit(slots[k].st);
+         EX_RuntimeInit(slots[k].rt);
+         slots[k].direction=rec.direction;
+         slots[k].volume=rec.volume;
+         slots[k].inited=false;
+         slots[k].done=false;
+         slots[k].blocked="";
+        }
+      if(slots[k].blocked!="") {detail=slots[k].blocked; return(LC_SINK_REFUSED);}
+      if(slots[k].done) {detail="MANAGEMENT_DONE: the T011 record is DONE"; return(LC_SINK_CONFIRMED);}
+      if(slots[k].inited && (slots[k].st.armed || slots[k].st.reconcile_due)) {detail="ACTIVE"; return(LC_SINK_ACTIVE);}
+      SErfResult flow;
+      bool armed=ETD_Init(slots[k].cfg,tr,name,idn,raw_a,raw_b,slots[k].st,flow);      // not armed and nothing to reconcile (first sweep, a disarmed driver, a lock failure): the driver's init is the restart
+      slots[k].inited=true;
+      bool have_flow=(flow.snapshot_called || flow.reconcile_called || flow.final_state!=ERF_RECOVERY_REQUIRED || flow.reason!="");
+      return(Classify(k,armed,flow,have_flow,detail));
+     }
+   // one quote for every armed slot; returns the number of closing requests SENT
+   int OnQuote(const double bid,const double ask)
+     {
+      int sent=0;
+      for(int i=0;i<n;i++)
+        {
+         if(!slots[i].st.armed) continue;
+         SExQuote q;
+         q.direction=slots[i].direction;
+         q.level_2r=0.0;
+         q.bid=bid;
+         q.ask=ask;
+         q.volume_initial=slots[i].volume;
+         SExResult res;
+         if(ETD_Tick(slots[i].cfg,tr,slots[i].rt,slots[i].name,slots[i].id,q,slots[i].st,res)) sent++;
+        }
+      return(sent);
+     }
+   // reconcile only; returns the number of timer runs
+   int OnTimer(void)
+     {
+      int runs=0;
+      for(int i=0;i<n;i++)
+        {
+         if(!slots[i].st.reconcile_due) continue;
+         SErfResult flow;
+         if(ETD_Timer(tr,slots[i].name,slots[i].id,raw_a,raw_b,slots[i].st,flow))
+           {
+            runs++;
+            if(flow.final_state==ERF_DONE) slots[i].done=true;
+            else
+               if(flow.final_state!=ERF_STILL_OPEN)
+                  slots[i].blocked="MANAGEMENT_BLOCKED: the T011 record is "+ERF_FinalName(flow.final_state)+" ("+flow.reason+")";
+           }
+        }
+      return(runs);
+     }
+  };
+
 class CMhRegistrar : public CLcFillSink
   {
 public:
@@ -107,13 +274,50 @@ public:
    long magic;
    string phrase;               // the standing authorisation phrase (EX_AUTH_PHRASE) given as an EA input
    int rpol;                    // EX_RPOL_R_GEOM
+   CMhManager *manager;         // optional: after a confirmed registration the position is handed to the T011 driver (management inside the orchestrator)
    int provenance;              // MH_PROV_*; anything but BROKER refuses before any terminal read
    bool selftest;               // test file names only (a prefix); the production name is ESF_FileName
    string tries_id[LC_MAX];
    int tries[LC_MAX];
    int n_tries;
-   CMhRegistrar(void) {entry_store=NULL; exit_tr=NULL; magic=0; phrase=""; rpol=EX_RPOL_UNSET; provenance=MH_PROV_UNSET; selftest=false; n_tries=0;}
+   CMhRegistrar(void) {entry_store=NULL; exit_tr=NULL; magic=0; phrase=""; rpol=EX_RPOL_UNSET; manager=NULL; provenance=MH_PROV_UNSET; selftest=false; n_tries=0;}
    string Name(const long login,const ulong position_id) {return((selftest ? "VELO_T019_SELFTEST_" : "")+ESF_FileName(login,position_id));}
+   // true only when the position list was readable, stable (two scans, the count unchanged) and holds no such position: the position is CLOSED, not merely unreadable. Tests override it.
+   virtual bool Absent(const ulong position_id)
+     {
+      for(int pass=0;pass<2;pass++)
+        {
+         int total=PositionsTotal();
+         for(int i=total-1;i>=0;i--)
+           {
+            ulong t=PositionGetTicket(i);
+            if(t==0) return(false);
+            long idv=0;
+            if(!PositionGetInteger(POSITION_IDENTIFIER,idv)) return(false);
+            if((ulong)idv==position_id) return(false);
+           }
+         if(PositionsTotal()!=total) return(false);
+        }
+      return(true);
+     }
+   // a confirmed registration is handed to the management (when wired): the id leaves the index only when the management is finished
+   int Managed(const int status,const string detail_in,const SEnRecord &rec,const SEsIdentity &idn,const string name,string &detail)
+     {
+      detail=detail_in;
+      if(status!=LC_SINK_CONFIRMED || manager==NULL) return(status);
+      if(StringFind(detail_in,"POSITION_CLOSED")==0)
+        {
+         manager.Forget(rec.position_id);
+         return(status);
+        }
+      string md;
+      int ms=manager.Manage(rec,idn,name,md);
+      if(ms==LC_SINK_CONFIRMED) detail=detail_in+" | "+md;
+      else
+         if(ms==LC_SINK_ACTIVE) detail=(md=="ACTIVE" ? md : detail_in+" | MANAGEMENT "+md);
+         else detail=md;
+      return(ms);
+     }
    string Inputs(const SEnRecord &rec)
      {
       return("InpRPolicy=R_GEOM InpEaMagic="+IntegerToString(rec.magic)+" InpPositionId="+IntegerToString((long)rec.position_id)+" InpSymbol="+rec.symbol+" InpDirection="+(rec.direction==1 ? "BUY" : "SELL")+
@@ -140,7 +344,22 @@ public:
       if(!sym.read_ok || sym.tick_size<=0.0) {detail="SYMBOL_UNREADABLE"; return(LC_SINK_PENDING);}
       SExPosition pos;
       exit_tr.FindPosition(idn.position_id,pos);
-      if(!pos.found || pos.ticket==0 || pos.identifier!=idn.position_id) {detail="POSITION_NOT_FOUND: the open price of the position cannot be proven, so the stored base cannot be compared"; return(LC_SINK_PENDING);}
+      if(!pos.found || pos.ticket==0 || pos.identifier!=idn.position_id)
+        {
+         if(Absent(idn.position_id))
+           {
+            SEaState cst;
+            SEsRestore co;
+            ESF_Load(name,idn,cst,co);
+            if((co.verdict==ESC_USABLE_IDLE || co.verdict==ESC_USABLE_REQUEST || co.verdict==ESC_USABLE_BLOCKED) && co.plan_set && (cst.status==EA_ST_IDLE || cst.status==EA_ST_DONE))
+              {
+               detail="POSITION_CLOSED: the position is proven absent (stable list); a record that is IDLE or DONE has nothing left to manage; the file is untouched";
+               return(LC_SINK_CONFIRMED);
+              }
+           }
+         detail="POSITION_NOT_FOUND: the open price of the position cannot be proven, so the stored base cannot be compared";
+         return(LC_SINK_PENDING);
+        }
       if(pos.symbol!=idn.symbol || pos.magic!=magic || pos.type!=(rec.direction==1 ? 0 : 1)) {detail="OWNERSHIP_NOT_PROVEN: symbol, magic or direction of the live position differ from the record / configuration"; return(LC_SINK_REFUSED);}
       SEaState st;
       SEsRestore o;
@@ -190,7 +409,12 @@ public:
       idn.symbol=rec.symbol;
       idn.position_id=rec.position_id;
       string name=Name(acct.login,rec.position_id);
-      if(ESF_Exists(name) || ESF_Exists(name+ESF_TMP_SUFFIX)) return(Compare(name,idn,rec,acct,detail));
+      if(ESF_Exists(name) || ESF_Exists(name+ESF_TMP_SUFFIX))
+        {
+         string cd;
+         int cs=Compare(name,idn,rec,acct,cd);
+         return(Managed(cs,cd,rec,idn,name,detail));
+        }
       SExConfig cfg;
       EX_ConfigInit(cfg);
       cfg.enabled=true;
@@ -212,7 +436,7 @@ public:
       EX_RuntimeInit(rt);
       SExResult res;
       ETD_Register(cfg,exit_tr,rt,name,idn,q,res);
-      if(res.final_state==EX_REGISTERED) {detail="REGISTERED_WITH_T011 "+Inputs(rec); return(LC_SINK_CONFIRMED);}
+      if(res.final_state==EX_REGISTERED) return(Managed(LC_SINK_CONFIRMED,"REGISTERED_WITH_T011 "+Inputs(rec),rec,idn,name,detail));
       if(res.final_state==EX_RECOVERY_REQUIRED) {detail="REGISTRATION_UNCERTAIN: "+res.reason; return(LC_SINK_PENDING);}
       detail=res.reason;
       return(Transient(res.reason) ? LC_SINK_PENDING : LC_SINK_REFUSED);
@@ -220,6 +444,11 @@ public:
    virtual int OnFilled(const long login,const string signal_id,string &detail)
      {
       int r=Attempt(login,signal_id,detail);
+      if(r!=LC_SINK_PENDING)
+        {
+         for(int j=0;j<n_tries;j++)
+            if(tries_id[j]==signal_id) tries[j]=0;
+        }
       if(r==LC_SINK_PENDING)
         {
          int k=-1;

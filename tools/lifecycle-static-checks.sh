@@ -88,7 +88,7 @@ echo "=== L3: the EA keeps every cancel event off, wires the layer, has no order
 cat > "$NEG/l3.py" <<'PYEOF'
 import re, sys
 ea = re.sub(r'//[^\n]*', '', open(sys.argv[1], encoding='ascii').read())
-for w in ('OrderSend', 'ETD_Register', 'EX_Register', 'ExitStateFile', 'ExitExecutor', 'EntryTransportReal', 'ExitTransportReal', 'CEnRealTransport', 'TP_Authorize'):
+for w in ('OrderSend', 'ETD_Register', 'EX_Register', 'ExitStateFile', 'ExitExecutor', 'TP_Authorize', 'EX_Process', 'EN_Place', 'EN_Cancel'):
     assert w not in ea, w
 for n in ('InpCancelOnSessionEnd=false', 'InpCancelOnNewsBlock=false', 'InpCancelOnDailyLimit=false', 'InpAcknowledgeLifecycleHalt=false'):
     assert n in ea, 'default not off: ' + n
@@ -96,24 +96,27 @@ assert '#include "include/EntryLifecycle.mqh"' in ea and '#include "include/Entr
 assert 'input bool InpManagementRegistration=false;' in ea and 'input string InpManagementAuthorisation="";' in ea and 'input ENUM_EO_MGMT_RPOL InpManagementRPolicy=EOI_MGMT_RPOL_UNSET;' in ea, 'registration is off and UNSET by default'
 conf = ea[ea.index('bool Configure(void)'):ea.index('SEoFeedCfg fc;')]
 assert 'if(InpManagementRegistration)' in conf and 'InpManagementAuthorisation!=EX_AUTH_PHRASE || InpManagementRPolicy!=EOI_MGMT_RPOL_R_GEOM || InpEaMagic<=0) return(false);' in conf, 'registration needs the phrase, R_GEOM and a magic'
-assert 'g_registrar.provenance=MH_PROV_SYNTHETIC;' in conf and 'MH_PROV_BROKER' not in ea, 'the FAKE entry transport declares SYNTHETIC provenance'
+assert 'g_registrar.provenance=(g_real_entry ? MH_PROV_BROKER : MH_PROV_SYNTHETIC);' in conf, 'the FAKE entry transport declares SYNTHETIC provenance; only the explicitly selected real one declares BROKER'
 assert conf.count('g_sink=GetPointer(g_registrar);') == 1 and 'g_sink=NULL;' in conf and 'g_registrar.exit_tr=GetPointer(g_xtr);' in conf and 'g_registrar.selftest=false;' in conf, 'the sink is set only inside the registration branch, with the read-only transport'
 assert 'int EnabledCancelEvents(void)' in ea and 'InpCancelOnSessionEnd ? TP_EV_SESSION_END : 0' in ea
 assert ea.count('LC_Tick(') == 1 and ea.count('LC_Startup(') == 1, 'one tick and one startup'
 assert 'LC_Register(' not in ea, 'the EA never indexes after the fact: the gate hook does it before the send'
 assert 'CLcGuard g_guard;' in ea and 'CEnFakeFileStore g_lockstore;' in ea, 'guard and a dedicated lock store'
-assert 'LC_Startup(g_cfg.exec,GetPointer(g_tr),GetPointer(g_store),GetPointer(g_lockstore),InpAcknowledgeLifecycleHalt,g_guard.st,startup_notes,g_sink)' in ea and 'g_guard.st,due,enabled,notes,g_sink);' in ea, 'the registrar is the sink of startup and tick'
-assert 'LC_Startup(g_cfg.exec,GetPointer(g_tr),GetPointer(g_store),GetPointer(g_lockstore),InpAcknowledgeLifecycleHalt,g_guard.st' in ea, 'the acknowledgement is an explicit input at start; the lock store is passed'
+assert 'LC_Startup(g_cfg.exec,g_trp,g_storep,g_lockp,InpAcknowledgeLifecycleHalt,g_guard.st,startup_notes,g_sink)' in ea and 'g_guard.st,due,enabled,notes,g_sink);' in ea, 'the registrar is the sink of startup and tick'
+assert 'if(g_mgr_on) g_mgr.OnTimer();' in ea and 'g_mgr.OnQuote(t.bid,t.ask)' in ea and ea.count('g_mgr.OnQuote(') == 1 and ea.count('g_mgr.OnTimer(') == 1, 'the management runs on the quote loop and the timer only'
+assert 'void OnTick()' in ea and 'if(!g_mgr_on || g_mgr.n==0) return;' in ea, 'no quote work without a managed slot'
+assert 'g_registrar.manager=GetPointer(g_mgr);' in conf and 'g_mgr_on=true;' in conf and 'InpMgmtFilling==EX_FILL_UNSET' in conf and 'InpMgmtDeviation<0' in conf and 'InpMgmtFilterPolicy==EX_POL_UNSET' in conf, 'management is wired only inside the registration branch with its closing inputs explicit'
+assert 'LC_Startup(g_cfg.exec,g_trp,g_storep,g_lockp,InpAcknowledgeLifecycleHalt,g_guard.st' in ea, 'the acknowledgement is an explicit input at start; the lock store is passed'
 init = ea[ea.index('int OnInit()'):ea.index('void OnDeinit(')]
 assert init.index('Configure()') < init.index('LC_Startup(') < init.index('EventSetTimer('), 'startup after the configuration and before the first poll'
-assert 'LC_Release(GetPointer(g_lockstore),g_guard.st);' in init[init.index('EventSetTimer('):], 'a failed start releases its own lock'
+assert 'LC_Release(g_lockp,g_guard.st);' in init[init.index('EventSetTimer('):], 'a failed start releases its own lock'
 deinit = ea[ea.index('void OnDeinit('):]
-assert 'LC_Release(GetPointer(g_lockstore),g_guard.st);' in deinit, 'the lock is released at the end'
+assert 'LC_Release(g_lockp,g_guard.st);' in deinit, 'the lock is released at the end'
 assert ea.count('LC_Release(') == 2, 'releases only on the start-failure path and in OnDeinit'
 poll = ea[ea.index('void Poll()'):ea.index('int OnInit()')]
 assert 'Lifecycle();' in poll, 'the lifecycle call is missing'
 assert poll.index('Lifecycle();') < poll.index('g_orch.Step('), 'the lifecycle runs before a new entry is considered'
-assert 'GetPointer(g_store),out,GetPointer(g_guard));' in poll, 'the guard is the gate hook of every placement'
+assert 'g_trp,g_storep,out,GetPointer(g_guard));' in poll, 'the guard is the gate hook of every placement'
 sync = ea[ea.index('void SyncHalts('):ea.index('void Lifecycle(')]
 assert 'StringFind(g_orch.halted,"HALTED after")==0' in sync and 'g_guard.st.login>0' in sync, 'only an executor halt is persisted'
 life = ea[ea.index('void Lifecycle()'):ea.index('void Poll()')]
@@ -131,10 +134,11 @@ cat > "$NEG/l6.py" <<'PYEOF'
 import re, sys
 t = re.sub(r'//[^\n]*', '', open(sys.argv[1], encoding='ascii').read())
 assert sorted(re.findall(r'#include "([^"]+)"', t)) == ['EntryLifecycle.mqh', 'ExitTickDriver.mqh'], 'includes'
-for w in ('OrderSend', 'OrderCheck', 'OrderSendAsync', 'ESF_Save', 'ESF_WriteAll', 'FileOpen', 'FileDelete', 'FileMove', 'EX_Process', 'ETD_Tick', 'ETD_Init', 'EX_Reconcile', 'EN_Place', 'EN_Cancel', 'EN_Reconcile',
+for w in ('OrderSend', 'OrderCheck', 'OrderSendAsync', 'ESF_Save', 'ESF_WriteAll', 'FileOpen', 'FileDelete', 'FileMove', 'EX_Process', 'EX_Reconcile', 'EN_Place', 'EN_Cancel', 'EN_Reconcile',
           'ExitTransportReal', 'EntryTransportReal', 'TP_Authorize', 'PositionClosePartial', 'trade.'):
     assert w not in t, 'forbidden: ' + w
 assert t.count('ETD_Register(') == 1, 'one registration call'
+assert t.count('ETD_Init(') == 1 and t.count('ETD_Tick(') == 1 and t.count('ETD_Timer(') == 1, 'management goes only through the three driver entry points, once each'
 assert t.count('EX_Register(') == 0, 'EX_Register only through ETD_Register (the per-position lock)'
 rt = t[t.index('class CMhReadTransport'):t.index('class CMhRegistrar')]
 assert 'virtual bool IsReal(void) {return(true);}' in rt, 'IsReal true keeps the authorisation and demo gates'
@@ -144,7 +148,7 @@ assert 'send_attempts++;' in send and 'returned_true=false;' in send and 'OrderS
 assert rt.count('PositionGetTicket(') == 1 and 'PositionsTotal()==total' in rt and 'matches==1' in rt, 'a unique, unchanged position read'
 rg = t[t.index('class CMhRegistrar'):]
 assert 'cfg.sl_initial=rec.s;' in rg and 'cfg.tp_price=rec.tp;' in rg and 'cfg.r_policy=(ENUM_EX_R_POLICY)rpol;' in rg and 'cfg.real_authorised=(phrase==EX_AUTH_PHRASE);' in rg, 'the plan of the record, the phrase, the policy'
-assert 'if(ESF_Exists(name) || ESF_Exists(name+ESF_TMP_SUFFIX)) return(Compare(' in rg and rg.index('return(Compare(') < rg.index('ETD_Register('), 'an existing record is compared and never rewritten'
+assert 'if(ESF_Exists(name) || ESF_Exists(name+ESF_TMP_SUFFIX))' in rg and 'int cs=Compare(' in rg and rg.index('int cs=Compare(') < rg.index('ETD_Register('), 'an existing record is compared and never rewritten'
 assert 'rec.state!=EN_ST_FILLED || rec.linked!=1 || rec.position_id==0' in rg and rg.index('FILL_NOT_PROVEN') < rg.index('ETD_Register('), 'only a proven fill'
 assert 'acct.login!=rec.login || acct.server!=rec.server' in rg, 'account identity'
 assert 'MH_MAX_TRIES' in rg and 'RETRIES_EXHAUSTED' in rg, 'bounded retries'
@@ -256,9 +260,9 @@ mut O.mqh $HD 's/   if(!s.lock_owned) return;                                \/\
 expect_assert "$NEG/l2.py" "$NEG/O.mqh" "a tick without the lock" "tick without the lock"
 mut P.mqh $HD 's/      if(!st.lock_owned)$/      if(false)/'
 expect_assert "$NEG/l2.py" "$NEG/P.mqh" "a reservation without the lock check" "guard order\|guard"
-mut Q.mqh $EA 's/GetPointer(g_store),out,GetPointer(g_guard));/GetPointer(g_store),out);/'
+mut Q.mqh $EA 's/g_trp,g_storep,out,GetPointer(g_guard));/g_trp,g_storep,out);/'
 expect_assert "$NEG/l3.py" "$NEG/Q.mqh" "a placement without the pre-send guard" "the guard is the gate hook"
-mut R.mqh $EA 's/   LC_Release(GetPointer(g_lockstore),g_guard.st);                  \/\/ only the owner releases, and only its own key/   \/\/ none/'
+mut R.mqh $EA 's/   LC_Release(g_lockp,g_guard.st);                  \/\/ only the owner releases, and only its own key/   \/\/ none/'
 expect_assert "$NEG/l3.py" "$NEG/R.mqh" "a lock that is never released" "released at the end\|releases only"
 cp $EA "$NEG/S.mqh"; sed -i 's/^   Poll();$/   LC_Register(GetPointer(g_store),g_guard.st,"x",startup_notes); Poll();/' "$NEG/S.mqh"
 expect_assert "$NEG/l3.py" "$NEG/S.mqh" "an index entry written by the EA after the fact" "never indexes after the fact"
@@ -276,7 +280,7 @@ mut Z4.mqh $MH 's/      ETD_Register(cfg,exit_tr,rt,name,idn,q,res);/      ETD_R
 expect_assert "$NEG/l6.py" "$NEG/Z4.mqh" "a second registration call" "one registration call"
 mut Z5.mqh $MH 's/      ETD_Register(cfg,exit_tr,rt,name,idn,q,res);/      EX_Register(cfg,exit_tr,rt,name,idn,q,res);/'
 expect_assert "$NEG/l6.py" "$NEG/Z5.mqh" "a registration that skips the per-position lock" "one registration call"
-mut Z6.mqh $MH 's/      if(ESF_Exists(name) || ESF_Exists(name+ESF_TMP_SUFFIX)) return(Compare(name,idn,rec,acct,detail));/      \/\/ none/'
+mut Z6.mqh $MH 's/      if(ESF_Exists(name) || ESF_Exists(name+ESF_TMP_SUFFIX))$/      if(false)/'
 expect_assert "$NEG/l6.py" "$NEG/Z6.mqh" "a registrar that may rewrite an existing record" "compared and never rewritten"
 mut Z7.mqh $MH 's/      if(rec.state!=EN_ST_FILLED || rec.linked!=1 || rec.position_id==0)/      if(false)/'
 expect_assert "$NEG/l6.py" "$NEG/Z7.mqh" "a registration of an unproven fill" "only a proven fill"
@@ -288,7 +292,7 @@ mut ZA.mqh $EA 's/^input bool InpManagementRegistration=false;/input bool InpMan
 expect_assert "$NEG/l3.py" "$NEG/ZA.mqh" "registration on by default" "registration is off"
 mut ZB.mqh $EA 's/InpManagementAuthorisation!=EX_AUTH_PHRASE || //'
 expect_assert "$NEG/l3.py" "$NEG/ZB.mqh" "registration without the authorisation phrase" "needs the phrase"
-mut ZC.mqh $EA 's/LC_Tick(g_cfg.exec,GetPointer(g_tr),GetPointer(g_store),g_guard.st,due,enabled,notes,g_sink);/LC_Tick(g_cfg.exec,GetPointer(g_tr),GetPointer(g_store),g_guard.st,due,enabled,notes);/'
+mut ZC.mqh $EA 's/LC_Tick(g_cfg.exec,g_trp,g_storep,g_guard.st,due,enabled,notes,g_sink);/LC_Tick(g_cfg.exec,g_trp,g_storep,g_guard.st,due,enabled,notes);/'
 expect_assert "$NEG/l3.py" "$NEG/ZC.mqh" "a tick that never reaches the registrar" "sink of startup and tick"
 
 mut ZD.mqh $HD 's/         else if(r2==LC_SINK_PENDING) LC_Note(notes,"FILL_REGISTRATION_PENDING "+id+": "+detail);/         else if(r2==LC_SINK_PENDING) {LC_Note(notes,"FILL_REGISTRATION_PENDING "+id+": "+detail); LC_Remove(s,i);}/'
@@ -300,11 +304,18 @@ mut ZF.mqh $MH 's/      if(phrase!=EX_AUTH_PHRASE) {detail="REAL_NOT_AUTHORISED"
 expect_assert "$NEG/l6.py" "$NEG/ZF.mqh" "an existing record accepted without the authorisation phrase" "phrase!=EX_AUTH_PHRASE"
 mut ZG.mqh $MH 's/o.plan_e_src==pos.price_open \&\& //'
 expect_assert "$NEG/l6.py" "$NEG/ZG.mqh" "an existing record accepted without the open price" "o.plan_e_src==pos.price_open"
-mut ZH.mqh $EA 's/      g_registrar.provenance=MH_PROV_SYNTHETIC;/      g_registrar.provenance=MH_PROV_BROKER;/'
+mut ZH.mqh $EA 's/g_registrar.provenance=(g_real_entry ? MH_PROV_BROKER : MH_PROV_SYNTHETIC);/g_registrar.provenance=MH_PROV_BROKER;/'
 expect_assert "$NEG/l3.py" "$NEG/ZH.mqh" "the FAKE entry transport declared as a broker" "SYNTHETIC provenance"
 cp src/include/ExposureReader.mqh "$NEG/dup.mqh"; sed -i 's/^struct SExpResult/struct SExResult/' "$NEG/dup.mqh"
 mkdir -p "$NEG/p/include"; cp src/include/*.mqh "$NEG/p/include/"; cp "$NEG/dup.mqh" "$NEG/p/include/ExposureReader.mqh"; cp $EA "$NEG/p/Ea.mq5"
 if err=$(python3 -I "$NEG/l5b.py" "$NEG/p/Ea.mq5" 2>&1 >/dev/null); then echo "  FAIL a duplicate struct name NOT detected"; FAIL=1; elif echo "$err" | grep -q "duplicate declaration: .*SExResult"; then echo "  PASS a duplicate struct name is detected"; else echo "  FAIL the control broke for another reason: $(echo "$err" | tail -1)"; FAIL=1; fi
+
+mut ZI.mqh $EA 's/   if(g_mgr_on) g_mgr.OnTimer();  /   \/\/ none  /'
+expect_assert "$NEG/l3.py" "$NEG/ZI.mqh" "a management without its reconcile timer" "quote loop and the timer"
+mut ZJ.mqh $EA 's/   g_registrar.manager=GetPointer(g_mgr);/   \/\/ none/;s/      g_registrar.manager=GetPointer(g_mgr);/      \/\/ none/'
+expect_assert "$NEG/l3.py" "$NEG/ZJ.mqh" "a registrar that never hands over to the management" "management is wired"
+mut ZK.mqh $MH 's/         if(ETD_Tick(slots\[i\].cfg,tr,slots\[i\].rt,slots\[i\].name,slots\[i\].id,q,slots\[i\].st,res)) sent++;/         if(EX_Process(slots[i].cfg,tr,slots[i].rt,slots[i].name,slots[i].id,q,res)) sent++;/'
+expect_assert "$NEG/l6.py" "$NEG/ZK.mqh" "a request path that bypasses the driver" "forbidden: EX_Process"
 
 [ $FAIL -eq 0 ] && echo "LIFECYCLE STATIC CHECKS: ALL PASS (static only; MetaEditor compile and MT5 run UNVERIFIED)" || echo "LIFECYCLE STATIC CHECKS: FAILURES"
 exit $FAIL

@@ -4,11 +4,12 @@
 // NOT YET COMPILED OR RUN (UNVERIFIED): Codex compiles it, the owner runs it in MT5.
 #property strict
 #property script_show_inputs
-#property version "1.03"
+#property version "1.04"
 #include "../include/EntryLifecycle.mqh"
 #include "../include/EntryTransportFake.mqh"
 #include "../include/ExitTransportFake.mqh"
 #include "../include/EntryManagementHandoff.mqh"
+#include "../include/ExitSnapshotAdapter.mqh"
 int g_pass=0,g_fail=0;
 void Check(const bool ok,const string message)
   {
@@ -755,12 +756,71 @@ void RegClean(const long login)
    GlobalVariableDel(EL_Key(login,REG_POS));
   }
 
+class CTestRegistrar : public CMhRegistrar
+  {
+public:
+   bool closed;                                   // scripted: the position list is readable, stable and holds no such position
+   CTestRegistrar(void) {closed=false;}
+   virtual bool Absent(const ulong position_id) {return(closed);}
+  };
+
+void BuildRawFacts(SXaRaw &r,const int dir,const bool filled)
+  {
+   XA_RawInit(r);
+   r.api_ok=true;
+   r.symbol_ok=true;
+   r.vol_step=0.01;
+   r.vol_min=0.01;
+   r.vol_max=100.0;
+   r.margin_ok=true;
+   r.margin_mode=XA_MARGIN_HEDGING;
+   r.n_pos=1;
+   r.pos_ticket=9;
+   r.pos_type=(dir==1 ? XA_POS_BUY : XA_POS_SELL);
+   r.pos_symbol="XAUUSD";
+   r.hist_ok=true;
+   r.deals_truncated=false;
+   r.deal[0].ticket=100;
+   r.deal[0].order=400;
+   r.deal[0].position_id=7;
+   r.deal[0].entry=XA_ENTRY_IN;
+   r.deal[0].type=(dir==1 ? XA_DEAL_BUY : XA_DEAL_SELL);
+   r.deal[0].volume=0.1;
+   r.n_deals=1;
+   r.n_orders=1;
+   r.ord[0].ticket=501;
+   r.ord[0].position_id=7;
+   if(!filled)
+     {
+      r.pos_volume=0.1;
+      r.ord[0].where=XA_WHERE_NONE;
+      r.ord[0].state=0;
+      r.ord[0].vol_initial=0.0;
+      r.ord[0].vol_current=0.0;
+      return;
+     }
+   r.pos_volume=0.02;
+   r.deal[1].ticket=1001;
+   r.deal[1].order=501;
+   r.deal[1].position_id=7;
+   r.deal[1].entry=XA_ENTRY_OUT;
+   r.deal[1].type=(dir==1 ? XA_DEAL_SELL : XA_DEAL_BUY);
+   r.deal[1].volume=0.08;
+   r.n_deals=2;
+   r.ord[0].where=XA_WHERE_HISTORY;
+   r.ord[0].state=XA_ORD_FILLED;
+   r.ord[0].vol_initial=0.08;
+   r.ord[0].vol_current=0.0;
+  }
+
 class CRegWorld
   {
 public:
    CWorld w;
-   CFakeTransport x;
-   CMhRegistrar reg;
+   CFakeTransport x;                              // the registrar's READ transport (IsReal = true keeps the authorisation and demo gates)
+   CFakeTransport m;                              // the MANAGEMENT transport (fixtures for the reconcile, scripted sends)
+   CTestRegistrar reg;
+   CMhManager mgr;
    int dir;
    double tp;
    long login;
@@ -787,7 +847,29 @@ public:
       x.position.volume=0.1;
       x.position.price_open=w.plan.e_out;
       x.position.sl=w.plan.s_out;
+      m.real=false;
+      m.account=x.account;
+      m.symbol=x.symbol;
+      m.position=x.position;
+      m.response.returned_true=true;
+      m.response.have_result=true;
+      m.response.retcode=10009;
+      m.response.order=501;
+      m.response.deal=1001;
+      m.response.volume=0.08;
+      m.response.price=w.plan.e_out;
+      BindMgr(mgr,phrase);
       Bind(phrase);
+     }
+   void BindMgr(CMhManager &g,const string phrase)
+     {
+      g.tr=GetPointer(m);
+      g.magic=777;
+      g.phrase=phrase;
+      g.filling=EX_FILL_IOC;
+      g.deviation=20;
+      g.filter_policy=EX_POL_IGNORE;
+      g.filter_state=EX_FS_CLEAR;
      }
    void Bind(const string phrase)
      {
@@ -1097,6 +1179,227 @@ void Scenario_auto_registration_synthetic_fill_is_rejected(void)
      }
   }
 
+// ---- management inside the orchestrator (the registrar hands a confirmed registration to CMhManager = the EXISTING T011 driver under the per-position lock)
+class CProc
+  {
+public:
+   CEnFakeStore s;                // this process's view of the entry disk
+   CTestRegistrar reg;
+   CMhManager mgr;
+   SLcState st;
+   string notes;
+   // a (re)start: the same disks (entry store clone, T011 files, broker facts), no lock held, a new registrar and manager
+   void Boot(CRegWorld &r,CEnFakeStore &disk,const SXaRaw &raw)
+     {
+      CloneDisk(disk,s);
+      reg.entry_store=GetPointer(s);
+      reg.exit_tr=GetPointer(r.x);
+      reg.magic=777;
+      reg.phrase=EX_AUTH_PHRASE;
+      reg.rpol=EX_RPOL_R_GEOM;
+      reg.provenance=MH_PROV_BROKER;
+      reg.selftest=true;
+      reg.manager=GetPointer(mgr);
+      r.BindMgr(mgr,EX_AUTH_PHRASE);
+      mgr.raw_a=raw;
+      mgr.raw_b=raw;
+      LC_Startup(r.w.cfg,GetPointer(r.w.t),GetPointer(s),GetPointer(s),false,st,notes,GetPointer(reg));
+     }
+   string Tick(CRegWorld &r)
+     {
+      string n;
+      LC_Tick(r.w.cfg,GetPointer(r.w.t),GetPointer(s),st,0,0,n,GetPointer(reg));
+      return(n);
+     }
+   void Stop(void) {LC_Release(GetPointer(s),st);}
+  };
+
+void LevelQuote(const int dir,double &bid,double &ask)
+  {
+   bid=(dir==1 ? 2000.0 : 1999.7);
+   ask=(dir==1 ? 2000.3 : 2000.0);
+  }
+
+void Scenario_managed_fill_registration_management_to_done(void)
+  {
+   for(int d=0;d<2;d++)
+     {
+      int dir=(d==0 ? 1 : -1);
+      string tag=StringFormat("dir %d",dir);
+      CRegWorld r;
+      r.Build(dir,(d==0 ? 2005.0 : 1995.0),EX_AUTH_PHRASE);
+      r.reg.manager=GetPointer(r.mgr);
+      SXaRaw full,nyet;
+      BuildRawFacts(full,dir,true);
+      BuildRawFacts(nyet,dir,false);
+      r.mgr.raw_a=nyet;
+      r.mgr.raw_b=nyet;
+      string text=r.Tick();
+      Check(r.ok && Has(text,"REGISTERED_WITH_T011") && r.mgr.n==1 && r.mgr.slots[0].st.armed && r.w.g.st.n==1 && r.w.g.st.halted=="",tag+": registered, armed, still indexed (the restart memory)");
+      Check(r.Tick()=="",tag+": an unchanged active fill is not reported again");
+      double bid,ask;
+      LevelQuote(dir,bid,ask);
+      int below=r.mgr.OnQuote(bid-(dir==1 ? 5.0 : -5.0),ask-(dir==1 ? 5.0 : -5.0));
+      Check(below==0 && r.m.sends==0,tag+": below the level nothing is sent");
+      int sent=r.mgr.OnQuote(bid,ask);
+      int more=r.mgr.OnQuote(bid,ask)+r.mgr.OnQuote(bid,ask)+r.mgr.OnQuote(bid,ask);
+      Check(sent==1 && more==0 && r.m.sends==1,tag+": exactly one closing request, the slot is disarmed after the send");
+      r.Tick();
+      Check(r.w.g.st.n==1,tag+": still managed while the request is reconciled");
+      r.mgr.raw_a=full;
+      r.mgr.raw_b=full;
+      r.m.position.volume=0.02;
+      int runs=r.mgr.OnTimer();
+      string done=r.Tick();
+      Check(runs==1 && r.mgr.slots[0].done && Has(done,"MANAGEMENT_DONE") && r.w.g.st.n==0 && r.w.g.st.halted=="" && r.m.sends==1 && !r.Locked(),tag+": released only after DONE; exactly one send; the lock is released");
+      RegClean(r.login);
+     }
+  }
+
+void Scenario_managed_restart_in_every_critical_window(void)
+  {
+   for(int d=0;d<2;d++)
+     {
+      int dir=(d==0 ? 1 : -1);
+      string tag=StringFormat("dir %d",dir);
+      CRegWorld r;
+      r.Build(dir,(d==0 ? 2005.0 : 1995.0),EX_AUTH_PHRASE);
+      SXaRaw full,nyet;
+      BuildRawFacts(full,dir,true);
+      BuildRawFacts(nyet,dir,false);
+      LC_Release(GetPointer(r.w.s),r.w.g.st);
+      // (a) after the fill, before any registration
+      CProc a;
+      a.Boot(r,r.w.s,nyet);
+      Check(Has(a.notes,"REGISTERED_WITH_T011") && a.st.n==1 && a.mgr.n==1 && a.mgr.slots[0].st.armed && r.m.sends==0,tag+" (a): registered and armed by the startup sweep, zero sends");
+      a.Stop();
+      // (b) after the registration: the record exists, the index entry is still there
+      CProc b;
+      b.Boot(r,a.s,nyet);
+      Check(b.st.n==1 && b.mgr.slots[0].st.armed && r.m.sends==0 && b.st.halted=="",tag+" (b): confirmed by comparison, armed again, nothing rewritten");
+      string saved=r.File();
+      // (c) after the closing request was sent, before the reconcile
+      double bid,ask;
+      LevelQuote(dir,bid,ask);
+      int sent=b.mgr.OnQuote(bid,ask);
+      r.m.position.volume=0.02;
+      b.Stop();
+      CProc c;
+      c.Boot(r,b.s,nyet);
+      Check(sent==1 && c.st.n==1 && !c.mgr.slots[0].st.armed && c.mgr.slots[0].st.reconcile_due && r.m.sends==1 && c.st.halted=="",tag+" (c): recovery first, not armed, no new send");
+      Check(c.mgr.OnQuote(bid,ask)==0 && r.m.sends==1,tag+" (c): no second send after the restart");
+      // (d) DONE on the broker, the index entry still exists
+      c.mgr.raw_a=full;
+      c.mgr.raw_b=full;
+      Check(c.mgr.OnTimer()==1 && c.mgr.slots[0].done,tag+" (d): the timer reconciles to DONE");
+      c.Stop();
+      CProc e;
+      e.Boot(r,c.s,full);
+      Check(e.st.n==0 && r.m.sends==1 && e.st.halted=="" && r.File()!=saved,tag+" (d): released from the persisted DONE after the restart, no new send");
+      e.Stop();
+      RegClean(r.login);
+     }
+  }
+
+void Scenario_managed_closed_position_released_without_management(void)
+  {
+   for(int d=0;d<2;d++)
+     {
+      int dir=(d==0 ? 1 : -1);
+      string tag=StringFormat("dir %d",dir);
+      CRegWorld r;
+      r.Build(dir,(d==0 ? 2005.0 : 1995.0),EX_AUTH_PHRASE);
+      r.reg.manager=GetPointer(r.mgr);
+      r.Tick();
+      r.x.position.found=false;
+      r.reg.closed=false;
+      bool pending=Has(r.Tick(),"FILL_REGISTRATION_PENDING");
+      r.reg.closed=true;                                       // readable and stable list, no such position: it was closed (SL, TP or by hand)
+      string text=r.Tick();
+      Check(pending && Has(text,"POSITION_CLOSED") && r.w.g.st.n==0 && r.w.g.st.halted=="" && r.m.sends==0 && r.mgr.n==0,tag+": unreadable is not closed; a proven-closed position is released without management");
+      RegClean(r.login);
+     }
+  }
+
+void Scenario_managed_manual_foreign_and_synthetic_untouched(void)
+  {
+   for(int d=0;d<2;d++)
+     {
+      int dir=(d==0 ? 1 : -1);
+      string tag=StringFormat("dir %d",dir);
+      CRegWorld r;
+      r.Build(dir,(d==0 ? 2005.0 : 1995.0),EX_AUTH_PHRASE);
+      r.reg.manager=GetPointer(r.mgr);
+      r.x.position.identifier=99;                              // a manual position: another identifier, no magic
+      r.x.position.ticket=99;
+      r.x.position.magic=0;
+      double bid,ask;
+      LevelQuote(dir,bid,ask);
+      bool quiet=(r.mgr.OnQuote(bid,ask)==0 && r.m.sends==0 && r.mgr.n==0);
+      string t1=r.Tick();
+      Check(quiet && Has(t1,"POSITION_NOT_FOUND") && r.mgr.n==0 && r.File()=="" && r.m.sends==0,tag+": a manual position gets no slot, no T011 file, no request");
+      r.x.position.identifier=7;                               // the same identifier but not the robot's magic
+      string t2=r.Tick();
+      Check(Has(t2,"OWNERSHIP_NOT_PROVEN") && r.mgr.n==0 && r.File()=="" && r.m.sends==0,tag+": the same identifier with a foreign magic is refused");
+      RegClean(r.login);
+      CRegWorld s;                                             // the FAKE entry transport: a REAL position with the same identifier / magic / symbol / direction / volume / SL exists
+      s.Build(dir,(d==0 ? 2005.0 : 1995.0),EX_AUTH_PHRASE);
+      s.reg.manager=GetPointer(s.mgr);
+      s.reg.provenance=MH_PROV_SYNTHETIC;
+      string t3=s.Tick();
+      Check(Has(t3,"PROVENANCE_NOT_BROKER") && s.mgr.n==0 && s.File()=="" && s.mgr.OnQuote(bid,ask)==0 && s.m.sends==0 && s.x.sends==0,tag+": a synthetic fill is not managed and touches no real position");
+      RegClean(s.login);
+     }
+  }
+
+void Scenario_managed_failures_block_and_lock_at_the_level(void)
+  {
+   for(int d=0;d<2;d++)
+     {
+      int dir=(d==0 ? 1 : -1);
+      string tag=StringFormat("dir %d",dir);
+      double beyond=(d==0 ? 2005.0 : 1995.0);
+      double bid,ask;
+      LevelQuote(dir,bid,ask);
+      CRegWorld r;                                             // registered, then the position volume is changed by hand before the management is armed again (restart)
+      r.Build(dir,beyond,EX_AUTH_PHRASE);
+      r.reg.manager=GetPointer(r.mgr);
+      SXaRaw nyet;
+      BuildRawFacts(nyet,dir,false);
+      r.Tick();
+      r.x.position.volume=0.03;
+      r.m.position.volume=0.03;
+      LC_Release(GetPointer(r.w.s),r.w.g.st);
+      CProc p;
+      p.Boot(r,r.w.s,nyet);
+      Check(Has(p.st.halted,"MANAGEMENT_REGISTRATION_REFUSED") && Has(p.st.halted+p.notes,"VOLUME_MISMATCH") && !p.mgr.slots[0].st.armed && r.m.sends==0,tag+": a volume the robot did not set blocks the management");
+      p.Stop();
+      RegClean(r.login);
+      CRegWorld l;                                             // a T011 per-position lock that never becomes available
+      l.Build(dir,beyond,EX_AUTH_PHRASE);
+      l.reg.manager=GetPointer(l.mgr);
+      string key=EL_Key(l.login,REG_POS);
+      GlobalVariableTemp(key);
+      GlobalVariableSet(key,1.0);
+      string last="";
+      for(int i=0;i<MH_MAX_TRIES;i++) last=l.Tick();
+      GlobalVariableSet(key,0.0);
+      Check(Has(last,"RETRIES_EXHAUSTED") && Has(l.w.g.st.halted,"MANAGEMENT_REGISTRATION_REFUSED") && l.m.sends==0,tag+": a lock that never frees halts after the bounded retries");
+      RegClean(l.login);
+      CRegWorld q;                                             // a lock held elsewhere at the level: zero sends, the slot stays armed
+      q.Build(dir,beyond,EX_AUTH_PHRASE);
+      q.reg.manager=GetPointer(q.mgr);
+      q.Tick();
+      GlobalVariableSet(key,1.0);
+      int blocked=q.mgr.OnQuote(bid,ask);
+      bool armed=q.mgr.slots[0].st.armed;
+      GlobalVariableSet(key,0.0);
+      int sent=q.mgr.OnQuote(bid,ask);
+      Check(blocked==0 && armed && sent==1 && q.m.sends==1,tag+": a lock held elsewhere at the level sends nothing; the request goes out once it is free");
+      RegClean(q.login);
+     }
+  }
+
 void OnStart()
   {
    Print("T019 ENTRY LIFECYCLE TEST: fake transport and fake store only; no terminal read, no order, no file.");
@@ -1126,6 +1429,11 @@ void OnStart()
    Scenario_auto_registration_existing_record_needs_the_full_base();
    Scenario_auto_registration_idempotent_after_management_started();
    Scenario_auto_registration_synthetic_fill_is_rejected();
+   Scenario_managed_fill_registration_management_to_done();
+   Scenario_managed_restart_in_every_critical_window();
+   Scenario_managed_closed_position_released_without_management();
+   Scenario_managed_manual_foreign_and_synthetic_untouched();
+   Scenario_managed_failures_block_and_lock_at_the_level();
    PrintFormat("T019 ENTRY LIFECYCLE TEST finished: %d passed, %d failed",g_pass,g_fail);
   }
 

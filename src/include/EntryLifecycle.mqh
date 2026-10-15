@@ -19,6 +19,7 @@
 #define LC_SINK_CONFIRMED 0
 #define LC_SINK_PENDING 1
 #define LC_SINK_REFUSED 2
+#define LC_SINK_ACTIVE 3        // registered and under management: the id stays in the index (the restart memory of the managed set)
 
 // the fill sink (implemented by the T011 registrar): CONFIRMED = the fill is registered / already registered with a matching record (the index entry is forgotten), PENDING = try again on the next
 // sweep (bounded by the sink), REFUSED = the position stays unmanaged (the layer halts until the owner acknowledges). Never called without the index lock.
@@ -312,6 +313,10 @@ void LC_Sweep(const SEnConfig &cfg,CEnTransport *tr,CEnStore *store,SLcState &s,
            {
             LC_Note(notes,id+": "+detail);
             LC_Remove(s,i);
+           }
+         else if(r2==LC_SINK_ACTIVE)
+           {
+            if(detail!="ACTIVE") LC_Note(notes,id+": "+detail);       // only a change is reported
            }
          else if(r2==LC_SINK_PENDING) LC_Note(notes,"FILL_REGISTRATION_PENDING "+id+": "+detail);
          else

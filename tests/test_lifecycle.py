@@ -23,7 +23,8 @@ SCENARIOS = ['index_codec_and_damage', 'register_and_save_failure', 'startup_cle
              'release_only_by_owner_on_failure_paths', 'damage_during_run_never_overwritten', 'fill_report_and_registration_inputs',
              'auto_registration_confirms_once', 'auto_registration_idempotent_after_crash', 'auto_registration_refusals_keep_the_t011_contracts', 'auto_registration_transient_and_locks',
              'auto_registration_acknowledge_and_instances', 'auto_registration_existing_record_needs_the_full_base', 'auto_registration_idempotent_after_management_started',
-        'auto_registration_synthetic_fill_is_rejected']
+        'auto_registration_synthetic_fill_is_rejected', 'managed_fill_registration_management_to_done', 'managed_restart_in_every_critical_window',
+        'managed_closed_position_released_without_management', 'managed_manual_foreign_and_synthetic_untouched', 'managed_failures_block_and_lock_at_the_level']
 EV_ALL_ENABLED = tp.EV_SESSION_END | tp.EV_NEWS_BLOCK | tp.EV_DAILY_LIMIT
 
 
@@ -948,6 +949,189 @@ class AutoRegistration(unittest.TestCase):
             self.assertIn('REGISTERED_WITH_T011', ' '.join(rw.tick()), 'the same world with BROKER provenance registers')
 
 
+import t011_adapter_reference as ad  # noqa: E402
+import t011_flow_reference as fl  # noqa: E402
+
+
+def raw_full(direction):
+    """the broker facts after the 80% closing order 501 (0.4 of 0.5) was filled: 0.1 remains"""
+    din, dout = (ad.DEAL_BUY, ad.DEAL_SELL) if direction == 1 else (ad.DEAL_SELL, ad.DEAL_BUY)
+    filled = ad.RawOrder(501, ad.WHERE_HISTORY, ad.ORD_FILLED, 0.4, 0.0, 7)
+    return ad.Raw(deals=[ad.RawDeal(100, 400, 7, ad.ENTRY_IN, din, 0.5), ad.RawDeal(1001, 501, 7, ad.ENTRY_OUT, dout, 0.4)], orders=[filled], pos_volume=0.1, pos_type=ad.POS_BUY if direction == 1 else ad.POS_SELL)
+
+
+def raw_not_yet(direction):
+    din = ad.DEAL_BUY if direction == 1 else ad.DEAL_SELL
+    return ad.Raw(deals=[ad.RawDeal(100, 400, 7, ad.ENTRY_IN, din, 0.5)], orders=[ad.RawOrder(501, ad.WHERE_NONE, 0, 0.0, 0.0, 0)], pos_volume=0.5, pos_type=ad.POS_BUY if direction == 1 else ad.POS_SELL)
+
+
+class MgmtWorld(RegWorld):
+    """RegWorld + the management inside the orchestrator: the registrar hands a confirmed registration to the Manager (the T011 driver under the per-position lock)"""
+
+    def __init__(self, tc, direction, **kw):
+        super().__init__(tc, direction, **kw)
+        self.xtr.response = ex.SendResult(True, True, 10009, 501, 1001, 0.4, 2000.0)
+        self.raw_now = raw_not_yet(direction)
+        self.closed = False
+        self.attach()
+
+    def cfg_for(self, rec):
+        return ex.Config(enabled=True, real_authorised=True, authorisation=ex.AUTH_PHRASE, ea_magic=777, filling=ex.FILL_IOC, deviation=20, filter_policy=ex.POL_IGNORE, filter_state=ex.FS_CLEAR,
+                         tp_set=True, tp_price=rec.tp, r_policy=ex.RPOL_R_GEOM, sl_initial_set=True, sl_initial=rec.s)
+
+    def attach(self):
+        self.mgr = lc.Manager(self.xtr, self.xstore, self.locks, self.cfg_for, raw=lambda: (self.raw_now, self.raw_now))
+        self.reg.inner.manager = self.mgr
+        self.reg.inner.absent = lambda pid: self.closed
+
+    def restart(self):
+        """a new process: the same disks (entry store, T011 files, broker), a new lifecycle state, a new registrar and manager, no lock held"""
+        lc.release(self.w.store, self.st)
+        self.w.tr, store = new_process(self.w, keep_book=True)
+        self.w.store = store
+        self.locks = Locks()
+        self.reg = self.make_registrar()
+        self.attach()
+        self.st, self.notes = lc.startup(self.w.cfg, self.w.tr, store, store, False, sink=self.reg)
+        return self.notes
+
+    def level_quote(self):
+        return (2010.0, 2010.3) if self.dirn == 1 else (1989.7, 1990.0)
+
+
+class ManagedFlow(unittest.TestCase):
+    """fill -> registration -> management, all in the orchestrator, on the EXISTING T011 driver; the entry transport stays FAKE and no real position is touched without BROKER provenance"""
+
+    def test_fill_registration_management_to_done(self):
+        for d in (1, -1):
+            rw = MgmtWorld(self, d)
+            text = ' '.join(rw.tick())
+            tag = 'dir %d' % d
+            self.assertIn('REGISTERED_WITH_T011', text, tag)
+            self.assertEqual((rw.st.ids, rw.st.halted, rw.mgr.slots[7].st.armed), ([SIG], '', True), tag + ': registered, armed, still indexed (the restart memory)')
+            self.assertEqual(rw.tick(), [], tag + ': an unchanged active fill is not reported again')
+            bid, ask = rw.level_quote()
+            self.assertEqual([r.final for _, r in rw.mgr.on_quote(bid - 5.0 if d == 1 else bid, ask if d == 1 else ask + 5.0)], [ex.NO_REQUEST], tag + ': below the level nothing is sent')
+            self.assertEqual(rw.xtr.sends, [], tag)
+            res = rw.mgr.on_quote(bid, ask)
+            self.assertEqual([r.final for _, r in res], [ex.SENT_MAPPED], tag)
+            self.assertEqual(len(rw.xtr.sends), 1, tag)
+            for _ in range(3):
+                self.assertEqual(rw.mgr.on_quote(bid, ask), [], tag + ': the slot is disarmed after the send')
+            self.assertEqual(len(rw.xtr.sends), 1, tag + ': no duplicate closing request')
+            rw.tick()
+            self.assertEqual(rw.st.ids, [SIG], tag + ': still managed while the request is reconciled')
+            rw.raw_now = raw_full(d)
+            rw.xtr.position.volume = 0.1
+            flows = rw.mgr.on_timer()
+            self.assertEqual([f.final for _, f in flows], [fl.DONE], tag)
+            self.assertTrue(any('MANAGEMENT_DONE' in n for n in rw.tick()), tag)
+            self.assertEqual((rw.st.ids, rw.st.halted, len(rw.xtr.sends), rw.locks.held), ([], '', 1, set()), tag + ': released only after DONE; exactly one send')
+            self.assertEqual(index_ids(rw.w.store, rw.login), [], tag)
+
+    def test_restart_in_every_critical_window(self):
+        for d in (1, -1):
+            tag = 'dir %d' % d
+            # (a) after the fill, before any registration
+            rw = MgmtWorld(self, d)
+            notes = rw.restart()
+            self.assertTrue(any('REGISTERED_WITH_T011' in n for n in notes), tag + ' (a)')
+            self.assertEqual((rw.st.ids, rw.mgr.slots[7].st.armed, rw.xtr.sends), ([SIG], True, []), tag + ' (a): registered and armed by the startup sweep, zero sends')
+            # (b) after the registration, before anything else: the record exists, the index entry is still there
+            notes = rw.restart()
+            self.assertEqual((rw.st.ids, rw.mgr.slots[7].st.armed, rw.xtr.sends, rw.st.halted), ([SIG], True, [], ''), tag + ' (b): confirmed by comparison, armed again, nothing rewritten')
+            saved = rw.xstore.read(rw.name)
+            # (c) after the closing request was sent, before the reconcile
+            bid, ask = rw.level_quote()
+            self.assertEqual([r.final for _, r in rw.mgr.on_quote(bid, ask)], [ex.SENT_MAPPED], tag)
+            rw.xtr.position.volume = 0.1
+            rw.restart()
+            self.assertEqual((rw.st.ids, rw.mgr.slots[7].st.armed, rw.mgr.slots[7].st.reconcile_due, len(rw.xtr.sends), rw.st.halted), ([SIG], False, True, 1, ''), tag + ' (c): recovery first, not armed')
+            self.assertEqual(rw.mgr.on_quote(bid, ask), [], tag + ' (c): no second send after the restart')
+            self.assertEqual(len(rw.xtr.sends), 1)
+            # (d) the request is DONE on the broker, the index entry still exists
+            rw.raw_now = raw_full(d)
+            self.assertEqual([f.final for _, f in rw.mgr.on_timer()], [fl.DONE], tag)
+            rw.restart()                                          # the process dies after DONE, before the index entry was released
+            self.assertEqual((rw.st.ids, len(rw.xtr.sends), rw.st.halted), ([], 1, ''), tag + ' (d): released from the persisted DONE, no new send')
+            self.assertNotEqual(rw.xstore.read(rw.name), saved)
+
+    def test_a_closed_position_before_the_level_is_released_without_management(self):
+        for d in (1, -1):
+            rw = MgmtWorld(self, d)
+            rw.tick()
+            rw.xtr.position.found = False
+            rw.closed = False
+            self.assertTrue(any('FILL_REGISTRATION_PENDING' in n for n in rw.tick()), 'unreadable is not closed')
+            rw.closed = True                                      # the list is readable and stable and holds no such position: it was closed (SL, TP or by hand)
+            rw.st.ids = [SIG]
+            self.assertTrue(any('POSITION_CLOSED' in n for n in rw.tick()))
+            self.assertEqual((rw.st.ids, rw.st.halted, rw.xtr.sends), ([], '', []))
+
+    def test_manual_and_foreign_positions_are_never_managed(self):
+        for d in (1, -1):
+            rw = MgmtWorld(self, d)
+            rw.xtr.position = ex.PositionW(found=True, ticket=99, identifier=99, symbol='XAUUSD', magic=0, type=0 if d == 1 else 1, volume=0.5, price_open=2000.0, sl=rw.sl)   # a manual position
+            self.assertEqual(rw.mgr.on_quote(*rw.level_quote()), [])
+            self.assertEqual((rw.mgr.slots, rw.xtr.sends, rw.t11_files()), ({}, [], []), 'no T011 record, no slot, nothing is sent')
+            text = ' '.join(rw.tick())
+            self.assertIn('POSITION_NOT_FOUND', text)
+            self.assertEqual((rw.mgr.slots, rw.xtr.sends, rw.t11_files()), ({}, [], []))
+            rw.xtr.position = ex.PositionW(found=True, ticket=9, identifier=7, symbol='XAUUSD', magic=0, type=0 if d == 1 else 1, volume=0.5, price_open=2000.0, sl=rw.sl)   # the same id but not the robot's
+            self.assertIn('OWNERSHIP_NOT_PROVEN', ' '.join(rw.tick()))
+            self.assertEqual((rw.mgr.slots, rw.xtr.sends, rw.t11_files()), ({}, [], []))
+
+    def test_a_synthetic_fill_is_not_managed_and_touches_no_real_position(self):
+        for d in (1, -1):
+            rw = MgmtWorld(self, d)
+            reads = []
+            orig = rw.xtr.find_position
+            rw.xtr.find_position = lambda i, orig=orig: (reads.append(i), orig(i))[1]
+            reg = CountingRegistrar(rw.w.store, rw.xtr, rw.xstore, rw.locks, magic=777, phrase=rw.phrase, rpol=ex.RPOL_R_GEOM, provenance=lc.PROV_SYNTHETIC)
+            reg.inner.manager = rw.mgr
+            self.assertIn('PROVENANCE_NOT_BROKER', ' '.join(rw.tick(reg=reg)))
+            self.assertEqual((reads, rw.mgr.slots, rw.xtr.sends, rw.t11_files()), ([], {}, [], []))
+            self.assertEqual(rw.mgr.on_quote(*rw.level_quote()), [])
+            self.assertEqual(rw.xtr.sends, [])
+
+    def test_failures_block_instead_of_continuing(self):
+        for d in (1, -1):
+            tag = 'dir %d' % d
+            rw = MgmtWorld(self, d)                                # registered, then the position volume is changed by hand before the management is armed again (restart)
+            rw.tick()
+            rw.xtr.position.volume = 0.3
+            rw.restart()
+            self.assertIn('VOLUME_MISMATCH', rw.st.halted + ' ' + ' '.join(rw.notes), tag)
+            self.assertIn('MANAGEMENT_REGISTRATION_REFUSED', rw.st.halted, tag)
+            self.assertEqual((rw.mgr.slots[7].st.armed, rw.xtr.sends), (False, []), tag)
+            rw2 = MgmtWorld(self, d)                               # a lock that never becomes available
+            rw2.locks.held.add(dr.lock_key(EXIT_IDENT))
+            texts = [' '.join(rw2.tick()) for _ in range(lc.Registrar.MAX_TRIES)]
+            self.assertIn('RETRIES_EXHAUSTED', texts[-1], tag)
+            self.assertIn('MANAGEMENT_REGISTRATION_REFUSED', rw2.st.halted, tag)
+            self.assertEqual(rw2.xtr.sends, [], tag)
+            rw3 = MgmtWorld(self, d)                               # a request whose reconcile is blocked halts the layer
+            rw3.tick()
+            rw3.mgr.on_quote(*rw3.level_quote())
+            rw3.raw_now = ad.Raw(deals=[], orders=[], pos_volume=0.5, n_pos=1, pos_type=ad.POS_BUY if d == 1 else ad.POS_SELL)
+            for _ in range(2):
+                rw3.mgr.on_timer()
+            blocked = rw3.mgr.slots[7].blocked or rw3.mgr.slots[7].st.reconcile_due
+            self.assertTrue(blocked, tag)
+            self.assertEqual(len(rw3.xtr.sends), 1, tag)
+
+    def test_a_lock_held_elsewhere_at_the_level_sends_nothing_and_keeps_the_slot_armed(self):
+        for d in (1, -1):
+            rw = MgmtWorld(self, d)
+            rw.tick()
+            rw.locks.held.add(dr.lock_key(EXIT_IDENT))
+            self.assertEqual([r.final for _, r in rw.mgr.on_quote(*rw.level_quote())], [ex.BLOCKED])
+            self.assertEqual((rw.xtr.sends, rw.mgr.slots[7].st.armed), ([], True))
+            rw.locks.held.discard(dr.lock_key(EXIT_IDENT))
+            self.assertEqual([r.final for _, r in rw.mgr.on_quote(*rw.level_quote())], [ex.SENT_MAPPED])
+            self.assertEqual(len(rw.xtr.sends), 1)
+
+
 class Sources(unittest.TestCase):
     def test_mql_scenarios_pinned(self):
         with open(os.path.join(ROOT, 'src', 'tests', 'EntryLifecycleTest.mq5'), encoding='ascii') as f:
@@ -963,7 +1147,7 @@ class Mutants(unittest.TestCase):
 
     def _suite_failures(self):
         suite = unittest.TestSuite()
-        for cls in (Index, Startup, Tick, IndexBeforeSend, Crash, Instances, DamageDuringRun, FillHandoff, AutoRegistration):
+        for cls in (Index, Startup, Tick, IndexBeforeSend, Crash, Instances, DamageDuringRun, FillHandoff, AutoRegistration, ManagedFlow):
             for n in unittest.TestLoader().getTestCaseNames(cls):
                 suite.addTest(cls(n))
         res = unittest.TestResult()
@@ -1015,7 +1199,7 @@ class Mutants(unittest.TestCase):
                 ("    if not lockstore.lock(key):", "    if False:"),
                 ("    if not st.lock_owned:\n        st.halted = st.halted or 'LIFECYCLE_LOCK_NOT_OWNED'\n        return False", "    if False:\n        return False"),
                 # automatic registration
-                ("        if self.exit_store.exists(name) or self.exit_store.exists(name + '.tmp'):\n            return self._compare(name, ident, rec, acct)", "        if False:\n            return self._compare(name, ident, rec, acct)"),
+                ("        if self.exit_store.exists(name) or self.exit_store.exists(name + '.tmp'):\n            status, detail = self._compare(name, ident, rec, acct)", "        if False:\n            status, detail = self._compare(name, ident, rec, acct)"),
                 ("o.plan_e_src == pos.price_open\n                and o.plan_s_src == rec.s and o.plan_e_out == geo.e_out and o.plan_s_out == geo.s_out and o.state.level == geo.level_2r", "o.plan_s_src == rec.s and o.plan_s_out == geo.s_out"),
                 ("        if not (self.phrase == ex.AUTH_PHRASE):\n            return SINK_REFUSED, 'REAL_NOT_AUTHORISED'", "        if False:\n            return SINK_REFUSED, 'REAL_NOT_AUTHORISED'"),
                 ("        if not acct.demo:\n            return SINK_REFUSED, 'REAL_REQUIRES_DEMO_ACCOUNT'", "        if False:\n            return SINK_REFUSED, 'REAL_REQUIRES_DEMO_ACCOUNT'"),
@@ -1028,6 +1212,12 @@ class Mutants(unittest.TestCase):
                 ("            if sid in st.unmanaged:\n                continue", "            if False:\n                continue"),
                 ("            if sid in st.unmanaged or verdict(en.reconcile(cfg, tr, store, sid)) == HALT:", "            if verdict(en.reconcile(cfg, tr, store, sid)) == HALT:"),
                 ("        if rec.state != en.ST_FILLED or rec.linked != 1 or rec.position_id <= 0:\n            return SINK_REFUSED, 'FILL_NOT_PROVEN'", "        if False:\n            return SINK_REFUSED, 'FILL_NOT_PROVEN'"),
+                # management inside the orchestrator
+                ("            if flow.final == fl.DONE:\n                slot.done = True\n                return SINK_CONFIRMED, 'MANAGEMENT_DONE: recovered as DONE'", "            if False:\n                return SINK_CONFIRMED, 'MANAGEMENT_DONE: recovered as DONE'"),
+                ("        if status != SINK_CONFIRMED or self.manager is None:\n            return status, detail\n", "        if self.manager is None:\n            return status, detail\n"),
+                ("            if self.absent(ident.position_id):", "            if True:"),
+                ("        if detail.startswith('POSITION_CLOSED'):\n            self.manager.forget(rec.position_id)\n            return status, detail\n", ""),
+                ("            elif status == SINK_ACTIVE:\n                if detail != 'ACTIVE':", "            elif False:\n                if detail != 'ACTIVE':"),
                 # fill -> T011: reported first, forgotten on the next tick; the report states why T011 would refuse
                 ("        elif v == FILLED and sid not in st.noted:", "        elif False:"),
                 ("    elif abs(rec.tp - geo.level_2r) < sym.tick_size / 2.0:", "    elif False:"),

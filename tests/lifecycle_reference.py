@@ -13,6 +13,8 @@ import t011_executor_reference as ex
 import t005_geometry_reference as tg
 import t007_planning_reference as tp
 import t011_persist_reference as p
+import t011_activation_reference as act
+import t011_flow_reference as fl
 
 HEADER, VERSION = 'VELO_EO_LIFECYCLE', 1
 LC_MAX = 32
@@ -216,7 +218,7 @@ def proposal(cfg, tr, store, login, sid):
     return out + ' | LIVE_CHECK_REQUIRED: actual open price, ownership, initial SL and volume are not proven by this report' + (' | PLANNED_GEOMETRY: ' + '; '.join(why) if why else '')
 
 
-SINK_CONFIRMED, SINK_PENDING, SINK_REFUSED = 'CONFIRMED', 'PENDING', 'REFUSED'
+SINK_CONFIRMED, SINK_PENDING, SINK_REFUSED, SINK_ACTIVE = 'CONFIRMED', 'PENDING', 'REFUSED', 'ACTIVE'     # ACTIVE: registered and under management; the id stays in the index (this is the restart memory of the managed set)
 
 
 def exit_file_name(login, position_id):
@@ -238,6 +240,11 @@ class Registrar:
         self.entry_store, self.exit_tr, self.exit_store, self.locks = entry_store, exit_tr, exit_store, locks
         self.magic, self.phrase, self.rpol, self.provenance = magic, phrase, rpol, provenance
         self.tries = {}
+        self.manager = None                  # optional Manager: after a registration is confirmed the position is handed to the T011 driver
+
+    def absent(self, position_id):
+        """True only when the position list was readable, stable (two reads) and holds no such position: the position is CLOSED, not merely unreadable. The default reads nothing (tests override it)."""
+        return False
 
     def inputs(self, rec):
         return ('InpRPolicy=R_GEOM InpEaMagic=%d InpPositionId=%d InpSymbol=%s InpDirection=%s InpInitialSl=%.8f InpTpPrice=%.8f InpVolumeInitial=%.8f '
@@ -246,6 +253,8 @@ class Registrar:
 
     def on_filled(self, login, sid):
         status, detail = self._attempt(login, sid)
+        if status != SINK_PENDING:
+            self.tries.pop(sid, None)
         if status == SINK_PENDING:
             n = self.tries.get(sid, 0) + 1
             self.tries[sid] = n
@@ -270,16 +279,29 @@ class Registrar:
         ident = p.Identity(acct.server, acct.login, rec.symbol, rec.position_id)
         name = exit_file_name(acct.login, rec.position_id)
         if self.exit_store.exists(name) or self.exit_store.exists(name + '.tmp'):
-            return self._compare(name, ident, rec, acct)
+            status, detail = self._compare(name, ident, rec, acct)
+            return self._managed(status, detail, rec, ident, name)
         cfg = ex.Config(enabled=True, real_authorised=(self.phrase == ex.AUTH_PHRASE), authorisation=self.phrase, ea_magic=self.magic, tp_set=True, tp_price=rec.tp, r_policy=self.rpol,
                         sl_initial_set=True, sl_initial=rec.s)
         q = ex.Quote(rec.direction, 0.0, 0.0, 0.0, rec.volume)
         res = dr.register(cfg, self.exit_tr, ex.Runtime(), self.exit_store, name, ident, q, self.locks)
         if res.final == ex.REGISTERED:
-            return SINK_CONFIRMED, 'REGISTERED_WITH_T011 ' + self.inputs(rec)
+            return self._managed(SINK_CONFIRMED, 'REGISTERED_WITH_T011 ' + self.inputs(rec), rec, ident, name)
         if res.final == ex.RECOVERY_REQUIRED:
             return SINK_PENDING, 'REGISTRATION_UNCERTAIN: ' + res.reason
         return (SINK_PENDING if res.reason.startswith(self.TRANSIENT) else SINK_REFUSED), res.reason
+
+    def _managed(self, status, detail, rec, ident, name):
+        """a confirmed registration is handed to the management (when wired): the id leaves the index only when the management is finished"""
+        if status != SINK_CONFIRMED or self.manager is None:
+            return status, detail
+        if detail.startswith('POSITION_CLOSED'):
+            self.manager.forget(rec.position_id)
+            return status, detail
+        mstatus, mdetail = self.manager.manage(rec, ident, name)
+        if mstatus == SINK_CONFIRMED:
+            return mstatus, detail + ' | ' + mdetail
+        return mstatus, (mdetail if mdetail == 'ACTIVE' or mstatus != SINK_ACTIVE else detail + ' | MANAGEMENT ' + mdetail)
 
     def _compare(self, name, ident, rec, acct):
         """an EXISTING T011 record is accepted only when the whole base of the plan matches what registration would store NOW and the registration gates still hold; nothing is written.
@@ -300,6 +322,10 @@ class Registrar:
             return SINK_PENDING, 'SYMBOL_UNREADABLE'
         pos = self.exit_tr.find_position(ident.position_id)
         if not pos.found or pos.ticket <= 0 or pos.identifier != ident.position_id:
+            if self.absent(ident.position_id):
+                o = self.exit_store.load(name, ident)
+                if o.verdict in (p.USABLE_IDLE, p.USABLE_REQUEST, p.USABLE_BLOCKED) and o.plan_set and o.state.status in (act.IDLE, act.DONE):
+                    return SINK_CONFIRMED, 'POSITION_CLOSED: the position is proven absent (stable list); a record that is IDLE or DONE has nothing left to manage; the file is untouched'
             return SINK_PENDING, 'POSITION_NOT_FOUND: the open price of the position cannot be proven, so the stored base cannot be compared'
         if pos.symbol != ident.symbol or pos.magic != self.magic or pos.type != (0 if rec.direction == 1 else 1):
             return SINK_REFUSED, 'OWNERSHIP_NOT_PROVEN: symbol, magic or direction of the live position differ from the record / configuration'
@@ -317,6 +343,92 @@ class Registrar:
         if not same:
             return SINK_REFUSED, 'T011_RECORD_CONFLICT: the existing T011 record differs from the plan (open price, initial SL, TP, direction, volume, 2R level or symbol volume rules) and is never overwritten'
         return SINK_CONFIRMED, 'ALREADY_REGISTERED (the whole base of the T011 record matches; nothing is rewritten) ' + self.inputs(rec)
+
+
+class Slot:
+    def __init__(self, ident, name, rec):
+        self.ident, self.name, self.rec = ident, name, rec
+        self.st = dr.State()
+        self.rt = ex.Runtime()
+        self.done = False
+        self.blocked = ''
+        self.inited = False
+
+
+class Manager:
+    """T011 MANAGEMENT inside the orchestrator: no state machine of its own - every step is the EXISTING driver (dr.init = recovery first and the arming proof, dr.tick = the one request source at
+    the 2R level, dr.timer = reconcile only) under the T011 per-position lock. The persistent memory of the managed set is the lifecycle INDEX: a registered fill stays indexed (SINK_ACTIVE) until the
+    T011 record is DONE or the position is proven closed, so after a restart the sweep hands every indexed fill back to manage(), which runs the driver's recovery before anything can arm.
+    A blocked / unrecoverable record, a position that cannot be proven and an exhausted lock halt the layer through the registrar's REFUSED path. It never touches a position that has no T011 record."""
+
+    def __init__(self, tr, store, locks, cfg_for, raw=None):
+        self.tr, self.store, self.locks, self.cfg_for = tr, store, locks, cfg_for
+        self.raw = raw or (lambda: (None, None))      # fixtures for the FAKE transport; a live transport ignores them
+        self.slots = {}
+
+    def _classify(self, slot, armed, flow):
+        if slot.done:
+            return SINK_CONFIRMED, 'MANAGEMENT_DONE: the T011 record is DONE'
+        if armed:
+            return SINK_ACTIVE, 'ARMED'
+        if flow is not None:
+            if flow.final == fl.DONE:
+                slot.done = True
+                return SINK_CONFIRMED, 'MANAGEMENT_DONE: recovered as DONE'
+            if flow.final == fl.STILL_OPEN:
+                return SINK_ACTIVE, 'RECONCILING'
+            slot.blocked = 'MANAGEMENT_BLOCKED: the T011 record is %s (%s)' % (flow.final, flow.reason)
+            return SINK_REFUSED, slot.blocked
+        reason = slot.st.reason
+        if reason.startswith('INIT_LOCK_FAILED'):
+            return SINK_PENDING, 'MANAGEMENT_LOCK: ' + reason
+        if reason.startswith('INIT_POSITION_NOT_PROVEN: POSITION_NOT_FOUND'):
+            return SINK_PENDING, 'MANAGEMENT_POSITION_NOT_FOUND: ' + reason
+        slot.blocked = 'MANAGEMENT_NOT_ARMED: ' + reason
+        return SINK_REFUSED, slot.blocked
+
+    def manage(self, rec, ident, name):
+        slot = self.slots.get(rec.position_id)
+        if slot is None:
+            slot = self.slots[rec.position_id] = Slot(ident, name, rec)
+        if slot.blocked:
+            return SINK_REFUSED, slot.blocked
+        if slot.done:
+            return SINK_CONFIRMED, 'MANAGEMENT_DONE: the T011 record is DONE'
+        if slot.inited and (slot.st.armed or slot.st.reconcile_due):
+            return SINK_ACTIVE, 'ACTIVE'
+        raw_a, raw_b = self.raw()                       # not armed and nothing to reconcile (first sweep, a disarmed driver, a lock failure): the driver's init is the restart
+        armed, flow = dr.init(self.cfg_for(rec), self.tr, self.store, name, ident, raw_a, raw_b or raw_a, slot.st, self.locks)
+        slot.inited = True
+        return self._classify(slot, armed, flow)
+
+    def forget(self, position_id):
+        self.slots.pop(position_id, None)
+
+    def on_quote(self, bid, ask):
+        """one quote for every armed slot; returns the list of (position_id, result)"""
+        out = []
+        for pid, slot in self.slots.items():
+            if not slot.st.armed:
+                continue
+            q = ex.Quote(slot.rec.direction, 0.0, bid, ask, slot.rec.volume)
+            out.append((pid, dr.tick(self.cfg_for(slot.rec), self.tr, slot.rt, self.store, slot.name, slot.ident, q, slot.st, self.locks)))
+        return out
+
+    def on_timer(self):
+        out = []
+        for pid, slot in self.slots.items():
+            if not slot.st.reconcile_due:
+                continue
+            raw_a, raw_b = self.raw()
+            flow = dr.timer(self.store, slot.name, slot.ident, raw_a, raw_b or raw_a, slot.st, self.locks)
+            if flow is not None:
+                if flow.final == fl.DONE:
+                    slot.done = True
+                elif flow.final != fl.STILL_OPEN:
+                    slot.blocked = 'MANAGEMENT_BLOCKED: the T011 record is %s (%s)' % (flow.final, flow.reason)
+                out.append((pid, flow))
+        return out
 
 
 def _sweep(cfg, tr, store, st, notes, sink=None):
@@ -338,6 +450,9 @@ def _sweep(cfg, tr, store, st, notes, sink=None):
             if status == SINK_CONFIRMED:
                 notes.append('%s: %s' % (sid, detail))
                 st.ids.remove(sid)
+            elif status == SINK_ACTIVE:
+                if detail != 'ACTIVE':                        # registered and under management: the id stays in the index; only a change is reported
+                    notes.append('%s: %s' % (sid, detail))
             elif status == SINK_PENDING:
                 notes.append('FILL_REGISTRATION_PENDING %s: %s' % (sid, detail))
             else:

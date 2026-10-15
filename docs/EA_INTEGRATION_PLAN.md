@@ -77,7 +77,7 @@ Pyetje për pronarin vetëm për këtë hap: të autorizohet ndërtimi i ekzekut
 | 19 | Marrëveshja K1–K3 (regjistrimi automatik T011) | Kërkesë e klientit për EA plotësisht automatike (S:130); lidhje teknike, jo vendim strategjik | E ZBATUAR (parazgjedhje: çaktivizuar; kompilim/MT5 UNVERIFIED) |
 | 20 | K7 çmimi real i hapjes | T011 e nxjerr R_GEOM nga çmimi real i hapjes (kontrata ekzistuese); raporti i mbushjes pret verifikim LIVE (Codex e172af8) | E MBYLLUR (kontrata ekzistuese) |
 | 21 | K8 regjistrimi mungon/refuzohet | Rregulli i projektit: i panjohur/i paprovuar = bllokim (AGENTS.md; `ETD_PositionProof`) | E MBYLLUR (default) |
-| 22 | Transporti real / tregti demo | Vendim i veçantë i pronarit (AGENTS.md; STATE); demo-only build (S:174) | JASHTË këtij blloku |
+| 22 | Transporti real / tregti demo | Vendim i veçantë i pronarit (AGENTS.md; STATE); demo-only build (S:174) | NDËRTUAR i çaktivizuar (zgjedhja e transportit DEMO me frazë); dërgimi real nuk është i autorizuar |
 
 ### B. Vendimet që mungojnë realisht (13) — alternativa, ndikim, rekomandim
 
@@ -108,6 +108,12 @@ Rekomandimi është propozim i Claude, jo përgjigje; pa përgjigje shkon defaul
 - Njoftimet push (S:100, S:173) dhe ndërtimi demo-only (S:174): punë teknike e radhës, përgjigje e dokumentuar.
 
 Pa D4–D7 EA-ja nuk prodhon plan me përkufizime të klientit (prototipi mund të shërbejë si konfigurim pune, D5); pa D1–D3 dhe D12 porta bllokon; D8–D9 vendosin vetëm menaxhimin pas mbushjes; D10, D11, D13 nuk ndalojnë hyrjen.
+
+## Gjendja pas paketës së menaxhimit (15.10.2026; kompilim/MT5 UNVERIFIED)
+- **Përcaktuar dhe lidhur:** hyrja LIMIT `NEAR_SIDE` (pika 5), max 2 pozicione dhe 2% (pika 9), seanca/lajmet/spread si filtra (pika 11–13), anulimi në fund seance/lajm/limit ditor (pika 16), regjistrimi + menaxhimi 80/20 në 2R brenda orkestruesit me driver-in T011 ekzistues (pika 17–19, i çaktivizuar si parazgjedhje), transporti real DEMO i përgatitur (pika 22, i çaktivizuar, me frazë; dërgimi real nuk është i autorizuar nga ndërtimi).
+- **Përcaktuar nga klienti por ende jo i lidhur (teknike):** anulimi i pending-it në ndryshim drejtimi / sinjal të kundërt (S:29-30) dhe njoftimet push (S:100, S:173).
+- **Mungesa reale (UNSET = BLOCK; burimi):** D1 2 apo 3 trade (S:69 kundrejt S:133); D2 baza e 1% (S:62-65); D3 rezervimi nga pending (Q11); D4–D7 burimi i kontekstit, MSS/FVG M15, SL, targeti (SPEC §6–7); D8 +0.2% kundrejt hyrja+kosto dhe TP=2R (S:51, S:58); D10 pozicionet në fund orari/lajm (S:91, S:99); D11 sinjal i kundërt me pozicion (S:36); D12 klasifikimi i trade-it (Q10); D13 filtri i range (S:38-39).
+- **Pasoja:** sinjali bllokohet nga D4–D7 (dhe madhësia/limitet nga D1–D3), menaxhimi 2R nga D8; EA nuk është robot i përfunduar.
 
 ## Mbushje → T011: çfarë u ndërtua dhe çfarë mbetet (K1–K8)
 

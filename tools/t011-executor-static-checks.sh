@@ -37,7 +37,7 @@ assert not bad, bad
 real = strip(open('src/include/ExitTransportReal.mqh', encoding='ascii').read())
 assert len(re.findall(r'\bOrderSend\s*\(', real)) == 1
 includers = [f for f in files if re.search(r'#include\s+"[^"]*ExitTransportReal\.mqh"', strip(open(f, encoding='ascii').read()))]
-assert sorted(includers) == ['src/XauUsdT011DemoHarness.mq5', 'src/XauUsdT011ExitManager.mq5', 'src/XauUsdT011ExitRegister.mq5', 'src/tests/T011_ExecutorRealCompile.mq5'], includers
+assert sorted(includers) == ['src/XauUsdEntryOrchestrator.mq5', 'src/XauUsdT011DemoHarness.mq5', 'src/XauUsdT011ExitManager.mq5', 'src/XauUsdT011ExitRegister.mq5', 'src/tests/T011_ExecutorRealCompile.mq5'], includers
 stub = strip(open('src/tests/T011_ExecutorRealCompile.mq5', encoding='ascii').read())
 assert not re.search(r'\btransport\s*\.', stub), 'the compile stub calls a method'
 for f in ('src/include/ExitExecutor.mqh', 'src/tests/T011_ExecutorTest.mq5', 'src/include/ExitTransportFake.mqh'):
