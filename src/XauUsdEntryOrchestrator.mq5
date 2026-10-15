@@ -9,7 +9,7 @@
 //   A filled order is registered with the existing T011 executor and then managed by the T011 driver inside this EA (OnTick = the 2R level, OnTimer = reconcile only) only when InpManagementRegistration is true;
 //   the registered fill stays in the lifecycle index until the T011 record is DONE or the position is proven closed (that index is the restart memory). Not proof of broker execution. UNVERIFIED: not compiled or run.
 #property strict
-#property version "1.11"
+#property version "1.12"
 #include "include/EntryOrchestratorFeed.mqh"
 #include "include/EntryTransportFake.mqh"
 #include "include/ExposureReaderReal.mqh"
@@ -456,4 +456,5 @@ void OnTick()
    int sent=g_mgr.OnQuote(t.bid,t.ask);
    if(sent>0) PrintFormat("T011 MANAGEMENT: %d closing request(s) sent at the 2R level; the timer reconciles them",sent);
   }
+
 

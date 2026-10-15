@@ -86,3 +86,10 @@ Limits: the entry transport stays FAKE, so no real position exists to register; 
 The closed H4/M15 feed still rebuilds only when its existing timeline policy requires it. The EA timer now evaluates the orchestrator on every Poll, even when the feed reused its cached state. A feed failure still passes feed_ok=false and blocks; quote recovery still resets the baseline and cannot revive an old candidate. Gate recovery may reconsider an unconsumed eligible signal; executor records continue to prevent duplicate requests. Unchanged exposure messages are logged only once per change.
 
 This correction does not repair or relax stale broker quotes. QUOTE_NOT_READY_OR_STALE can remain valid when the market data is unavailable, invalid or older than the configured limit. No freshness limit was enlarged. Owner rerun: only EntryOrchestratorTest and the corrected EA using the existing FAKE/READ_ONLY demo preset; no new trade or lifecycle suite rerun is needed for this EA wiring correction.
+
+
+## Risk-base timestamp and diagnostics (2026-10-16)
+
+The demo risk base is evaluated against server time sampled AFTER its read. Crossing a second during a valid read is accepted; a genuinely future/stale balance or backwards clock is not. The quote is checked again after the read, using the same updated decision time for subsequent evidence. No fallback, daily-base change or freshness relaxation.
+
+RISK_BASE_NOT_READY now names the specific refusal and shows read_ok/demo/amount/age/limit. In particular ACCOUNT_NOT_DEMO is an intentional account gate, not a reason to remove the demo restriction. The previous generic owner logs cannot establish which cause occurred. Use the corrected FAKE/READ_ONLY EA to observe the concrete reason; preserve notification OFF and real transport OFF.

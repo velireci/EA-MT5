@@ -144,3 +144,16 @@ Owner-relayed MT5 evidence: EntryOrchestratorTest-e4cde2e 129/0 at 23:40:33; Ent
 Confirmed wiring defect: EA Poll returned whenever the closed-bar feed had no rebuild, so market/quote/gate recovery was not re-evaluated until another feed build. Fix: always run the existing orchestrator Step after feed Poll, passing feed_ok unchanged; the feed still decides when closed bars need rebuilding. Existing baseline/recovery rules, per-signal persistence and duplicate prevention are unchanged. Unchanged exposure messages are suppressed to avoid logging them every timer poll. No new input, transport, policy, module or real order.
 
 Regressions: source check observed failing before the fix; BUY/SELL cached-feed quote recovery keeps historical outage candidates blocked; a cleared gate can proceed on the same closed-bar snapshot once; repeats cannot send twice; bad feed still blocks. MQL scenario cached_feed_market_recheck mirrors these cases. Codex focused Python 77 passed; orchestrator static checks and negative control passed (Git-base comparisons skipped in this source export). Codex compiled EntryOrchestratorTest and the corrected EA: each 0 errors / 0 warnings. Owner MT5 rerun of the correction remains pending; earlier results are not a run of the corrected EA.
+
+
+## Codex: balance-clock correction and specific risk-base refusals (2026-10-16, on 2418a29)
+
+Owner-relayed logs from bc2daa1 repeatedly reported RISK_BASE_NOT_READY at 00:00, 00:30, 00:45, 01:00, 01:15 and 01:30. The generic reason does not prove the actual cause (read failure, non-demo account, amount or time). No real trade was sent.
+
+Confirmed reproducible code defect: Now was sampled before Balance, while the real balance port timestamps at the end of its read. A read crossing a second was falsely future-dated. The core now samples Now again after Balance, refuses a backwards/invalid clock, checks the balance against the later time and rechecks quote age before planning. No stale/future tolerance was enlarged; no explicit-budget fallback was added; the -2% daily base is untouched.
+
+Risk-base refusals now distinguish BALANCE_READ_FAILED, ACCOUNT_NOT_DEMO, BALANCE_INVALID_AMOUNT, BALANCE_TIME_INVALID, BALANCE_FROM_FUTURE and BALANCE_STALE, with read_ok, demo, amount, age and limit. RISK_CLOCK_INVALID and QUOTE_EXPIRED_DURING_BALANCE_READ identify a backwards clock or a quote expiring during the read. Three Python regression tests were observed failing before the fix and passing afterward; BUY/SELL MQL scenario balance_clock_and_reasons covers the same cases. Owner MT5 diagnosis is still pending; this fix does not establish which cause produced the original logs.
+
+The already-pushed cancellation/notification package 2418a29 is preserved. New notifications and broker transports remain off unless explicitly selected; this change does not authorise running them.
+
+Codex verification of this correction: 80 focused Python tests passed; orchestrator static checks plus the new earlier-clock negative control passed (Git-base comparisons skipped in this export). EntryOrchestratorTest, EntryLifecycleTest and the EA each compiled 0 errors / 0 warnings. Owner MT5 rerun pending. These checks do not constitute a full review or live execution of the separate 2418a29 notification/cancellation package.

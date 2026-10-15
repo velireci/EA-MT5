@@ -339,6 +339,51 @@ class RiskFromBalance(unittest.TestCase):
             setattr(w.cfg, k, v)
         return w
 
+    def test_balance_read_crossing_a_second_is_checked_after_the_read(self):
+        for d in (1, -1):
+            w = self.world(d)
+            def balance():
+                w.mk.balance_calls += 1
+                w.tr.now += 1
+                return eo.Balance(True, 10000.0, w.tr.now, True)
+            w.mk.balance = balance
+            ob, lvl, out = w.live_candidate(self)
+            self.assertTrue(out.request, out.reason)
+            self.assertEqual(out.risk_budget, 100.0)
+            self.assertEqual(w.tr.sends, 1)
+
+    def test_balance_refusal_reports_the_specific_reason(self):
+        for d in (1, -1):
+            for code, changes in [('BALANCE_READ_FAILED', dict(read_ok=False)), ('ACCOUNT_NOT_DEMO', dict(demo=False)),
+                                  ('BALANCE_INVALID_AMOUNT', dict(amount=0.0)), ('BALANCE_TIME_INVALID', dict(time=0)),
+                                  ('BALANCE_FROM_FUTURE', dict(time=1)), ('BALANCE_STALE', dict(time=-31))]:
+                w = self.world(d)
+                if 'time' in changes and changes['time'] != 0:
+                    changes = dict(changes, time=w.tr.now+changes['time'])
+                w.mk.bal = replace(w.mk.bal, **changes)
+                ob, lvl, out = w.live_candidate(self)
+                self.assertEqual(out.status, 'RISK_BASE_NOT_READY')
+                self.assertTrue(out.reason.startswith(code), out.reason)
+                self.assertIn('read_ok=', out.reason)
+                self.assertIn('demo=', out.reason)
+                self.assertIn('age=', out.reason)
+                w.untouched(self)
+
+    def test_slow_balance_read_rechecks_quote_and_rejects_clock_regression(self):
+        for d in (1, -1):
+            for advance, status in [(31, 'MARKET_NOT_READY'), (-1, 'RISK_BASE_NOT_READY')]:
+                w = self.world(d)
+                def balance():
+                    w.tr.now += advance
+                    return eo.Balance(True, 10000.0, w.tr.now, True)
+                w.mk.balance = balance
+                ob, lvl = observer_n(d, 2)
+                out = w.step(ob, lvl)
+                self.assertEqual(out.status, status, out.reason)
+                if advance < 0:
+                    self.assertTrue(out.reason.startswith('RISK_CLOCK_INVALID'), out.reason)
+                w.untouched(self)
+
     def test_one_percent_of_the_current_balance_sizes_the_plan_and_the_loss_check(self):
         for d in (1, -1):
             w = self.world(d, 10000.0)
@@ -407,7 +452,7 @@ class RiskFromBalance(unittest.TestCase):
 
 SCENARIOS = ['buy_to_fake_request', 'sell_to_fake_request', 'replay_baseline_no_signal', 'restart_no_double', 'defect_rebases', 'context_change_rebases', 'unset_inputs_block',
              'market_missing_blocks', 'gate_blocks_no_request', 'probe_uses_effective_tick', 'halt_after_uncertainty',
-             'market_recovery_rebases', 'context_fields_rebase', 'probe_independent_of_property', 'reservation_before_every_send', 'risk_budget_from_current_balance', 'risk_base_failure_blocks', 'cached_feed_market_recheck', 'facts_expose_direction_only_when_known']
+             'market_recovery_rebases', 'context_fields_rebase', 'probe_independent_of_property', 'reservation_before_every_send', 'risk_budget_from_current_balance', 'risk_base_failure_blocks', 'cached_feed_market_recheck', 'facts_expose_direction_only_when_known', 'balance_clock_and_reasons']
 
 
 class Reservation(unittest.TestCase):
@@ -586,4 +631,5 @@ class Mutants(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
 

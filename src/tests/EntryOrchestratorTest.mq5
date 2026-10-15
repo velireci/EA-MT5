@@ -89,9 +89,11 @@ public:
    SDbResult daily;
    SEoBalance bal;
    int balance_calls;
+   int balance_advance;
    CFakeMarket(void)
      {
       balance_calls=0;
+      balance_advance=0;
       bal.read_ok=true;
       bal.amount=10000.0;
       bal.time=0;
@@ -132,7 +134,7 @@ public:
       q.time=tr.now;
       bal.time=tr.now;
      }
-   virtual void Balance(SEoBalance &b) {balance_calls++; b=bal;}
+   virtual void Balance(SEoBalance &b) {balance_calls++; if(balance_advance!=0) {tr.now+=balance_advance; bal.time=tr.now;} b=bal;}
    virtual long Now(void) {return(tr.now);}
    virtual void Symbol(SEoSymbol &s) {s=sym;}
    virtual void Quote(SEoQuote &x) {x=q;}
@@ -710,6 +712,46 @@ void Scenario_facts_expose_direction_only_when_known(void)
      }
   }
 
+void Scenario_balance_clock_and_reasons(void)
+  {
+   for(int dir=-1;dir<=1;dir+=2)
+     {
+      CW good;
+      good.Init(dir);
+      good.cfg.risk_source=EO_RISK_SOURCE_DEMO_BALANCE_PCT;
+      good.cfg.risk_budget=-1.0;
+      good.mk.balance_advance=1;
+      good.Live();
+      Check(good.out.request && good.t.sends==1 && good.out.risk_budget==100.0,StringFormat("dir %d: a balance read crossing a second stays valid against the later clock",dir));
+      string codes[6]={"BALANCE_READ_FAILED","ACCOUNT_NOT_DEMO","BALANCE_INVALID_AMOUNT","BALANCE_TIME_INVALID","BALANCE_FROM_FUTURE","BALANCE_STALE"};
+      for(int k=0;k<6;k++)
+        {
+         CW w;
+         w.Init(dir);
+         w.cfg.risk_source=EO_RISK_SOURCE_DEMO_BALANCE_PCT;
+         if(k==0) w.mk.bal.read_ok=false;
+         if(k==1) w.mk.bal.demo=false;
+         if(k==2) w.mk.bal.amount=0.0;
+         if(k==3) w.mk.bal.time=0;
+         if(k==4) w.mk.bal.time=w.t.now+1;
+         if(k==5) w.mk.bal.time=w.t.now-31;
+         w.Live();
+         Check(w.out.status=="RISK_BASE_NOT_READY" && Starts(w.out.reason,codes[k]) && Has(w.out.reason,"read_ok=") && Has(w.out.reason,"demo=") && Has(w.out.reason,"age=") && w.Untouched(),StringFormat("dir %d: %s blocks with specific diagnostics and no fallback",dir,codes[k]));
+        }
+      for(int k=0;k<2;k++)
+        {
+         CW slow;
+         slow.Init(dir);
+         slow.cfg.risk_source=EO_RISK_SOURCE_DEMO_BALANCE_PCT;
+         slow.mk.balance_advance=(k==0 ? 31 : -1);
+         CObs ob;
+         ob.Make(dir,2);
+         slow.StepObs(ob);
+         Check(slow.Untouched() && (k==0 ? slow.out.status=="MARKET_NOT_READY" && Starts(slow.out.reason,"QUOTE_EXPIRED_DURING_BALANCE_READ") : slow.out.status=="RISK_BASE_NOT_READY" && Starts(slow.out.reason,"RISK_CLOCK_INVALID")),StringFormat("dir %d: slow read or backwards clock %d blocks",dir,k));
+        }
+     }
+  }
+
 void OnStart()
   {
    Print("T016 ENTRY ORCHESTRATOR TEST: fake transport, fake store and a scripted market; no file, no terminal read, no order, no trade.");
@@ -731,8 +773,10 @@ void OnStart()
    Scenario_risk_budget_from_current_balance();
    Scenario_risk_base_failure_blocks();
    Scenario_cached_feed_market_recheck();
+   Scenario_balance_clock_and_reasons();
    Scenario_facts_expose_direction_only_when_known();
    TestOffsetValidation();
    PrintFormat("T016 ENTRY ORCHESTRATOR TEST finished: %d passed, %d failed",g_pass,g_fail);
   }
+
 

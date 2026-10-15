@@ -174,10 +174,22 @@ class Orchestrator:
             return Outcome('MARKET_NOT_READY', 'QUOTE_NOT_READY_OR_STALE')
         budget, base = cfg.risk_budget, -1.0
         if cfg.risk_source == RISK_SOURCE_DEMO_BALANCE_PCT:
+            before_balance = now
             b = mk.balance()
-            if not (b.read_ok and b.demo and _finite(b.amount) and b.amount > 0 and 0 <= now - b.time <= cfg.max_quote_age):
+            now = mk.now()  # check the balance against a clock sampled AFTER the read
+            if now <= 0 or now < before_balance:
                 self.defect()
-                return Outcome('RISK_BASE_NOT_READY', 'BALANCE_UNREADABLE_INVALID_STALE_OR_NOT_DEMO: the demo risk policy (1% of the current balance) has no usable base; no fallback')
+                return Outcome('RISK_BASE_NOT_READY', 'RISK_CLOCK_INVALID: server clock moved backwards or is unavailable; no fallback')
+            if not (b.read_ok and b.demo and _finite(b.amount) and b.amount > 0 and 0 <= now - b.time <= cfg.max_quote_age) or b.time <= 0:
+                code = ('BALANCE_READ_FAILED' if not b.read_ok else 'ACCOUNT_NOT_DEMO' if not b.demo else
+                        'BALANCE_INVALID_AMOUNT' if not _finite(b.amount) or b.amount <= 0 else 'BALANCE_TIME_INVALID' if b.time <= 0 else
+                        'BALANCE_FROM_FUTURE' if b.time > now else 'BALANCE_STALE')
+                self.defect()
+                return Outcome('RISK_BASE_NOT_READY', '%s | read_ok=%d demo=%d balance=%.8f age=%d limit=%d | no fallback' %
+                               (code, b.read_ok, b.demo, b.amount, now-b.time, cfg.max_quote_age))
+            if not (0 <= now - q.time <= cfg.max_quote_age):
+                self.defect()
+                return Outcome('MARKET_NOT_READY', 'QUOTE_EXPIRED_DURING_BALANCE_READ')
             base = b.amount
             budget = b.amount * RISK_PCT_DEMO / 100.0
             if not (_finite(budget) and budget > 0):
@@ -234,4 +246,5 @@ class Orchestrator:
         if res.final in HALT_FINALS:
             self.halted = 'HALTED after %s: restart and reconcile first' % res.final
         return out
+
 

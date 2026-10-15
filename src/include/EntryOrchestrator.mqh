@@ -247,9 +247,22 @@ public:
       if(c.risk_source==EO_RISK_SOURCE_DEMO_BALANCE_PCT)
         {
          SEoBalance bal;
+         long before_balance=now;
          mk.Balance(bal);
-         if(!(bal.read_ok && bal.demo && TG_Finite(bal.amount) && bal.amount>0.0 && now-bal.time>=0 && now-bal.time<=c.max_quote_age))
-           {Defect(); EO_Set(out,"RISK_BASE_NOT_READY","BALANCE_UNREADABLE_INVALID_STALE_OR_NOT_DEMO: the demo risk policy (1% of the current balance) has no usable base; no fallback"); return;}
+         now=mk.Now(); // evaluate timestamps against a clock sampled AFTER the balance read
+         if(now<=0 || now<before_balance)
+           {Defect(); EO_Set(out,"RISK_BASE_NOT_READY","RISK_CLOCK_INVALID: server clock moved backwards or is unavailable; no fallback"); return;}
+         if(!(bal.read_ok && bal.demo && TG_Finite(bal.amount) && bal.amount>0.0 && now-bal.time>=0 && now-bal.time<=c.max_quote_age) || bal.time<=0)
+           {
+            string code=(!bal.read_ok ? "BALANCE_READ_FAILED" : !bal.demo ? "ACCOUNT_NOT_DEMO" :
+                         !TG_Finite(bal.amount) || bal.amount<=0.0 ? "BALANCE_INVALID_AMOUNT" : bal.time<=0 ? "BALANCE_TIME_INVALID" :
+                         bal.time>now ? "BALANCE_FROM_FUTURE" : "BALANCE_STALE");
+            Defect();
+            EO_Set(out,"RISK_BASE_NOT_READY",StringFormat("%s | read_ok=%d demo=%d balance=%.8f age=%I64d limit=%I64d | no fallback",code,(int)bal.read_ok,(int)bal.demo,bal.amount,now-bal.time,c.max_quote_age));
+            return;
+           }
+         if(!(now-q.time>=0 && now-q.time<=c.max_quote_age))
+           {Defect(); EO_Set(out,"MARKET_NOT_READY","QUOTE_EXPIRED_DURING_BALANCE_READ"); return;}
          base=bal.amount;
          budget=bal.amount*EO_RISK_PCT_DEMO/100.0;
          if(!(TG_Finite(budget) && budget>0.0)) {Defect(); EO_Set(out,"RISK_BASE_NOT_READY","RISK_BUDGET_INVALID"); return;}
@@ -358,3 +371,4 @@ public:
      }
   };
 #endif
+

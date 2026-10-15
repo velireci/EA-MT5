@@ -56,6 +56,11 @@ assert 'if(c.risk_source==EO_RISK_SOURCE_DEMO_BALANCE_PCT)' in step and 'mk.Bala
 assert 'bal.read_ok && bal.demo && TG_Finite(bal.amount) && bal.amount>0.0 && now-bal.time>=0 && now-bal.time<=c.max_quote_age' in step, 'read ok, demo, finite, positive and fresh'
 assert 'RISK_BASE_NOT_READY' in step and step.count('mk.Balance(') == 1, 'a failed read blocks (no fallback)'
 assert 'budget=bal.amount*EO_RISK_PCT_DEMO/100.0;' in step and 'm.risk_budget=budget;' in step and 'chk.risk_budget=budget;' in step and 'c.risk_budget' not in step.replace('double budget=c.risk_budget;', ''), 'one budget sizes the plan and checks the loss'
+balance_part = step[step.index('mk.Balance(bal);'):step.index('m.risk_budget=budget;')]
+assert 'now=mk.Now();' in balance_part and balance_part.index('now=mk.Now();') < balance_part.index('now-bal.time>=0'), 'balance clock must be sampled after the read'
+assert 'now<before_balance' in balance_part and 'QUOTE_EXPIRED_DURING_BALANCE_READ' in balance_part, 'backwards clock and quote age after balance are checked'
+for code in ('BALANCE_READ_FAILED', 'ACCOUNT_NOT_DEMO', 'BALANCE_INVALID_AMOUNT', 'BALANCE_TIME_INVALID', 'BALANCE_FROM_FUTURE', 'BALANCE_STALE'):
+    assert code in balance_part, 'specific balance refusal: ' + code
 assert step.index('mk.Balance(') < step.index('m.risk_budget=budget;') < step.index('SPB_Geometry('), 'the budget is known before the plan is sized'
 assert 'virtual void Balance(SEoBalance &b) {b.read_ok=false;' in t, 'the default market gives no balance'
 inc = re.findall(r'#include "([^"]+)"', t)
@@ -208,6 +213,10 @@ expect_assert "$NEG/o2.py" "$NEG/F1.mqh" "a direction taken from an unready cont
 mut F2.mqh $CORE 's/      EO_FactsInit(facts);\n      if(!feed_ok)/      if(!feed_ok)/;s/^      EO_FactsInit(facts);$/      \/\/ none/'
 expect_assert "$NEG/o2.py" "$NEG/F2.mqh" "facts that survive a defect" "cleared at every step"
 
+mut S7.mqh $CORE 's/         now=mk.Now();/         now=before_balance;/'
+expect_assert "$NEG/o2.py" "$NEG/S7.mqh" "a balance compared to the earlier clock" "balance clock must be sampled"
+
 [ $FAIL -eq 0 ] && echo "ENTRY ORCHESTRATOR STATIC CHECKS: ALL PASS (static only; MetaEditor compile and MT5 run UNVERIFIED)" || echo "ENTRY ORCHESTRATOR STATIC CHECKS: FAILURES"
 exit $FAIL
+
 
