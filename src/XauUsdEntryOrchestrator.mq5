@@ -9,7 +9,7 @@
 //   A filled order is registered with the existing T011 executor and then managed by the T011 driver inside this EA (OnTick = the 2R level, OnTimer = reconcile only) only when InpManagementRegistration is true;
 //   the registered fill stays in the lifecycle index until the T011 record is DONE or the position is proven closed (that index is the restart memory). Not proof of broker execution. UNVERIFIED: not compiled or run.
 #property strict
-#property version "1.12"
+#property version "1.13"
 #include "include/EntryOrchestratorFeed.mqh"
 #include "include/EntryTransportFake.mqh"
 #include "include/ExposureReaderReal.mqh"
@@ -418,6 +418,14 @@ int OnInit()
   {
    if(MQLInfoInteger(MQL_TESTER)) {Print("T016 REFUSED: the Strategy Tester is not a supported environment (terminal reads)."); return(INIT_FAILED);}
    if(!Configure()) {Print("T016 INIT FAILED: invalid or UNSET source / feed inputs (see docs/T016-entry-orchestrator.md)."); return(INIT_PARAMETERS_INCORRECT);}
+   ResetLastError();
+   long account_mode=AccountInfoInteger(ACCOUNT_TRADE_MODE);
+   int mode_error=GetLastError();
+   long account_login=AccountInfoInteger(ACCOUNT_LOGIN);
+   string account_server=AccountInfoString(ACCOUNT_SERVER);
+   PrintFormat("T016 ACCOUNT IDENTITY | login=%I64d server='%s' trade_mode_raw=%I64d trade_mode_name=%s mode_read_error=%d | enum DEMO=%d CONTEST=%d REAL=%d | connected=%d | READ ONLY account classification, no gate changed",
+               account_login,account_server,account_mode,EnumToString((ENUM_ACCOUNT_TRADE_MODE)account_mode),mode_error,
+               (int)ACCOUNT_TRADE_MODE_DEMO,(int)ACCOUNT_TRADE_MODE_CONTEST,(int)ACCOUNT_TRADE_MODE_REAL,(int)TerminalInfoInteger(TERMINAL_CONNECTED));
    if(g_real_entry) Print("T016 REAL DEMO ORDER MODE selected explicitly by the owner (phrase given). Symbol ",_Symbol,". Management transport: ",(InpManagementTransport==EOI_MTR_BROKER_DEMO ? "REAL closing requests" : "read-only (closing requests refused)"));
    else Print("T016 FAKE ENTRY EXECUTION: virtual requests only; the real entry transport is not selected. Symbol ",_Symbol,". Management transport: ",(InpManagementTransport==EOI_MTR_BROKER_DEMO ? "REAL closing requests" : "read-only (closing requests refused)"));
    string startup_notes="";
