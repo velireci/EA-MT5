@@ -2,26 +2,41 @@
 
 Përditësuar më 15.10.2026. Pamje e evidencës së njohur, jo kontroll i ri i GitHub. Nuk matet përqindja nga numri i testeve. Programuar ≠ testuar plotësisht ≠ validuar nga klienti.
 
-## Statusi aktual — 15.10.2026
+## Statusi aktual — 15.10.2026, pas provës së orës 23:20
 
-Kjo përmbledhje zëvendëson statuset e vjetra të kompilimit dhe MT5 në shënimet historike më poshtë. Shenja [x] tregon vetëm bllokun/testin e përshkruar, jo që EA-ja është përfunduar.
+Kjo përmbledhje zëvendëson shënimet historike më poshtë. [x] vlen për bllokun e përshkruar, jo për EA-në e përfunduar. Nuk përdorim përqindje të matur nga skedarët/testet.
 
-- [x] T013/T015: ekzekutuesi dhe porta e hyrjes me transport FAKE; pronari MT5 EntryExecutorTest 170/0 dhe EntryGateTest 134/0.
-- [x] T016 në fe53c06: orkestruesi FAKE; pronari MT5 EntryOrchestratorTest 97/0, SetupPlanBridgeTest 77/0.
-- [x] T017 në e2d20db: rekordet FAKE ruhen në disk; pronari MT5 EntryPersistenceTest 99/0.
-- [x] T018 në c009dbf: ekspozimi dhe korrigjimet; Codex dy kompilime 0/0, 115 teste Python të zinxhirit kaluan; pronari MT5 ExposureReaderTest 53/0. Leximi real nga EA ende pa vëzhgim.
-- [x] T019 (paketa e korrigjimeve, baza f349aae): Codex katër kompilime 0 errors / 0 warnings, 146 teste Python dhe kontrolli statik kaluan; pronari MT5 15.10.2026 XAUUSD.fx M15: EntryGateTest 140/0 (21:34:40), EntryOrchestratorTest 103/0 (21:34:51), EntryLifecycleTest 99/0 (21:35:03). Kjo nuk provon tregti reale ose EA të përfunduar.
-- [ ] Regjistrimi automatik fill -> T011 (EntryManagementHandoff.mqh, EA v1.06, çaktivizuar si parazgjedhje): ndërtuar në sandbox me regresione Python (758 teste, 36 të lifecycle) dhe kontrolle statike; kompilimi dhe MT5 UNVERIFIED; transporti hyrës mbetet FAKE; D1 kundërshti e dokumentuar, D3 e pazgjidhur, D8 e pandryshuar (TP=2R refuzohet nga T011).
-- [ ] Menaxhimi T011 brenda orkestruesit + zgjedhja e transportit real DEMO (EA v1.07, çaktivizuar): ndërtuar në sandbox (768 teste Python, kontrollet statike), kompilimi/MT5 UNVERIFIED; dokumentacioni zyrtar MQL5 nuk u hap (sandbox pa akses); dërgimi real nuk është i autorizuar; robot i papërfunduar (D1–D8, D10–D13).
-- [x] e172af8 (korrigjimi i raportit të mbushjes nga Codex): pronari MT5 EntryLifecycleTest 111/0; Codex 74 teste Python fokale, kontroll statik me kontroll negativ, EntryLifecycleTest dhe orkestruesi 0/0. Provon vetëm bllokun e testit të lifecycle-it.
-- [ ] Paketa e vendimeve (docs/EA_INTEGRATION_PLAN.md A/B/C): 22 pika me përgjigjet e dokumentuara, 13 vendime që mungojnë realisht (D1–D13); pret përgjigjet e pronarit, pastaj një bllok implementimi dhe një raund testimi.
-- [ ] Lidhja e mbushjes me menaxhimin T011: mbushja raportohet me inputet e sakta të skriptit eksplicit dhe me arsyet e refuzimit (at-least-once, pa shkrim T011); regjistrimi AUTOMATIK nuk është ndërtuar - kërkon K1–K8 dhe vendimet 17–21 (docs/EA_INTEGRATION_PLAN.md). Sandbox, kompilimi/MT5 UNVERIFIED.
-- [ ] Vendimet strategjike: lista e vetme me 19 pika është në docs/EA_INTEGRATION_PLAN.md. Politikat e pazgjidhura mbeten UNSET=BLOCK.
-- [ ] Aktivizimi real dhe prova demo e rrjedhës së plotë kërkojnë autorizim të veçantë. EA-ja mbetet me transport FAKE; T011 dhe T012 nuk shpallen të mbyllura.
+### E kryer dhe e provuar
+- [x] Zinxhiri H4/M15 → plan → portë → ekzekutues hyrjeje është lidhur me transport FAKE (T013–T016); testet e mëparshme të pronarit për portën/orkestruesin kaluan.
+- [x] Rekordet e hyrjeve në disk dhe rikuperimi (T017): EntryPersistenceTest 99/0, e2d20db, evidencë e pronarit.
+- [x] Ekspozimi nga llogaria (T018), struktura e riemërtuar pa përplasje: ExposureReaderTest-3318578 53/0, 22:35:16, evidencë e pronarit.
+- [x] Regjistrimi pas mbushjes dhe menaxhimi T011 brenda orkestruesit janë ndërtuar; nuk kërkohet më nisja manuale e ExitManager për secilin pozicion kur aktivizohet rruga e integruar.
+- [x] Cikli i integruar me prova sintetike, BUY/SELL, restart dhe lirimi i sloteve: EntryLifecycleTest-d5f7460 231/0 në XAUUSD.fx M15, 23:13:25, evidencë e pronarit. Në 6eab15d kishte 229/2 nga ndihmësi i testit që lexonte listën reale; d5f7460 korrigjon vetëm izolimin e testit.
+- [x] Codex: testi dhe EA-ja 6eab15d kompilohen secili 0 errors / 0 warnings; 106 teste Python fokale kaluan dhe kontrollet statike lifecycle me negative controls kaluan (krahasimet me historikun Git u kapërcyen në eksportin lokal). Testi d5f7460: 0/0, 11 teste Python fokale.
+- [x] Nisja reale e programit në grafik demo, me transport FAKE / READ_ONLY: log-u 23:16:26 konfirmon mënyrën. Në 23:20:19: CONFIG_UNSET vetëm risk_budget; virtual requests 0, lifecycle open 0. Kjo provon nisjen, jo tregti te brokeri.
+- [x] Ndarja DEMO/LIVE është ruajtur në EA_INTEGRATION_PLAN.md dhe STATE.md, commit 2703927.
 
-**Ritmi i miratuar:** bashko pjesët e lidhura në një paketë, testo/korrigjo gjatë ndërtimit, përditëso dokumentet në fund dhe jep një raund MT5 për pronarin. Pa task-e, skedarë ose diagnostikë të panevojshme. Përparimi matet nga EA-ja e integruar që funksionon, jo nga numri i testeve/skedarëve.
+### Puna aktive — konfigurimi demo funksional
+- [ ] Lidhja automatike e buxhetit demo: 1% e ACCOUNT_BALANCE aktuale, me dështim leximi → BLOCK. Kjo është zgjedhje e përkohshme demo, jo përgjigje e klientit për live. Sot InpRiskBudget është ende shumë monetare e dhënë si input.
+- [ ] Një preset i plotë pune, me të gjitha zgjedhjet e përkohshme demo të dukshme dhe të dokumentuara. Preseti i dorëzuar fake_work ka lot_cap=10, model_tolerance=0.01, max_quote_age=5; risk_budget=-1 dhe zgjedhjet e tjera të pazgjidhura mbeten bllokuese.
+- [ ] Kontroll i përbashkët i të gjitha politikave të sinjalit/planit/portës përpara raundit tjetër MT5; mos zbulojmë një input UNSET për çdo raund.
+- [ ] Rrjedha e plotë nga një setup deri te hyrja dhe menaxhimi me konfigurimin demo të përkohshëm.
 
-## Baza e ndërtuar — shënime historike
+### Provat që ende mungojnë
+- [ ] Cikli i plotë i orkestruesit me transport BROKER_DEMO: sinjal → LIMIT → mbushje → regjistrim → partial → reconcile/restart. Zgjedhja reale është ndërtuar, por nuk është aktivizuar ose provuar në këtë cikël.
+- [ ] CAPTURE real i balancës fillestare dhe politika reale e plotësisë/klasifikimit të historikut ditor. LOAD është provuar pa rekord; testet sintetike nuk e zëvendësojnë CAPTURE.
+- [ ] Mbyllja e boshllëqeve të konfirmuara: pending në ndryshim drejtimi/sinjal të kundërt, push notifications; zbatimi i BE/+0.2% dhe sjellja TP=2R varen nga konfigurimi i shprehur.
+- [ ] Provë e plotë demo dhe krahasim me shembujt e klientit. T011/T012 dhe EA-ja e plotë nuk shpallen të mbyllura vetëm nga testet e moduleve.
+
+### Para LIVE — përgjigje të klientit dhe verifikim
+- [ ] Mbyllja e listës së vetme D1–D13 te EA_INTEGRATION_PLAN.md (D9 është lidhje teknike e zgjidhur): 2/3 trade, baza/kostot e 1%, pending, H4/MSS/FVG, SL/target, BE/+0.2%/TP=2R, jashtë orarit/lajmet, sinjal i kundërt, klasifikim trade dhe range.
+- [ ] Zëvendësimi ose konfirmimi i çdo zgjedhjeje të përkohshme demo me përgjigjen përfundimtare të klientit dhe verifikimi i konfigurimit.
+- [ ] Auditimi i plotë i transportit dhe autorizimi i veçantë për aktivizim. Codex lexoi dokumentacionin zyrtar për OrderSend, MqlTradeRequest dhe filling të pending; kjo nuk është auditim i plotë.
+- [ ] Llogaritë reale mbeten të refuzuara nga kodi aktual. Dokumentimi i pyetjeve për live nuk aktivizon live.
+
+**Ritmi:** një paketë për pjesët e lidhura, një listë kompilimi, një raund MT5; pa task-e/diagnostikë të panevojshme. Provat e pronarit më sipër janë të përcjella, jo ekzekutime të Codex-it.
+
+## Baza e ndërtuar — shënime historike (statuset e vjetra zëvendësohen nga përmbledhja më sipër)
 
 H4 → M15 → FVG → kthim është ndërtuar dhe vëzhguar në replay. T005 u dorëzua te 67f02e5; Codex Python 39/0, MetaEditor 0/0; pronari MT5 572/0. T006 (sizing i pastër me buxhet risku të dhënë) te 559794a: Codex Python 47/0 dhe MetaEditor 0/0; pronari MT5 14.10.2026 18:42:14: 710 passed, 0 failed (të përcjella, jo ekzekutim i Claude). Moduli i pastër është verifikuar; integrimi me brokerin jo. T007 (plan i pastër, kontrolle lejeje dhe kërkesë anulimi, pa urdhra) është programuar me teste Python 34/0 të ekzekutuara nga Claude dhe kontrolle statike; kompilimi MetaEditor dhe MT5 janë UNVERIFIED dhe moduli nuk është i lidhur. Robot që hap dhe menaxhon urdhra: ende jo.
 
