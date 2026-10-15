@@ -14,13 +14,18 @@
 class CRealTransport : public CExitTransport
   {
 private:
-   void Fill(const SExSendRequest &req,MqlTradeRequest &r)
+   // false = the request has a value that maps to no known constant; it is never turned into a default (no unknown filling becomes RETURN)
+   bool Fill(const SExSendRequest &req,MqlTradeRequest &r)
      {
       ZeroMemory(r);
+      if(req.action!=EX_ACTION_DEAL) return(false);
       r.action=TRADE_ACTION_DEAL;
       r.symbol=req.symbol;
       r.volume=req.volume;
-      r.type=(req.type==0 ? ORDER_TYPE_BUY : ORDER_TYPE_SELL);
+      if(req.type==0) r.type=ORDER_TYPE_BUY;
+      else
+         if(req.type==1) r.type=ORDER_TYPE_SELL;
+         else return(false);
       r.position=req.position;
       r.magic=(ulong)req.magic;
       r.deviation=(ulong)req.deviation;
@@ -29,7 +34,10 @@ private:
       if(req.filling==1) r.type_filling=ORDER_FILLING_FOK;
       else
          if(req.filling==2) r.type_filling=ORDER_FILLING_IOC;
-         else r.type_filling=ORDER_FILLING_RETURN;
+         else
+            if(req.filling==3) r.type_filling=ORDER_FILLING_RETURN;
+            else return(false);
+      return(true);
      }
 public:
    virtual bool IsReal(void) {return(true);}
@@ -85,7 +93,7 @@ public:
    virtual bool PreCheck(const SExSendRequest &req)
      {
       MqlTradeRequest r;
-      Fill(req,r);
+      if(!Fill(req,r)) return(false);
       MqlTradeCheckResult c;
       ZeroMemory(c);
       ResetLastError();
@@ -94,8 +102,15 @@ public:
      }
    virtual void Send(const SExSendRequest &req,SExSendResult &res)
      {
+      res.returned_true=false;
+      res.have_result=false;
+      res.retcode=0;
+      res.order=0;
+      res.deal=0;
+      res.volume=0.0;
+      res.price=0.0;
       MqlTradeRequest r;
-      Fill(req,r);
+      if(!Fill(req,r)) return;                // an unmappable request is never sent
       MqlTradeResult s;
       ZeroMemory(s);
       ResetLastError();

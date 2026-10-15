@@ -48,7 +48,8 @@ def run_rows(mod_ex):
             store = p.FileStore(d)
             prepare(store, r['start'])
             cfg, tr, q = fx.setup(r['tweak'], r['resp'])
-            cfg.test_save_fault, cfg.test_fault_save_no = r['fault'], r['fault_no']
+            if r['fault']:
+                cfg.test_save_fault, cfg.test_fault_save_no = r['fault'], r['fault_no']
             res = mod_ex.process(cfg, tr, mod_ex.Runtime(), store, NAME, fx.IDENT, q)
             dk, gen, orders = disk(store)
             got = (res.final, len(tr.sends), dk, gen, orders)
@@ -68,6 +69,9 @@ class Lying(p.FileStore):
 def run_behaviour(mod_ex):
     """rows + the checks that the rows cannot show: the position ticket in the request, the duplicate call, the latch, a store that lies about a save"""
     bad = list(run_rows(mod_ex))
+    for case in Grid.CASES:
+        if len(case) == 3 and mod_ex._on_grid(case[0], case[1]) != case[2]:
+            bad.append(('grid', case))
     with tempfile.TemporaryDirectory() as d:
         store = p.FileStore(d)
         prepare(store, fx.K_IDLE)
@@ -96,6 +100,44 @@ def run_behaviour(mod_ex):
         if not (a.final == mod_ex.RECOVERY_REQUIRED and not tr.sends and 'INTENT_NOT_VERIFIED' in a.reason):
             bad.append(('lying store', a.final, len(tr.sends), a.reason))
     return bad
+
+
+class Grid(unittest.TestCase):
+    CASES = [(4000.004, 0.01, False), (2010.004, 0.01, False), (2000.005, 0.01, False), (4000.0, 0.01, True), (2000.1, 0.01, True), (3999.9100000000003, 0.01, True), (0.1 + 0.2, 0.1, True),
+             (float('nan'), 0.01, False), (float('inf'), 0.01, False), (-1.0, 0.01, False), (0.0, 0.01, False), (1.0, 0.0, False), (1.0, float('nan')), (1.0, -0.01, False), (1e300, 0.01, False)]
+
+    def test_grid_tolerance_is_floating_point_noise_only(self):
+        for case in self.CASES:
+            if len(case) == 3:
+                self.assertEqual(ex._on_grid(case[0], case[1]), case[2], case)
+        self.assertFalse(ex._on_grid(1.0, float('nan')))
+        # every real offset of at least 1/1000 of a tick is refused, at several price levels and ticks
+        for tick in (0.01, 0.1, 0.00001, 0.5):
+            for base in (100.0, 2000.0, 4000.0, 100000.0):
+                k = round(base / tick)
+                for frac in (0.001, 0.01, 0.25, 0.4, 0.5):
+                    self.assertFalse(ex._on_grid(k * tick + frac * tick, tick), (tick, base, frac))
+                self.assertTrue(ex._on_grid(k * tick, tick), (tick, base))
+
+    def test_unknown_enum_values_are_blocked_whatever_their_value(self):
+        for field, vals in (('filling', (-1, 4, 99)), ('filter_policy', (-1, 3, 99)), ('filter_state', (-1, 3, 99)), ('test_save_fault', (-1, 3, 99))):
+            for v in vals:
+                with tempfile.TemporaryDirectory() as d:
+                    store = p.FileStore(d)
+                    prepare(store, fx.K_IDLE)
+                    cfg, tr, q = fx.setup(0, 0)
+                    setattr(cfg, field, v)
+                    res = ex.process(cfg, tr, ex.Runtime(), store, NAME, fx.IDENT, q)
+                    self.assertEqual((res.final, len(tr.sends), disk(store)[:2]), (ex.BLOCKED, 0, ('IDLE', 1)), (field, v))
+                    self.assertIn('INVALID_INPUT', res.reason)
+        for bad in (0, 2, -2, 99):
+            with tempfile.TemporaryDirectory() as d:
+                store = p.FileStore(d)
+                prepare(store, fx.K_IDLE)
+                cfg, tr, q = fx.setup(0, 0)
+                q.direction = bad
+                res = ex.process(cfg, tr, ex.Runtime(), store, NAME, fx.IDENT, q)
+                self.assertEqual((res.final, len(tr.sends)), (ex.BLOCKED, 0), bad)
 
 
 class Rows(unittest.TestCase):
@@ -228,6 +270,13 @@ class Mutants(unittest.TestCase):
             ('precheck skipped', "    if not tr.precheck(req):", "    if False:"),
             ('not idle record still sends', "    if o.verdict != p.USABLE_IDLE:", "    if False:"),
             ('duplicate call allowed', "    if rt.send_calls >= 1:\n        return block('DUPLICATE_CALL", "    if False:\n        return block('DUPLICATE_CALL"),
+            ('unknown filling accepted', "    if not _int(cfg.filling) or cfg.filling not in (FILL_UNSET, FILL_FOK, FILL_IOC, FILL_RETURN):", "    if False:"),
+            ('unknown filter policy accepted', "    if not _int(cfg.filter_policy) or cfg.filter_policy not in (POL_UNSET, POL_IGNORE, POL_NEEDS_CLEAR):", "    if False:"),
+            ('unknown filter state accepted', "    if not _int(cfg.filter_state) or cfg.filter_state not in (FS_UNKNOWN, FS_CLEAR, FS_BLOCKED):", "    if False:"),
+            ('unknown direction accepted', "    if not _int(q.direction) or q.direction not in (1, -1):", "    if False:"),
+            ('wide grid tolerance', "8 * sys.float_info.epsilon * max(1.0, abs(r))", "1e-6 * max(1.0, abs(r))"),
+            ('non finite price on the grid', "    if not _finite(x) or not _finite(tick) or x <= 0 or tick <= 0:\n        return False", "    if False:\n        return False"),
+            ('non representable plan persisted', "    if p.fnum(q.level_2r) is None or p.fnum(cfg.tp_price) is None:", "    if False:"),
             ('trading permission ignored', "    if not acct.trade_allowed:", "    if False:"),
             ('login not compared', "    if acct.login != identity.login or acct.server != identity.server:", "    if False:"),
         ]
@@ -276,6 +325,23 @@ class Sources(unittest.TestCase):
             pos.append(at)
         self.assertEqual(pos, sorted(pos))
         self.assertIn('EX_AUTH_PHRASE', core)
+
+    def test_unknown_values_never_reach_the_real_request_and_the_grid_is_noise_only_in_the_mql_core(self):
+        real = strip_comments(_read('src', 'include', 'ExitTransportReal.mqh'))
+        core = strip_comments(_read('src', 'include', 'ExitExecutor.mqh'))
+        self.assertNotRegex(real, r'else\s+r\.type_filling\s*=\s*ORDER_FILLING_RETURN')       # no default mapping to RETURN
+        self.assertIn('if(req.filling==3) r.type_filling=ORDER_FILLING_RETURN;', real)
+        self.assertGreaterEqual(real.count("else return(false);"), 2)
+        self.assertIn('if(!Fill(req,r)) return;', real)
+        self.assertIn('if(!Fill(req,r)) return(false);', real)
+        self.assertLess(real.index('if(!Fill(req,r)) return;'), real.index('OrderSend('))
+        self.assertIn('8.0*DBL_EPSILON*MathMax(1.0,MathAbs(r))', core)
+        self.assertNotIn('1e-6*MathMax', core)
+        for need in ('cfg.filling<(int)EX_FILL_UNSET', 'cfg.filter_policy>(int)EX_POL_NEEDS_CLEAR', 'cfg.filter_state>(int)EX_FS_BLOCKED', 'q.direction!=1 && q.direction!=-1', 'ESC_Fnum(q.level_2r'):
+            self.assertIn(need.replace('cfg.filling<(int)EX_FILL_UNSET', '(int)cfg.filling<(int)EX_FILL_UNSET').replace('cfg.filter_policy>(int)', '(int)cfg.filter_policy>(int)').replace('cfg.filter_state>(int)', '(int)cfg.filter_state>(int)'), core)
+        body = core[core.index('bool EX_Process('):]
+        self.assertLess(body.index('INVALID_INPUT: filling'), body.index('tr.ReadAccount('))
+        self.assertLess(body.index('PLAN_NOT_REPRESENTABLE_IN_RECORD'), body.index('EX_Save('))
 
     def test_fixture_block_equals_generator(self):
         txt = _read('src', 'tests', 'T011_ExecutorTest.mq5')

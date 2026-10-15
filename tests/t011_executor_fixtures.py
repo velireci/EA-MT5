@@ -11,7 +11,9 @@ K_IDLE, K_MISSING, K_PEND_INTENT, K_PEND_MAP, K_DONE_MAP = range(5)
 TWEAKS = ['NONE', 'DISABLED', 'MAGIC_ZERO', 'FILLING_UNSET', 'DEVIATION_UNSET', 'FILTER_POLICY_UNSET', 'FILTERS_NEEDED_BUT_BLOCKED', 'TP_UNSET', 'TP_EQUALS_2R', 'TP_BEFORE_2R',
           'REAL_NOT_AUTHORISED', 'REAL_AUTHORISED_BUT_NOT_DEMO', 'REAL_WRONG_PHRASE', 'REAL_FULLY_AUTHORISED_DEMO', 'ACCOUNT_UNREADABLE', 'LOGIN_MISMATCH', 'TRADING_NOT_ALLOWED',
           'NETTING', 'SYMBOL_UNREADABLE', 'SYMBOL_NOT_TRADABLE', 'POSITION_NOT_FOUND', 'POSITION_MAGIC_OTHER', 'POSITION_SYMBOL_OTHER', 'POSITION_DIRECTION_OTHER',
-          'POSITION_VOLUME_CHANGED', 'PRECHECK_FAILS', 'LEVEL_OFF_TICK_GRID', 'SPLIT_UNSET', 'BELOW_LEVEL', 'TP_OFF_TICK_GRID']
+          'POSITION_VOLUME_CHANGED', 'PRECHECK_FAILS', 'LEVEL_OFF_TICK_GRID', 'SPLIT_UNSET', 'BELOW_LEVEL', 'TP_OFF_TICK_GRID',
+          'FILLING_INVALID', 'FILTER_POLICY_INVALID', 'FILTER_STATE_INVALID', 'DIRECTION_INVALID', 'SAVE_FAULT_INVALID', 'LEVEL_OFF_GRID_BY_0_004', 'TP_OFF_GRID_BY_0_004',
+          'LEVEL_ON_GRID_WITH_BINARY_NOISE', 'LEVEL_NOISY_NOT_REPRESENTABLE']
 T = {n: i for i, n in enumerate(TWEAKS)}
 RESPONSES = ['FILLED_10009', 'PARTIAL_10010', 'PLACED_10008', 'TIMEOUT_NO_ORDER', 'FALSE_NO_RESULT', 'TRUE_BUT_NO_ORDER', 'REJECT_10006', 'RETCODE_UNKNOWN_WITH_ORDER']
 RS = {n: i for i, n in enumerate(RESPONSES)}
@@ -58,6 +60,15 @@ def setup(tweak, resp):
     elif t == 'LEVEL_OFF_TICK_GRID': q.level_2r = 2000.005
     elif t == 'SPLIT_UNSET': q.volume_initial, tr.position.volume = 0.52, 0.52
     elif t == 'BELOW_LEVEL': q.bid, q.ask = 1999.0, 1999.3
+    elif t == 'FILLING_INVALID': cfg.filling = 99
+    elif t == 'FILTER_POLICY_INVALID': cfg.filter_policy = 99
+    elif t == 'FILTER_STATE_INVALID': cfg.filter_state = 99
+    elif t == 'DIRECTION_INVALID': q.direction = 5
+    elif t == 'SAVE_FAULT_INVALID': cfg.test_save_fault = 99
+    elif t == 'LEVEL_OFF_GRID_BY_0_004': q.level_2r, q.bid, q.ask, cfg.tp_price = 4000.004, 4000.004, 4000.3, 4010.0
+    elif t == 'TP_OFF_GRID_BY_0_004': cfg.tp_price = 2010.004
+    elif t == 'LEVEL_ON_GRID_WITH_BINARY_NOISE': q.level_2r, q.bid, q.ask, cfg.tp_price = 2000.1, 2000.1, 2000.4, 2010.3
+    elif t == 'LEVEL_NOISY_NOT_REPRESENTABLE': q.level_2r, q.bid, q.ask, cfg.tp_price = 3999.9100000000003, 3999.9100000000003, 3999.94, 4010.0
     return cfg, tr, q
 
 
@@ -79,6 +90,13 @@ def row(name, start=K_IDLE, tweak='NONE', resp='FILLED_10009', fault=0, fault_no
 
 
 B = ex.BLOCKED
+# ---- unknown enum values and real offsets from the tick grid block before any persist / send
+for tw, why in (('FILLING_INVALID', 'INVALID_INPUT: filling'), ('FILTER_POLICY_INVALID', 'INVALID_INPUT: exit_filter_policy'), ('FILTER_STATE_INVALID', 'INVALID_INPUT: exit_filter_state'),
+                ('DIRECTION_INVALID', 'INVALID_INPUT: direction'), ('SAVE_FAULT_INVALID', 'INVALID_INPUT: test_save_fault'),
+                ('LEVEL_OFF_GRID_BY_0_004', 'PLAN_NOT_ON_SYMBOL_GRID: level_2R'), ('TP_OFF_GRID_BY_0_004', 'PLAN_NOT_ON_SYMBOL_GRID: TP'),
+                ('LEVEL_NOISY_NOT_REPRESENTABLE', 'PLAN_NOT_REPRESENTABLE_IN_RECORD')):
+    row('REGRESSION_' + tw + '_ZERO_SENDS_NO_NEW_INTENT', tweak=tw, final=ex.BLOCKED, sends=0, disk='IDLE', gen=1, reason=why)
+row('REGRESSION_PRICE_ON_GRID_WITH_BINARY_NOISE_IS_ACCEPTED', tweak='LEVEL_ON_GRID_WITH_BINARY_NOISE', final=ex.SENT_MAPPED, sends=1, disk='REQUEST_PENDING', gen=3, orders=1)
 # ---- the single send and its map
 row('ACCEPTED_FILLED_IS_SENT_ONCE_AND_MAPPED', final=ex.SENT_MAPPED, sends=1, disk='REQUEST_PENDING', gen=3, orders=1)
 row('ACCEPTED_PARTIAL_FILL_RESPONSE_IS_ONLY_MAPPED_NOT_DONE', resp='PARTIAL_10010', final=ex.SENT_MAPPED, sends=1, disk='REQUEST_PENDING', gen=3, orders=1)

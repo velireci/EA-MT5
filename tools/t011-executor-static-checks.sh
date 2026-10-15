@@ -64,6 +64,11 @@ init = c[c.index('void EX_ConfigInit('):c.index('void EX_RuntimeInit(')]
 for need in ('c.enabled=false;', 'c.real_authorised=false;', 'c.ea_magic=0;', 'EX_FILL_UNSET', 'c.deviation=-1;', 'EX_POL_UNSET', 'c.tp_set=false;', 'c.authorisation="";'):
     assert need in init, need
 assert re.search(r'accepted=\(sr\.returned_true && sr\.have_result && \(sr\.retcode==10008 \|\| sr\.retcode==10009 \|\| sr\.retcode==10010\) && sr\.order>0\)', c)
+assert '8.0*DBL_EPSILON*MathMax(1.0,MathAbs(r))' in c and '1e-6' not in c, 'the grid tolerance must be floating-point noise only'
+for need in ('(int)cfg.filling>(int)EX_FILL_RETURN', '(int)cfg.filter_policy>(int)EX_POL_NEEDS_CLEAR', '(int)cfg.filter_state>(int)EX_FS_BLOCKED', 'q.direction!=1 && q.direction!=-1', 'ESC_Fnum(q.level_2r,exact)'):
+    assert need in c, need
+real = re.sub(r'//[^\n]*', '', open('src/include/ExitTransportReal.mqh', encoding='ascii').read())
+assert 'else return(false);' in real and not re.search(r'else\s+r\.type_filling\s*=\s*ORDER_FILLING_RETURN', real), 'an unknown filling must not map to RETURN'
 assert not re.search(r'FileOpen|FileMove|FileWrite|FileRead|FileDelete|TimeCurrent|TimeGMT|TimeLocal|Sleep\s*\(|[rR]etry\w*\s*(=|\(|\+\+)|NormalizeDouble|MathRound\(\s*q\.', c), 'forbidden code in the core'
 PYEOF
 

@@ -128,10 +128,16 @@ void EX_RuntimeInit(SExRuntime &rt)
    rt.save_calls=0;
   }
 
+bool EX_Finite(const double x) {return(x==x && x-x==0.0);}
+
+// Exactly on the tick grid up to FLOATING-POINT NOISE only (eight machine epsilons relative to the number of ticks). A real difference such as 0.004 with a tick of 0.01
+// is refused. Non-finite or non-positive inputs are never on the grid.
 bool EX_OnGrid(const double x,const double tick)
   {
+   if(!EX_Finite(x) || !EX_Finite(tick) || x<=0.0 || tick<=0.0) return(false);
    double r=x/tick;
-   return(MathAbs(r-MathRound(r))<=1e-6*MathMax(1.0,MathAbs(r)));
+   if(!EX_Finite(r) || MathAbs(r)>1e12) return(false);
+   return(MathAbs(r-MathRound(r))<=8.0*DBL_EPSILON*MathMax(1.0,MathAbs(r)));
   }
 
 // test hook aside, exactly ESF_Save: false does not mean "nothing was written"
@@ -159,6 +165,11 @@ bool EX_Process(const SExConfig &cfg,CExitTransport *tr,SExRuntime &rt,const str
    res.sends=0;
    res.order_ticket=0;
    if(!cfg.enabled) {res.reason="DISABLED: the executor is off by default"; return(false);}
+   if((int)cfg.filling<(int)EX_FILL_UNSET || (int)cfg.filling>(int)EX_FILL_RETURN) {res.reason="INVALID_INPUT: filling is not a known value"; return(false);}
+   if((int)cfg.filter_policy<(int)EX_POL_UNSET || (int)cfg.filter_policy>(int)EX_POL_NEEDS_CLEAR) {res.reason="INVALID_INPUT: exit_filter_policy is not a known value"; return(false);}
+   if((int)cfg.filter_state<(int)EX_FS_UNKNOWN || (int)cfg.filter_state>(int)EX_FS_BLOCKED) {res.reason="INVALID_INPUT: exit_filter_state is not a known value"; return(false);}
+   if((int)cfg.test_save_fault<(int)EX_SAVE_NONE || (int)cfg.test_save_fault>(int)EX_SAVE_AFTER) {res.reason="INVALID_INPUT: test_save_fault is not a known value"; return(false);}
+   if(q.direction!=1 && q.direction!=-1) {res.reason="INVALID_INPUT: direction must be 1 (BUY) or -1 (SELL)"; return(false);}
    if(cfg.ea_magic<=0) {res.reason="INPUT_UNSET: ea_magic"; return(false);}
    if(cfg.filling==EX_FILL_UNSET) {res.reason="INPUT_UNSET: filling"; return(false);}
    if(cfg.deviation<0) {res.reason="INPUT_UNSET: deviation"; return(false);}
@@ -183,6 +194,8 @@ bool EX_Process(const SExConfig &cfg,CExitTransport *tr,SExRuntime &rt,const str
    if(!sym.read_ok || !sym.close_allowed || sym.tick_size<=0.0) {res.reason="SYMBOL_UNREADABLE_OR_NOT_TRADABLE"; return(false);}
    if(!EX_OnGrid(q.level_2r,sym.tick_size)) {res.reason="PLAN_NOT_ON_SYMBOL_GRID: level_2R is refused, not rounded"; return(false);}
    if(!EX_OnGrid(cfg.tp_price,sym.tick_size)) {res.reason="PLAN_NOT_ON_SYMBOL_GRID: TP is refused, not rounded"; return(false);}
+   string exact;
+   if(!ESC_Fnum(q.level_2r,exact) || !ESC_Fnum(cfg.tp_price,exact)) {res.reason="PLAN_NOT_REPRESENTABLE_IN_RECORD: level_2R or TP does not round-trip through 12 decimals; the plan is not rounded and nothing is persisted"; return(false);}
    if(MathAbs(cfg.tp_price-q.level_2r)<sym.tick_size/2.0) {res.reason="TP_EQUALS_2R: the interaction is an open decision"; return(false);}
    if((q.direction==1 && cfg.tp_price<q.level_2r) || (q.direction==-1 && cfg.tp_price>q.level_2r)) {res.reason="TP_BEFORE_2R: inconsistent with the minimum of 2R"; return(false);}
    SExPosition pos;

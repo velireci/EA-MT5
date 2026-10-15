@@ -18,3 +18,10 @@ Not verified: that `position` must be the current position TICKET (as opposed to
 * NOT protected: parallel writers (two terminals or instances using the same folder) - there is no lock and none is claimed; a backup restored over the file; a crash between the single send and the map save (reported as an uncertain send at the next load); the plan is not persisted before the request (a volume-step change between
   registration and the 2R quote is not detected); a state that `ExitActivation` can reach but the codec cannot store (`VOLUME_MISMATCH_BEFORE_REQUEST` is NEEDS_RECONCILIATION without a plan) is only BLOCKED in memory, not saved - a gap between two verified modules, reported and not refactored.
 * The real transport is compiled by `T011_ExecutorRealCompile.mq5`, which calls none of its methods.
+
+## Correction after the Codex review of 59ec88e (relayed: Python 0 failures; ExecutorTest and RealCompile MetaEditor 0 errors / 0 warnings; real transport not executed)
+Reproduced with the fake transport: filling = 99 and filter_policy = 99 sent once and returned SENT_MAPPED; `_on_grid(4000.004, 0.01)` was True because the tolerance 1e-6 * max(1, |price/tick|) allowed 0.4 tick at that price.
+Fixed: every enum that steers the send (filling, exit-filter policy, exit-filter state, the test save fault, the position direction) must be a known value, otherwise BLOCKED before any read, persist or send ("INVALID_INPUT"); UNSET stays "INPUT_UNSET".
+The real transport no longer maps an unknown filling to RETURN: an unmappable request makes `Fill` return false, the pre-check fails and `Send` returns without calling OrderSend. The grid test is floating-point noise only (8 machine epsilons relative to the number of ticks)
+and requires finite, positive price and tick: a real difference such as 0.004 with a tick of 0.01 is refused. A plan value on the grid but not exactly representable in the record (for example 399991 * 0.01 = 3999.9100000000003) is
+refused as PLAN_NOT_REPRESENTABLE_IN_RECORD before anything is persisted, never rounded (the activation compares level and volume with ==). A blocked call sends nothing and writes no new INTENT.

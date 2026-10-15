@@ -20,6 +20,8 @@ No rejection class exists until the return-code table is verified from the offic
 MAP: PENDING + MAPPED with the single order ticket (orders_complete true: one request, one call), generation + 1; a failed map save is RECOVERY_REQUIRED (the ticket is in the message).
 NOT PROTECTED: parallel writers (two terminals / two instances on the same folder): there is no lock; nothing here proves otherwise.
 """
+import math
+import sys
 from dataclasses import dataclass, field
 
 import t011_activation_reference as act
@@ -163,9 +165,23 @@ class Result:
     request: object = None
 
 
+def _int(x):
+    return isinstance(x, int) and not isinstance(x, bool)
+
+
+def _finite(x):
+    return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
+
+
 def _on_grid(x, tick):
+    """Exactly on the tick grid up to FLOATING-POINT NOISE only: eight units of the machine epsilon relative to the number of ticks. A real difference (0.004 with a tick of 0.01) is refused.
+    Non-finite or non-positive inputs are never on the grid."""
+    if not _finite(x) or not _finite(tick) or x <= 0 or tick <= 0:
+        return False
     r = x / tick
-    return abs(r - round(r)) <= 1e-6 * max(1.0, abs(r))
+    if not math.isfinite(r) or abs(r) > 1e12:
+        return False
+    return abs(r - round(r)) <= 8 * sys.float_info.epsilon * max(1.0, abs(r))
 
 
 def _save(cfg, rt, store, name, rec):
@@ -193,6 +209,16 @@ def process(cfg, tr, rt, store, name, identity, q):
 
     if not cfg.enabled:
         return block('DISABLED: the executor is off by default')
+    if not _int(cfg.filling) or cfg.filling not in (FILL_UNSET, FILL_FOK, FILL_IOC, FILL_RETURN):
+        return block('INVALID_INPUT: filling is not a known value')
+    if not _int(cfg.filter_policy) or cfg.filter_policy not in (POL_UNSET, POL_IGNORE, POL_NEEDS_CLEAR):
+        return block('INVALID_INPUT: exit_filter_policy is not a known value')
+    if not _int(cfg.filter_state) or cfg.filter_state not in (FS_UNKNOWN, FS_CLEAR, FS_BLOCKED):
+        return block('INVALID_INPUT: exit_filter_state is not a known value')
+    if not _int(cfg.test_save_fault) or cfg.test_save_fault not in (SAVE_NONE, SAVE_BEFORE, SAVE_AFTER):
+        return block('INVALID_INPUT: test_save_fault is not a known value')
+    if not _int(q.direction) or q.direction not in (1, -1):
+        return block('INVALID_INPUT: direction must be 1 (BUY) or -1 (SELL)')
     if cfg.ea_magic <= 0:
         return block('INPUT_UNSET: ea_magic')
     if cfg.filling == FILL_UNSET:
@@ -230,6 +256,8 @@ def process(cfg, tr, rt, store, name, identity, q):
         return block('PLAN_NOT_ON_SYMBOL_GRID: level_2R is refused, not rounded')
     if not _on_grid(cfg.tp_price, sym.tick_size):
         return block('PLAN_NOT_ON_SYMBOL_GRID: TP is refused, not rounded')
+    if p.fnum(q.level_2r) is None or p.fnum(cfg.tp_price) is None:
+        return block('PLAN_NOT_REPRESENTABLE_IN_RECORD: level_2R or TP does not round-trip through 12 decimals; the plan is not rounded and nothing is persisted')
     if abs(cfg.tp_price - q.level_2r) < sym.tick_size / 2:
         return block('TP_EQUALS_2R: the interaction is an open decision')
     if (q.direction == 1 and cfg.tp_price < q.level_2r) or (q.direction == -1 and cfg.tp_price > q.level_2r):
