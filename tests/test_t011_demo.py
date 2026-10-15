@@ -8,6 +8,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import t011_demo_open_reference as og  # noqa: E402
 import t011_demo_reference as dm  # noqa: E402
 import t011_executor_fixtures as efx  # noqa: E402
 import t011_executor_reference as ex  # noqa: E402
@@ -250,16 +251,24 @@ class Sources(unittest.TestCase):
         src = strip_comments(_read('src', 'XauUsdT011DemoOpenPosition.mq5'))
         self.assertIn('input bool InpEnabled=false;', src)
         self.assertEqual(len(re.findall(r'\bOrderSend\s*\(', src)), 1)
-        order = ['if(!InpEnabled)', 'InpAuthorisation!=OP_AUTH_PHRASE', 'ACCOUNT_TRADE_MODE_DEMO', 'ACCOUNT_MARGIN_MODE_RETAIL_HEDGING', 'InpEaMagic<=0', 'InpSymbol!=_Symbol', 'OP_DIR_UNSET',
-                 'EX_FILL_FOK', 'InpDeviation<0', 'EX_OnGrid(InpVolume,vstep)', 'ES_Split(', 'SL_OR_TP_NOT_ON_THE_TICK_GRID_OR_NOT_POSITIVE', 'A_POSITION_WITH_THIS_MAGIC_ALREADY_EXISTS', 'EL_Acquire(', 'OrderCheck(', 'OrderSend(']
+        order = ['if(!InpEnabled)', 'InpAuthorisation!=OP_AUTH_PHRASE', 'ACCOUNT_TRADE_MODE_DEMO', 'ACCOUNT_MARGIN_MODE_RETAIL_HEDGING', 'InpEaMagic<=0', 'InpSymbol!=_Symbol',
+                 '(int)InpDirection!=(int)OP_DIR_BUY&&(int)InpDirection!=(int)OP_DIR_SELL', 'EX_FILL_FOK', 'InpDeviation<0', 'EX_OnGrid(InpVolume,vstep)', 'ES_Split(',
+                 'SL_OR_TP_NOT_ON_THE_TICK_GRID_OR_NOT_POSITIVE', 'OPG_Run(']
+        flat = re.sub(r'\s+', '', src)
         at, pos = 0, []
         for s_ in order:
-            at = src.index(s_, at)
+            at = flat.index(re.sub(r'\s+', '', s_), at)
             pos.append(at)
         self.assertEqual(pos, sorted(pos))
+        # no look at positions or orders before the guard (the look happens INSIDE the lock); the read-only listing afterwards is fine
+        onstart = src[src.index('void OnStart()'):]
+        self.assertLess(onstart.index('OPG_Run('), onstart.index('PositionsTotal'))
+        self.assertNotIn('OrderCheck(', onstart)
+        self.assertNotIn('OrderSend(', onstart)
+        self.assertNotIn('EL_Acquire(', onstart)
         self.assertIn('input string InpAuthorisation="";', src)
         self.assertIn('input long InpEaMagic=0;', src)
-        self.assertNotRegex(src, r'FileOpen|FileDelete|ESF_|GlobalVariableDel')
+        self.assertNotRegex(src, r'FileOpen|FileDelete|ESF_|GlobalVariableDel|PositionClose|PositionModify')
         self.assertNotIn('OnTick', src)
 
     def test_the_lock_header_calls_only_global_variable_apis(self):
@@ -268,6 +277,138 @@ class Sources(unittest.TestCase):
         self.assertIn('GlobalVariableTemp(key)', lock)
         self.assertNotRegex(lock, r'GlobalVariablesDeleteAll|GlobalVariableDel|FileDelete')
         self.assertIn('if(!held) return;', lock)
+
+
+class OpenGuard(unittest.TestCase):
+    """the locked sequence of the open-position step (fake port): the scan is inside the lock, an intent is written before the send and never removed"""
+    LOGIN, MAGIC = 5001234, 777
+
+    def setUp(self):
+        self.files, self.locks = og.Files(), og.Locks()
+        self.key, self.name = og.lock_key(self.LOGIN, self.MAGIC), og.intent_name(self.LOGIN, self.MAGIC)
+
+    def run_(self, port, files=None):
+        return og.run(port, files or self.files, self.locks, self.key, self.name, 'INTENT-TEXT')
+
+    def test_one_run_scans_inside_the_lock_writes_the_intent_then_sends_once(self):
+        port = og.Port()
+        seen = {}
+        port.on_scan = lambda: seen.setdefault('held', self.key in self.locks.held)
+        o = self.run_(port)
+        self.assertTrue(o.sent)
+        self.assertEqual((o.sends, port.sends), (1, 1))
+        self.assertEqual(port.log, ['positions', 'orders', 'precheck', 'send'])
+        self.assertTrue(seen['held'])
+        self.assertEqual(self.files.data[self.name], 'INTENT-TEXT')
+        self.assertEqual(self.locks.held, set())
+
+    def test_two_instances_that_both_saw_no_position_send_only_one_open(self):
+        a, b = og.Port(shows_position_after_send=False), og.Port()
+        oa = self.run_(a)          # instance 1 passes everything and sends
+        ob = self.run_(b)          # instance 2 saw "no position" earlier; it takes the lock AFTER instance 1 released it
+        self.assertTrue(oa.sent)
+        self.assertFalse(ob.sent)
+        self.assertEqual((a.sends, b.sends), (1, 0))
+        self.assertIn('OPEN_INTENT_EXISTS', ob.reason)
+        self.assertEqual(b.log, [])          # blocked before any scan or send
+
+    def test_the_second_instance_is_blocked_by_the_visible_position_when_the_intent_is_absent(self):
+        a = og.Port(shows_position_after_send=True)
+        self.assertTrue(self.run_(a).sent)
+        self.files.data.clear()              # model: only the position check remains
+        b = og.Port(positions=1)
+        ob = self.run_(b)
+        self.assertFalse(ob.sent)
+        self.assertEqual(b.sends, 0)
+        self.assertIn('A_POSITION_WITH_THIS_MAGIC_ALREADY_EXISTS', ob.reason)
+
+    def test_an_instance_started_while_the_first_holds_the_lock_does_nothing(self):
+        b = og.Port()
+        res = {}
+        a = og.Port()
+        a.on_scan = lambda: res.setdefault('b', self.run_(b))      # instance 2 arrives in the middle of instance 1's locked section
+        self.assertTrue(self.run_(a).sent)
+        self.assertFalse(res['b'].sent)
+        self.assertIn('INSTANCE_LOCK_HELD', res['b'].reason)
+        self.assertEqual((a.sends, b.sends, b.log), (1, 0, []))
+
+    def test_a_pending_order_blocks_inside_the_lock_and_nothing_is_written(self):
+        port = og.Port(orders=1)
+        o = self.run_(port)
+        self.assertFalse(o.sent)
+        self.assertEqual(port.sends, 0)
+        self.assertIn('AN_ORDER_WITH_THIS_MAGIC_ALREADY_EXISTS', o.reason)
+        self.assertFalse(self.files.exists(self.name))
+        self.assertEqual(self.locks.held, set())
+
+    def test_unreadable_positions_or_orders_block(self):
+        for kw, word in ((dict(positions=-1), 'POSITIONS_UNREADABLE'), (dict(orders=-1), 'ORDERS_UNREADABLE')):
+            port = og.Port(**kw)
+            o = self.run_(port)
+            self.assertFalse(o.sent)
+            self.assertIn(word, o.reason)
+            self.assertEqual(port.sends, 0)
+            self.assertFalse(self.files.exists(self.name))
+
+    def test_a_failed_precheck_persists_nothing_and_sends_nothing(self):
+        port = og.Port(precheck=False)
+        o = self.run_(port)
+        self.assertFalse(o.sent)
+        self.assertEqual(port.sends, 0)
+        self.assertFalse(self.files.exists(self.name))
+
+    def test_an_intent_that_cannot_be_written_or_verified_blocks_the_send(self):
+        for f in (og.Files(fail_write=True), og.Files(corrupt_readback=True)):
+            port = og.Port()
+            o = self.run_(port, f)
+            self.assertFalse(o.sent)
+            self.assertEqual(port.sends, 0)
+            self.assertIn('OPEN_INTENT_NOT_VERIFIED', o.reason)
+        self.assertEqual(self.locks.held, set())
+
+    def test_restart_after_an_uncertain_response_stays_blocked_even_with_no_visible_position(self):
+        first = og.Port()                      # the request was sent; the position is not visible yet (response uncertain)
+        self.assertTrue(self.run_(first).sent)
+        self.assertEqual(first.positions, 0)
+        for _ in range(3):                     # restarts: the lock is free, no position is visible, the intent is on disk
+            again = og.Port()
+            o = self.run_(again)
+            self.assertFalse(o.sent)
+            self.assertEqual(again.sends, 0)
+            self.assertIn('OPEN_INTENT_EXISTS', o.reason)
+        self.assertEqual(self.files.data[self.name], 'INTENT-TEXT')       # never cleaned, never rewritten
+        self.assertEqual(self.files.deletes, 0)
+
+    def test_a_half_written_intent_file_also_blocks(self):
+        self.files.data[self.name] = ''
+        port = og.Port()
+        self.assertFalse(self.run_(port).sent)
+        self.assertEqual(port.sends, 0)
+
+    def test_direction_must_be_a_known_buy_or_sell(self):
+        self.assertTrue(og.direction_ok(1) and og.direction_ok(-1))
+        for bad in (0, 2, -2, 3, 100, -100, 2147483647, None, 1.5, True):
+            self.assertFalse(og.direction_ok(bad), bad)
+
+    def test_the_mql_guard_keeps_the_order_and_never_removes_the_intent(self):
+        g = strip_comments(_read('src', 'include', 'DemoOpenGuard.mqh'))
+        run = g[g.index('bool OPG_Run('):]
+        marks = ['EL_Acquire(', 'ESF_Exists(intent_name)', 'CountPositions()', 'CountOrders()', 'PreCheck()', 'ESF_WriteAll(intent_name', 'ESF_ReadAll(intent_name,back)', 'port.Send(', 'EL_Release(']
+        at, pos = 0, []
+        for m in marks:
+            at = run.index(m, at)
+            pos.append(at)
+        self.assertEqual(pos, sorted(pos))
+        self.assertEqual(g.count('port.Send('), 1)
+        for word in ('FileDelete', 'FileMove', 'ESF_Save', 'ESF_InitFresh', 'GlobalVariableDel', 'OrderSend', 'OrderCheck', 'PositionClose', 'Sleep', 'for(', 'while('):
+            self.assertNotIn(word, g)
+        # every exit after a successful acquire releases the lock (the one exit before it is the failed acquire)
+        self.assertEqual(run.count('EL_Release('), run.count('return(false);') + run.count('return(true);') - 1)
+
+    def test_the_open_script_validates_direction_with_both_known_values(self):
+        src = re.sub(r'\s+', '', strip_comments(_read('src', 'XauUsdT011DemoOpenPosition.mq5')))
+        self.assertIn('(int)InpDirection!=(int)OP_DIR_BUY&&(int)InpDirection!=(int)OP_DIR_SELL', src)
+        self.assertNotIn('InpDirection==OP_DIR_UNSET', src)
 
 
 class Presets(unittest.TestCase):
