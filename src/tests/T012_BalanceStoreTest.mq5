@@ -285,6 +285,16 @@ void RunRows(void)
       if(res.status==DBS_USABLE) Check(res.balance.day==T_DAY+(int)port.s[22],tag+"the balance carries its Tirane day");
       else Check(res.balance.amount==0.0 && !res.balance.known,tag+"an unusable result carries no amount");
       Check(!port.held && port.locks_ok==port.unlocks,tag+"the lock is released");
+      // the preview feed: poisoned "manual" values must not survive; only a USABLE record gives a known balance, with its origin in the text
+      SDbBalance fb;
+      fb.known=true;
+      fb.day=123;
+      fb.amount=55.0;
+      string ftxt=DBS_ForBridge(res,fb);
+      if(res.status==DBS_USABLE)
+         Check(fb.known && fb.day==res.balance.day && fb.amount==res.balance.amount && StringFind(ftxt,res.source)>=0 && StringFind(ftxt,"STORE_USABLE")==0,tag+"bridge feed: a usable record is a known balance and keeps its origin");
+      else
+         Check(!fb.known && fb.day==0 && fb.amount==0.0 && StringFind(ftxt,"STORE_"+DBS_StatusName(res.status))==0,tag+"bridge feed: anything else is an unknown balance and no earlier value survives");
       if(R_OP[i]==0) Check(port.writes==0 && port.locks_ok==0 && port.nf==(port.has_start ? 1 : 0),tag+"LOAD is read-only and lock-free and creates nothing");
       if(R_OP[i]!=0 && res.status==DBS_USABLE && X_DISK[i]=="NEW")
         {

@@ -37,6 +37,7 @@ InpExistingRisk=-1
 InpMaxPositions=-1
 InpMaxTrades=-1
 InpDailySource=1
+InpDailyBalanceSource=0
 InpDailySnapshotDay=20261015
 InpDailyBalanceStart=10000.00
 InpDailyResultKnown=true

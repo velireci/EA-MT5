@@ -3,19 +3,21 @@
 // T012 adds an opt-in DAILY source (DAILY_SRC_SNAPSHOT: daily limits from explicit inputs, UTC like T009). Observation only: the daily BLOCK joins the final
 // preview result; cancel_pending_due is a diagnostic flag, nothing is cancelled or closed; no history or account is read; MANUAL (default) changes nothing.
 #property strict
-#property version "1.05"
+#property version "1.06"
 #include "include/SymbolSnapshot.mqh"
 #include "include/BrokerLossCheck.mqh"
 #include "include/SessionPolicy.mqh"
 #include "include/NewsSpreadFilters.mqh"
 #include "include/DailyPreviewGate.mqh"
 #include "include/DailyBridge.mqh"
+#include "include/DailyBalanceStore.mqh"
 enum PREVIEW_SIDE {PREVIEW_UNSET=0,PREVIEW_BUY=1,PREVIEW_SELL=-1};
 enum PREVIEW_STATE {STATE_UNKNOWN=0,STATE_CLEAR=1,STATE_BLOCK=2};
 enum PREVIEW_SESSION_SOURCE {SESSION_MANUAL=0,SESSION_TIRANE_CLOCK=1};
 enum PREVIEW_NEWS_SOURCE {NEWS_SRC_MANUAL=0,NEWS_SRC_CALENDAR_AUTO=1};
 enum PREVIEW_SPREAD_SOURCE {SPREAD_SRC_MANUAL=0,SPREAD_SRC_QUOTE_AUTO=1};
 enum PREVIEW_DAILY_SOURCE {DAILY_SRC_MANUAL=0,DAILY_SRC_SNAPSHOT=1,DAILY_SRC_HISTORY_BRIDGE=2};
+enum PREVIEW_BALANCE_SOURCE {BALANCE_SRC_MANUAL=0,BALANCE_SRC_STORE=1};
 input PREVIEW_SIDE InpDirection=PREVIEW_UNSET;
 input string InpSignalId="";
 input string InpSetupId="";
@@ -45,6 +47,7 @@ input double InpExistingRisk=-1;
 input long InpMaxPositions=-1; // -1 = policy unset, no silent choice
 input long InpMaxTrades=-1; // also the trade limit of the daily check; -1 = UNSET (blocks). 2 versus 3 is an open client decision: no default
 input PREVIEW_DAILY_SOURCE InpDailySource=DAILY_SRC_MANUAL; // MANUAL = daily check not evaluated (old behaviour). SNAPSHOT = T012 daily limits from the inputs below; HISTORY_BRIDGE = READ-ONLY robot history (T012 facts) -> bridge -> daily check, policies and figures supplied below. UTC like T009 (PC clock), both refused in tester
+input PREVIEW_BALANCE_SOURCE InpDailyBalanceSource=BALANCE_SRC_MANUAL; // HISTORY_BRIDGE only. MANUAL = InpDailyBalanceStart / InpDailySnapshotDay below (default, old behaviour). STORE = READ-ONLY record of the T012 day-balance store (DBS_Load only, never a capture); a missing / unusable / other-account / other-day record gives an UNKNOWN balance and blocks - there is no fallback to the manual inputs and the current balance is never used
 input int InpDailySnapshotDay=0; // Tirane day (yyyymmdd) the figures belong to (SNAPSHOT: the snapshot day; HISTORY_BRIDGE: the day of InpDailyBalanceStart); a different day gives STALE_SNAPSHOT_DAY / BALANCE_DAY_MISMATCH
 input double InpDailyBalanceStart=-1; // balance at the start of the Tirane day, SUPPLIED (never read or reconstructed); <=0 = unknown
 input bool InpDailyResultKnown=false; // true only when InpDailyClosedResult is the robot's closed result of the day; false = unknown
@@ -188,6 +191,9 @@ void Evaluate()
    bool daily_bridge=(InpDailySource==DAILY_SRC_HISTORY_BRIDGE);
    if(daily_on && MQLInfoInteger(MQL_TESTER)) {StopPreview("DAILY_UTC_UNAVAILABLE_IN_TESTER");return;}
    if(daily_bridge && MQLInfoInteger(MQL_TESTER)) {StopPreview("DAILY_HISTORY_UNAVAILABLE_IN_TESTER");return;}
+   bool balance_store=(InpDailyBalanceSource==BALANCE_SRC_STORE);
+   if((int)InpDailyBalanceSource!=(int)BALANCE_SRC_MANUAL && !balance_store) {StopPreview("BALANCE_SOURCE_UNKNOWN");return;}
+   if(balance_store && !daily_bridge) {StopPreview("BALANCE_STORE_ONLY_WITH_HISTORY_BRIDGE");return;}
    SDlResult daily;
    bool daily_evaluated=DG_Evaluate(daily_on,daily_on ? TimeGMT() : 0,InpDailySnapshotDay,InpDailyBalanceStart,InpDailyResultKnown,InpDailyClosedResult,
                                     InpTradesToday,InpDailyWins,InpDailyConsecutiveLosses,InpMaxTrades,daily);
@@ -213,6 +219,14 @@ void Evaluate()
       hbalance.known=(InpDailyBalanceStart>0.0);
       hbalance.day=InpDailySnapshotDay;
       hbalance.amount=InpDailyBalanceStart;
+      string hbalance_text="";
+      if(balance_store)       // READ-ONLY: DBS_Load never writes, locks or creates a file; ALL THREE balance fields are overwritten (no manual value survives, no fallback)
+        {
+         CDbsRealPort hport(InpDailyEaMagic,(InpDailyServerOffsetSeconds==99999 ? 0 : InpDailyServerOffsetSeconds),InpDailyHistoryComplete,_Symbol);
+         SDbsResult hstore;
+         DBS_Load(hport,hstore);
+         hbalance_text=DBS_ForBridge(hstore,hbalance);
+        }
       SDbPolicy hpolicy;
       hpolicy.result_formula=InpDailyResultFormula;
       hpolicy.classification=InpDailyClassification;
@@ -233,6 +247,11 @@ void Evaluate()
       daily.day_key=hbridge.day_key;
       daily_evaluated=true;
       daily_text="HISTORY_BRIDGE verdict "+DH_VerdictName(hverdict)+" ("+(hreason=="" ? "ok" : hreason)+") complete="+(hverdict==DH_READY ? (string)hfacts.complete : "n/a")+" | "+DB_Text(hbridge);
+      if(balance_store)
+        {
+         daily_text+=" | BALANCE "+hbalance_text;
+         PrintFormat("T012 DAILY BALANCE source=STORE (read-only, DBS_Load) known=%d day=%d amount=%.2f | %s | the manual balance inputs are ignored, nothing is written",(int)hbalance.known,hbalance.day,hbalance.amount,hbalance_text);
+        }
       PrintFormat("T012 DAILY source=HISTORY_BRIDGE history_verdict=%s history_reason=%s allowed=%d primary=%s reasons=%s daily_check_called=%d closed_result=%.2f cancel_pending_due=%d daily_limit_reached=%d | formula=%s classification=%s balance_start=%.2f balance_day=%d trades=%I64d wins=%I64d consecutive_losses=%I64d max_trades=%I64d | read-only, nothing cancelled or sent",
                   DH_VerdictName(hverdict),hreason,(int)hbridge.entry_allowed,hbridge.primary,DB_Joined(hbridge),(int)hbridge.dl_called,hbridge.closed_result,
                   (int)hbridge.cancel_pending_due,(int)hbridge.daily_limit_reached,InpDailyResultFormula,InpDailyClassification,InpDailyBalanceStart,InpDailySnapshotDay,

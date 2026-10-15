@@ -292,6 +292,23 @@ void DBS_Load(CDbsPort &port,SDbsResult &res)
    DBS_FromFile(port,a,day,res);
   }
 
+// READ-ONLY feed of the preview's HISTORY_BRIDGE source (mirrors DBS_ForBridge in tests/t012_balance_reference.py). Pure: no port, no read, no file. ALL THREE fields are overwritten on every path, so no
+// earlier (manual) value survives: a USABLE record gives the known balance of its day (the origin stays in the text); NONE / UNKNOWN / BLOCK give an UNKNOWN balance. Returns the diagnostic text.
+string DBS_ForBridge(const SDbsResult &r,SDbBalance &b)
+  {
+   if(r.status==DBS_USABLE && r.balance.known)
+     {
+      b.known=true;
+      b.day=r.balance.day;
+      b.amount=r.balance.amount;
+      return("STORE_USABLE source="+r.source+" day="+IntegerToString(r.balance.day)+" amount="+DoubleToString(r.balance.amount,2));
+     }
+   b.known=false;
+   b.day=0;
+   b.amount=0.0;
+   return("STORE_"+DBS_StatusName(r.status)+": "+r.reason);
+  }
+
 // EXPLICIT action: src DBS_SRC_WE (needs the owner's complete + offset assertions) or DBS_SRC_OA (needs an amount and the day it is for).
 void DBS_Capture(CDbsPort &port,const string src,const SDbsAsserts &asserts,const double owner_amount,const int owner_day,SDbsResult &res)
   {

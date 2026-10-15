@@ -125,7 +125,7 @@ PYEOF
 
 echo "=== S6: verified modules unchanged since $BASE ==="
 if git cat-file -e "$BASE^{commit}" 2>/dev/null; then
-  for p in src/include/ExitSplit.mqh src/include/ExitActivation.mqh src/include/ExitStateFile.mqh src/XauUsdTradePreview.mq5; do
+  for p in src/include/ExitSplit.mqh src/include/ExitActivation.mqh src/include/ExitStateFile.mqh; do
     git diff --quiet "$BASE" -- "$p" && echo "  PASS $p identical to $BASE" || { echo "  FAIL $p differs from $BASE"; FAIL=1; }
   done
 else

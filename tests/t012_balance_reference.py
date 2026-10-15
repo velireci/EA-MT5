@@ -292,3 +292,13 @@ def capture(port, src, asserts=None, owner_amount=0.0, owner_day=0):
         return Result(USABLE, '', True, day, rec2.amount, rec2.source, True, False)
     finally:
         port.unlock(key)
+
+
+def for_bridge(res):
+    """READ-ONLY feed of the preview's HISTORY_BRIDGE source (mirror of DBS_ForBridge): a USABLE record gives a known balance with its day and amount; NONE / UNKNOWN / BLOCK (including another
+    account or day, a damaged or foreign file) give an UNKNOWN balance (known False, day 0, amount 0). The manual balance input and the current account balance are not arguments: there is no fallback.
+    Returns (Balance, diagnostic text); the text keeps the origin (WINDOW_EMPTY / OWNER_ASSERTED) of a usable record."""
+    import t012_bridge_reference as br
+    if res.status == USABLE and res.known:
+        return br.Balance(True, res.day, res.amount), 'STORE_USABLE source=%s day=%d amount=%.2f' % (res.source, res.day, res.amount)
+    return br.Balance(False, 0, 0.0), 'STORE_%s: %s' % (res.status, res.reason)

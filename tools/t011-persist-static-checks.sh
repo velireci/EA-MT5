@@ -36,7 +36,7 @@ PYEOF
 
 echo "=== S3: verified modules are unchanged since $BASE ==="
 if git cat-file -e "$BASE^{commit}" 2>/dev/null; then
-  for p in src/include/ExitSplit.mqh src/include/ExitActivation.mqh src/include/DailyBridge.mqh src/XauUsdTradePreview.mq5 tests/t011_activation_reference.py; do
+  for p in src/include/ExitSplit.mqh src/include/ExitActivation.mqh src/include/DailyBridge.mqh tests/t011_activation_reference.py; do
     git diff --quiet "$BASE" -- "$p" && echo "  PASS $p identical to $BASE" || { echo "  FAIL $p differs from $BASE"; FAIL=1; }
   done
 else

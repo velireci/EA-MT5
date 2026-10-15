@@ -66,7 +66,7 @@ class Wiring(unittest.TestCase):
         self.assertIn('#include "include/DailyBridge.mqh"', self.ea)
         self.assertIn('bool daily_on=(InpDailySource==DAILY_SRC_SNAPSHOT);', self.ea)
         self.assertIn('bool daily_bridge=(InpDailySource==DAILY_SRC_HISTORY_BRIDGE);', self.ea)
-        self.assertIn('#property version "1.05"', self.ea)
+        self.assertIn('#property version "1.06"', self.ea)
 
     def test_snapshot_and_manual_lines_are_preserved(self):
         base = subprocess.run(['git', 'show', BASE + ':src/XauUsdTradePreview.mq5'], cwd=ROOT, capture_output=True, text=True).stdout

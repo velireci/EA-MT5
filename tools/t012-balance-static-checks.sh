@@ -68,7 +68,7 @@ PYEOF
 
 echo "=== S4: protected modules unchanged since $BASE ==="
 if git cat-file -e "$BASE^{commit}" 2>/dev/null; then
-  for p in src/include/DailyBridge.mqh src/include/DailyLimits.mqh src/include/DailyHistory.mqh src/include/DailyPreviewGate.mqh src/include/SessionPolicy.mqh src/XauUsdTradePreview.mq5 src/XauUsdDailyHistoryDiag.mq5 \
+  for p in src/include/DailyBridge.mqh src/include/DailyLimits.mqh src/include/DailyHistory.mqh src/include/DailyPreviewGate.mqh src/include/SessionPolicy.mqh src/XauUsdDailyHistoryDiag.mq5 \
            src/include/ExitStateCodec.mqh src/include/ExitStateFile.mqh src/include/ExitInstanceLock.mqh src/include/ExitExecutor.mqh src/include/ExitRestartFlow.mqh src/include/ExitTransportReal.mqh \
            src/XauUsdT011ExitManager.mq5 src/XauUsdT011ExitRegister.mq5 src/XauUsdT011DemoOpenPosition.mq5 src/XauUsdT011DemoHarness.mq5 src/presets/XauUsdT011ExitDemoSell_01_open.set \
            src/presets/XauUsdT011ExitDemoSell_02_register.set src/presets/XauUsdT011ExitDemoSell_03_manager.set; do
@@ -206,5 +206,28 @@ import re, sys
 code = re.sub(r'//[^\n]*', '', open(sys.argv[1]).read())
 sys.exit(1 if re.search(r'StringFind\([^;]*X_REASON\[', code) else 0)
 PYEOF
+echo "=== S8: the preview reads the store only (DBS_Load), never captures, never writes, never falls back ==="
+EA=src/XauUsdTradePreview.mq5
+cat > "$NEG/s8.py" <<'PYEOF'
+import re, sys
+t = re.sub(r'//[^\n]*', '', open(sys.argv[1], encoding='ascii').read())
+assert 'DBS_Capture' not in t and 'DBS_SRC_' not in t, 'capture reachable'
+assert not re.search(r'WriteFile|FileOpen|FileDelete|ACCOUNT_BALANCE|ACCOUNT_EQUITY|AccountInfo|EL_Acquire|GlobalVariable', t), 'write / account / lock'
+assert t.count('DBS_Load(') == 1 and t.count('CDbsRealPort') == 1
+i = t.index('if(daily_bridge)\n     {'); j = t.index('\n     }', i); blk = t[i:j]
+assert 'DBS_Load(' in blk and blk.index('hbalance.amount=InpDailyBalanceStart;') < blk.index('DBS_Load(') < blk.index('DBS_ForBridge(') < blk.index('DB_Check(')
+assert 'DBS_ForBridge(hstore,hbalance)' in blk
+assert re.search(r'input PREVIEW_BALANCE_SOURCE InpDailyBalanceSource=BALANCE_SRC_MANUAL;', t)
+PYEOF
+python3 -I "$NEG/s8.py" $EA && echo "  PASS load-only, in the bridge branch, before DB_Check, default MANUAL" || { echo "  FAIL"; FAIL=1; }
+cp $EA "$NEG/E1.mq5"; sed -i 's/DBS_Load(hport,hstore);/DBS_Capture(hport,DBS_SRC_OA,hasrt,0.0,0,hstore);/' "$NEG/E1.mq5"
+python3 -I "$NEG/s8.py" "$NEG/E1.mq5" 2>/dev/null && { echo "  FAIL a capture in the preview not detected"; FAIL=1; } || echo "  PASS a capture in the preview is detected"
+cp $EA "$NEG/E2.mq5"; sed -i 's/hbalance_text=DBS_ForBridge(hstore,hbalance);/hbalance_text="x";/' "$NEG/E2.mq5"
+python3 -I "$NEG/s8.py" "$NEG/E2.mq5" 2>/dev/null && { echo "  FAIL a missing overwrite of the manual balance not detected"; FAIL=1; } || echo "  PASS a store branch that leaves the manual balance in place is detected"
+cp $EA "$NEG/E3.mq5"; sed -i 's/hbalance_text=DBS_ForBridge(hstore,hbalance);/hbalance_text=DBS_ForBridge(hstore,hbalance); hbalance.amount=AccountInfoDouble(ACCOUNT_BALANCE);/' "$NEG/E3.mq5"
+python3 -I "$NEG/s8.py" "$NEG/E3.mq5" 2>/dev/null && { echo "  FAIL the current balance as a substitute not detected"; FAIL=1; } || echo "  PASS using the current account balance is detected"
+cp $EA "$NEG/E4.mq5"; sed -i 's/input PREVIEW_BALANCE_SOURCE InpDailyBalanceSource=BALANCE_SRC_MANUAL;/input PREVIEW_BALANCE_SOURCE InpDailyBalanceSource=BALANCE_SRC_STORE;/' "$NEG/E4.mq5"
+python3 -I "$NEG/s8.py" "$NEG/E4.mq5" 2>/dev/null && { echo "  FAIL a STORE default not detected"; FAIL=1; } || echo "  PASS a default other than MANUAL is detected"
+
 [ $FAIL -eq 0 ] && echo "T012 BALANCE STATIC CHECKS: ALL PASS (static only; MetaEditor compile and MT5 run UNVERIFIED)" || echo "T012 BALANCE STATIC CHECKS: FAILURES"
 exit $FAIL

@@ -1,0 +1,54 @@
+; XauUsdTradePreview v1.06 - READ-ONLY HISTORY_BRIDGE with the balance taken from the T012 day-balance STORE (DBS_Load only). Observation only: no order is sent, changed,
+; cancelled or closed; no file is written, created or deleted; no new trade is needed; the current account balance is NEVER used as the start-of-day balance.
+; WHAT THIS PRESET SHOWS: the store record of the CURRENT Tirane day for this account is read. If it does not exist (the state after a LOAD that found NO_RECORD) the balance is UNKNOWN
+; and the bridge blocks with BALANCE_START_UNSET - there is NO fallback to InpDailyBalanceStart. The result formula and the classification stay UNSET, so the bridge also blocks with
+; POLICY_UNSET reasons; a valid balance does not bypass them (nor HISTORY_INCOMPLETE). Expected log: "T012 DAILY BALANCE source=STORE ... known=0 ... STORE_NONE: NO_RECORD ..." and
+; "T012 DAILY source=HISTORY_BRIDGE ... primary=HISTORY_INCOMPLETE reasons=HISTORY_INCOMPLETE|BALANCE_START_UNSET|POLICY_UNSET:result_formula|POLICY_UNSET:trade_classification".
+; A record is created ONLY by the separate script XauUsdT012BalanceStore with an explicit capture action (not proven on a real terminal yet); this EA never creates one.
+; BEFORE RUNNING: (1) set InpEntry / InpStopLoss to levels that pass the T008 checks for the CURRENT quote; (2) edit InpDailyEaMagic (> 0) and InpDailyServerOffsetSeconds to your demo
+; values (the placeholders are not facts). The store source needs InpDailySource=2 (HISTORY_BRIDGE); with any other daily source the preview stops with BALANCE_STORE_ONLY_WITH_HISTORY_BRIDGE.
+; MANUAL (InpDailyBalanceSource=0) and DAILY_SNAPSHOT behave exactly as before. The preview uses TimeGMT() (PC clock) and refuses the source in the Strategy Tester.
+InpDirection=1
+InpSignalId=HYP-T012-SIGNAL
+InpSetupId=HYP-T012-SETUP
+InpEntry=4300.00
+InpStopLoss=4290.00
+InpHasTarget=false
+InpTarget=0
+InpRiskBudget=100
+InpLotCap=10
+InpDataState=0
+InpSessionState=0
+InpSessionSource=0
+InpSessionStartMinute=0
+InpSessionEndMinute=1230
+InpSessionWeekdayMask=62
+InpFridayCloseEnabled=true
+InpFridayCloseMinute=1260
+InpNewsSource=0
+InpNewsState=0
+InpSpreadSource=0
+InpMaxSpreadPoints=-1
+InpSpreadState=0
+InpSignalUnused=0
+InpOpenPositions=-1
+InpTradesToday=-1
+InpExistingRisk=-1
+InpMaxPositions=-1
+InpMaxTrades=-1
+InpDailySource=2
+InpDailyBalanceSource=1
+InpDailySnapshotDay=0
+InpDailyBalanceStart=-1
+InpDailyResultKnown=false
+InpDailyClosedResult=0
+InpDailyWins=-1
+InpDailyConsecutiveLosses=-1
+InpDailyEaMagic=777
+InpDailyServerOffsetSeconds=7200
+InpDailyHistoryComplete=false
+InpDailyResultFormula=UNSET
+InpDailyClassification=UNSET
+InpCombinedRiskCap=-1
+InpModelTolerance=0.01
+InpMaxQuoteAgeSeconds=30

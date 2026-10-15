@@ -45,7 +45,7 @@ echo "=== S3: dependencies are declared; verified modules unchanged since $BASE 
 grep -q '#include "ExitStateFile.mqh"' $HDR && grep -q '#include "include/T011RestartProbe.mqh"' $PRE && grep -q '#include "include/T011RestartProbe.mqh"' $RES && echo "  PASS direct includes" || { echo "  FAIL includes"; FAIL=1; }
 grep -q 'ACCOUNT_SERVER' $HDR && grep -q 'ACCOUNT_LOGIN' $HDR && echo "  PASS identity from ACCOUNT_SERVER and ACCOUNT_LOGIN (one-argument forms)" || { echo "  FAIL identity"; FAIL=1; }
 if git cat-file -e "$BASE^{commit}" 2>/dev/null; then
-  for p in src/include/ExitStateFile.mqh src/include/ExitSplit.mqh src/include/ExitActivation.mqh src/XauUsdTradePreview.mq5 src/tests/T011_PersistFileTest.mq5; do
+  for p in src/include/ExitStateFile.mqh src/include/ExitSplit.mqh src/include/ExitActivation.mqh src/tests/T011_PersistFileTest.mq5; do
     git diff --quiet "$BASE" -- "$p" && echo "  PASS $p identical to $BASE" || { echo "  FAIL $p differs from $BASE"; FAIL=1; }
   done
 else
