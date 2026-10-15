@@ -207,6 +207,8 @@ Mbetet: orari nuk dërgon ende anulime ose mbyllje; persistence/catchup/lajmet t
 - [x] T013: ekzekutuesi i hyrjes LIMIT (vetëm transport/store fake; validim → leje e lidhur me planin → intent → një tentativë → lidhje e rezultatit → rikuperim/anulim pa ridërgim); Python 56 teste + 31 mutantë, kontrolle statike; kompilimi dhe MT5 UNVERIFIED; transporti real nuk ekzekutohet; i palidhur me sinjalin dhe me T011 (docs/T013-entry-executor.md)
 - [x] T014: ura kandidat T004 → STpPlan (TP_BuildPlan): çdo zgjedhje e shprehur, UNSET bllokon, WAIT_RETURN vetëm si kandidat pending, RETURN_OBSERVED/invalid/historik/i ardhshëm nuk bëhen sinjal, ID të qëndrueshme; pa leje, pa urdhër; sandbox, kompilimi/MT5 UNVERIFIED (docs/T014-setup-plan-bridge.md)
 - [x] T013 (e përcjellë): ekzekutuesi i hyrjes LIMIT — Codex 0/0 + 62 Python, MT5 EntryExecutorTest 170/0; transporti real i paprovuar
+- [x] T015: porta e hyrjes (plani T014 + TP_CheckPermit + kontrolli i humbjes së brokerit + rezultati ditor T012 i detyrueshëm → leje vetëm për të njëjtin plan → EntryExecutor); bllokimi nuk thërret ekzekutuesin; pa regjistrim sinjali; sandbox me transport fake, kompilimi/MT5 UNVERIFIED (docs/T015-entry-gate.md)
+- [x] T014 (e përcjellë): Codex 0/0 + 27 Python, MT5 SetupPlanBridgeTest 77/0
 
 ## T012 — kufijtë ditorë
 - [x] DailyLimits (pronari MT5 604/0) dhe DailyPreviewGate (200/0); preview hipotetik DAILY_LOSS_LIMIT i konfirmuar nga pronari.
