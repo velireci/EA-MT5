@@ -270,8 +270,9 @@ class Driver(unittest.TestCase):
         w.close()
 
     def test_the_executor_refusals_stay_blocks_and_keep_the_driver_armed(self):
-        w = World(sets={'pos.magic': 0})
-        w.init()
+        w = World()
+        self.assertTrue(w.init()[0])
+        w.tr.position.magic = 0                              # changed AFTER the arming proof: the executor keeps its own refusal
         res = w.tick(bid=2010.0)
         self.assertEqual((res.final, len(w.tr.sends), w.s.armed), (ex.BLOCKED, 0, True))
         self.assertIn('OWNERSHIP_NOT_PROVEN', res.reason)
@@ -283,6 +284,110 @@ class Driver(unittest.TestCase):
             fn(w)
             self.assertEqual(w.locks.held, set())
             w.close()
+
+
+    # ---- the arming proof (after the SELL 58917658014 test: a record whose position was already closed by its SL was armed): the REAL position is verified before arming
+    ARM_REFUSALS = (
+        ('position missing or unreadable', lambda tr: setattr(tr.position, 'found', False), 'POSITION_NOT_FOUND'),
+        ('position ticket 0', lambda tr: setattr(tr.position, 'ticket', 0), 'POSITION_NOT_FOUND'),
+        ('another identifier', lambda tr: setattr(tr.position, 'identifier', 8), 'POSITION_NOT_FOUND'),
+        ('another symbol', lambda tr: setattr(tr.position, 'symbol', 'EURUSD'), 'OWNERSHIP_NOT_PROVEN'),
+        ('manual position (magic 0)', lambda tr: setattr(tr.position, 'magic', 0), 'OWNERSHIP_NOT_PROVEN'),
+        ('another magic', lambda tr: setattr(tr.position, 'magic', 778), 'OWNERSHIP_NOT_PROVEN'),
+        ('opposite direction', lambda tr: setattr(tr.position, 'type', 1), 'OWNERSHIP_NOT_PROVEN'),
+        ('volume below the plan', lambda tr: setattr(tr.position, 'volume', 0.4), 'VOLUME_MISMATCH'),
+        ('volume above the plan', lambda tr: setattr(tr.position, 'volume', 0.6), 'VOLUME_MISMATCH'),
+        ('volume zero', lambda tr: setattr(tr.position, 'volume', 0.0), 'VOLUME_MISMATCH'),
+        ('volume NaN', lambda tr: setattr(tr.position, 'volume', float('nan')), 'VOLUME_MISMATCH'),
+        ('account unreadable', lambda tr: setattr(tr.account, 'read_ok', False), 'ACCOUNT_UNREADABLE'),
+        ('another login', lambda tr: setattr(tr.account, 'login', 99), 'ACCOUNT_IDENTITY_MISMATCH'),
+        ('another server', lambda tr: setattr(tr.account, 'server', 'Other-Server'), 'ACCOUNT_IDENTITY_MISMATCH'),
+    )
+
+    def test_a_record_whose_real_position_is_not_proven_is_not_armed_and_sends_nothing(self):
+        for side in (1, -1):
+            for name, change, why in self.ARM_REFUSALS:
+                with self.subTest('%s side %d' % (name, side)):
+                    w = World(side=side)
+                    change(w.tr)
+                    if side == -1 and name.startswith('opposite'):
+                        w.tr.position.type = 0          # a SELL record: the opposite of a SELL is a buy
+                    before = w.store.read(NAME)
+                    armed, flow = w.init()
+                    self.assertEqual((armed, flow, w.s.armed), (False, None, False))
+                    self.assertTrue(w.s.reason.startswith('INIT_POSITION_NOT_PROVEN') and why in w.s.reason, w.s.reason)
+                    self.assertEqual(w.store.read(NAME), before)          # nothing repaired, rewritten, deleted
+                    self.assertEqual(w.locks.held, set())
+                    for d in (0.0, 40.0):                                 # at and far beyond the level
+                        r = w.tick(bid=2010.0 + d, ask=2010.3 + d) if side == 1 else w.tick(bid=1989.7 - d, ask=1990.0 - d)
+                        self.assertEqual(r.final, ex.BLOCKED)
+                        self.assertTrue(r.reason.startswith('NOT_ARMED'), r.reason)
+                    self.assertEqual((len(w.tr.sends), w.s.process_calls), (0, 0))
+                    self.assertEqual(w.store.read(NAME), before)
+                    w.close()
+
+    def test_a_closed_position_gives_not_armed_even_when_the_stored_record_is_idle_and_the_level_is_reached(self):
+        w = World(side=-1)
+        w.tr.position.found = False                         # the SL closed it; the record is still IDLE on disk
+        armed, _ = w.init()
+        self.assertFalse(armed)
+        self.assertEqual(w.disk(), ('IDLE', 1))
+        self.assertEqual(w.tick(bid=1990.0, ask=1990.0).final, ex.BLOCKED)
+        self.assertEqual((len(w.tr.sends), w.s.process_calls), (0, 0))
+        w.close()
+
+    def test_the_arming_proof_ignores_the_live_sl_and_never_replaces_the_stored_initial_sl(self):
+        for sl in (0.0, 2000.0, 1990.0, 1.0):                  # absent, break even, moved, absurd: the live SL is no part of the proof
+            w = World()
+            w.tr.position.sl = sl
+            before = w.store.read(NAME)
+            armed, _ = w.init()
+            self.assertTrue(armed, sl)
+            self.assertEqual(w.store.read(NAME), before)
+            self.assertEqual((w.s.level, w.tick(bid=2010.0).final), (2010.0, ex.SENT_MAPPED))
+            self.assertEqual(w.tr.sends[0].price, 2010.0)
+            w.close()
+
+    def test_the_volume_proof_uses_the_stored_grid_not_float_equality(self):
+        w = World()
+        w.tr.position.volume = 0.5 + 1e-12
+        self.assertTrue(w.init()[0])
+        w.close()
+        w = World()
+        w.tr.position.volume = 0.5 + 0.004                   # less than half a stored step is still the same volume; more is not
+        self.assertTrue(w.init()[0])
+        w.close()
+        w = World()
+        w.tr.position.volume = 0.5 + 0.006
+        self.assertFalse(w.init()[0])
+        w.close()
+
+    def test_the_position_proof_is_not_applied_to_request_bearing_records_which_keep_the_existing_recovery(self):
+        for found in (True, False):
+            w = World(start=gx.S_PEND_MAP)
+            w.tr.position.found = found
+            armed, flow = w.init(RAW_FULL)
+            self.assertFalse(armed)
+            self.assertEqual(flow.final, fl.DONE)
+            self.assertTrue(w.s.reason.startswith('INIT_RECOVERY'), w.s.reason)
+            self.assertEqual(len(w.tr.sends), 0)
+            w.close()
+
+    def test_the_position_is_read_once_per_init_and_not_at_all_when_the_file_is_unusable(self):
+        w = World(start=gx.S_MISSING)
+        reads = []
+        orig = w.tr.find_position
+        w.tr.find_position = lambda i: (reads.append(i), orig(i))[1]
+        self.assertFalse(w.init()[0])
+        self.assertEqual(reads, [])
+        w.close()
+        w = World()
+        reads = []
+        orig = w.tr.find_position
+        w.tr.find_position = lambda i: (reads.append(i), orig(i))[1]
+        self.assertTrue(w.init()[0])
+        self.assertEqual(reads, [7])
+        w.close()
 
 
 class Sources(unittest.TestCase):
@@ -312,10 +417,19 @@ class Sources(unittest.TestCase):
         self.assertLess(init.index('EX_Reconcile('), init.index('s.armed=true;'))
         self.assertLess(init.index('if(!cfg.enabled)'), init.index('EL_Acquire('))
         self.assertNotIn('EX_Process', init)
+        self.assertLess(init.index('INIT_PLAN_NOT_R_GEOM'), init.index('ETD_PositionProof('))
+        self.assertLess(init.index('ETD_PositionProof('), init.index('s.armed=true;'))
+        proof = d[d.index('string ETD_PositionProof('):d.index('bool ETD_Init(')]
+        self.assertLess(proof.index('tr.ReadAccount('), proof.index('tr.FindPosition('))
+        self.assertNotIn('.sl', proof + init)
+        self.assertNotIn('Send', proof + init)
+        for need in ('pos.found', 'pos.ticket==0', 'pos.identifier!=id.position_id', 'pos.symbol!=id.symbol', 'pos.magic!=cfg.ea_magic', 'pos.type!=', 'st.volume_initial', 'o.plan_vol_step'):
+            self.assertIn(need, proof)
 
     def test_the_python_reference_mirrors_the_header_order(self):
         src = _read('tests', 't011_driver_reference.py')
         self.assertLess(src.index('flow = fl.run('), src.index('s.armed, s.direction, s.level, s.reason = True'))
+        self.assertLess(src.index('tr.find_position('), src.index('s.armed, s.direction, s.level, s.reason = True'))
         tick = src[src.index('def tick('):src.index('def timer(')]
         self.assertLess(tick.index('o = store.load('), tick.index('ex.process('))
 
@@ -364,6 +478,18 @@ class Mutants(unittest.TestCase):
             ('request-bearing record arms the tick path', [("        if o.verdict != p.USABLE_IDLE:\n            flow = fl.run(", "        if False:\n            flow = fl.run(")]),
             ('recovery skipped', [("            flow = fl.run(store, name, identity, raw_a, raw_b)       # RECOVERY BEFORE ACTIVATION; never arms the tick path", "            flow = fl.FlowResult(fl.STILL_OPEN)")]),
             ('typed record arms', [("if not o.plan_set or o.plan_rpol != ex.RPOL_R_GEOM or cfg.r_policy != ex.RPOL_R_GEOM:", "if not o.plan_set:")]),
+            ('arming without the position proof', [("        why = position_proof(cfg, tr, identity, o.state, o)\n        if why:", "        why = ''\n        if why:")]),
+            ('proof without the found check', [("    if not pos.found or pos.ticket == 0 or pos.identifier != identity.position_id:", "    if pos.ticket == 0 or pos.identifier != identity.position_id:")]),
+            ('proof without the ticket check', [("if not pos.found or pos.ticket == 0 or", "if not pos.found or")]),
+            ('proof without the identifier check', [("pos.ticket == 0 or pos.identifier != identity.position_id:", "pos.ticket == 0:")]),
+            ('proof without the magic check', [("or pos.magic != cfg.ea_magic or", "or")]),
+            ('proof without the symbol check', [("pos.symbol != identity.symbol or ", "")]),
+            ('proof without the direction check', [(" or pos.type != (0 if state.direction == 1 else 1):", ":")]),
+            ('proof without the volume check', [("    if not o.plan_vol_step > 0.0 or not abs(pos.volume - state.volume_initial) < o.plan_vol_step / 2.0:", "    if False:")]),
+            ('volume compared with a one-sided tolerance', [("not abs(pos.volume - state.volume_initial) < o.plan_vol_step / 2.0", "not pos.volume - state.volume_initial < o.plan_vol_step / 2.0")]),
+            ('proof without the account read check', [("    if not acct.read_ok:\n        return 'ACCOUNT_UNREADABLE'\n", "")]),
+            ('proof without the account identity', [("    if acct.login != identity.login or acct.server != identity.server:\n        return 'ACCOUNT_IDENTITY_MISMATCH'\n", "")]),
+            ('proof compares the live SL with the record', [("    return ''\n\n\ndef init", "    if pos.sl != 1995.0:\n        return 'SL'\n    return ''\n\n\ndef init")]),
             ('disabled arms', [("    if not cfg.enabled:\n        s.reason = 'INIT_DISABLED", "    if False:\n        s.reason = 'INIT_DISABLED")]),
             ('still armed after a send', [("            s.armed, s.reconcile_due, s.reason = False, True, 'SENT: reconcile on the timer'", "            s.armed, s.reconcile_due, s.reason = True, True, 'SENT: reconcile on the timer'")]),
             ('lock not released after the tick', [("    finally:\n        locks.release(key)\n\n\ndef timer", "    finally:\n        pass\n\n\ndef timer")]),

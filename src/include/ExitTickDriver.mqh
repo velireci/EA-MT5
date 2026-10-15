@@ -5,7 +5,7 @@
 //  * ONE lock (ExitInstanceLock, key EL_Key(login, position)) wraps everything that reads or changes the record or could send: init/recovery, a tick that reaches the level, the reconcile
 //    timer and the explicit registration. Any failure to take the lock = zero sends and no I/O.
 //  * ETD_Init runs the RECOVERY (the existing restart flow ERF_Run through EX_Reconcile) BEFORE any quote is allowed: a request-bearing record is reconciled and never arms the tick path.
-//    Only a USABLE_IDLE record that carries an R_GEOM plan arms it. A missing / unusable / older-version file arms nothing and is never created or changed here.
+//    Only a USABLE_IDLE record that carries an R_GEOM plan AND whose real position is proven (account, identifier, symbol, magic, direction, volume = the stored initial volume) arms it. A missing / unusable / older-version file arms nothing and is never created or changed here.
 //  * ETD_Tick never calls EX_Process for a record that is not IDLE (it re-loads the record under the lock first); below the level it does no I/O at all (the same comparison as
 //    EA_OnQuote: BUY Bid >= level, SELL Ask <= level, the level cached from the record; EA_OnQuote remains the authority).
 //  * After a send, an uncertainty or a latch the tick path is disarmed; the timer only reconciles (read-only terminal reads + the flow's own save), it never produces a request.
@@ -72,6 +72,24 @@ bool ETD_Register(const SExConfig &cfg,CExitTransport *tr,SExRuntime &rt,const s
    return(ok);
   }
 
+// ---- the arming proof: the REAL position must exist and be the robot's before the tick path is armed (account identity, position by identifier, symbol, magic, direction, volume against the
+// stored plan). The live SL is NOT part of the proof and never replaces the stored initial SL. Returns "" when proven, else the reason. Read-only: no repair, no retry, no write.
+string ETD_PositionProof(const SExConfig &cfg,CExitTransport *tr,const SEsIdentity &id,const SEaState &st,const SEsRestore &o)
+  {
+   SExAccount acct;
+   tr.ReadAccount(acct);
+   if(!acct.read_ok) return("ACCOUNT_UNREADABLE");
+   if(acct.login!=id.login || acct.server!=id.server) return("ACCOUNT_IDENTITY_MISMATCH");
+   SExPosition pos;
+   tr.FindPosition(id.position_id,pos);
+   if(!pos.found || pos.ticket==0 || pos.identifier!=id.position_id) return("POSITION_NOT_FOUND: the position of the record is absent or unreadable (it may already be closed)");
+   if(cfg.ea_magic<=0 || pos.symbol!=id.symbol || pos.magic!=cfg.ea_magic || pos.type!=(st.direction==1 ? 0 : 1))
+      return("OWNERSHIP_NOT_PROVEN: symbol, magic or direction differ from the record / configuration");
+   if(!(o.plan_vol_step>0.0) || !(MathAbs(pos.volume-st.volume_initial)<o.plan_vol_step/2.0))
+      return("VOLUME_MISMATCH: the position volume differs from the stored initial volume");
+   return("");
+  }
+
 // ---- init: recovery first, then (only for an IDLE R_GEOM record) arming. Returns true when the tick path is armed.
 bool ETD_Init(const SExConfig &cfg,CExitTransport *tr,const string name,const SEsIdentity &id,const SXaRaw &raw_a,const SXaRaw &raw_b,SEtdState &s,SErfResult &flow)
   {
@@ -112,6 +130,13 @@ bool ETD_Init(const SExConfig &cfg,CExitTransport *tr,const string name,const SE
    if(!o.plan_set || (int)o.plan_rpol!=(int)EX_RPOL_R_GEOM || cfg.r_policy!=EX_RPOL_R_GEOM)
      {
       s.reason="INIT_PLAN_NOT_R_GEOM: the record carries no R_GEOM plan or the configured policy differs; nothing is armed";
+      EL_Release(key,held);
+      return(false);
+     }
+   string proof=ETD_PositionProof(cfg,tr,id,st,o);
+   if(proof!="")
+     {
+      s.reason="INIT_POSITION_NOT_PROVEN: "+proof+"; nothing is armed, nothing is sent, the record is untouched";
       EL_Release(key,held);
       return(false);
      }

@@ -69,7 +69,7 @@ PYEOF
 echo "=== S4: protected modules unchanged since $BASE ==="
 if git cat-file -e "$BASE^{commit}" 2>/dev/null; then
   for p in src/include/DailyBridge.mqh src/include/DailyLimits.mqh src/include/DailyHistory.mqh src/include/DailyPreviewGate.mqh src/include/SessionPolicy.mqh src/XauUsdTradePreview.mq5 src/XauUsdDailyHistoryDiag.mq5 \
-           src/include/ExitStateCodec.mqh src/include/ExitStateFile.mqh src/include/ExitInstanceLock.mqh src/include/ExitExecutor.mqh src/include/ExitTickDriver.mqh src/include/ExitRestartFlow.mqh src/include/ExitTransportReal.mqh \
+           src/include/ExitStateCodec.mqh src/include/ExitStateFile.mqh src/include/ExitInstanceLock.mqh src/include/ExitExecutor.mqh src/include/ExitRestartFlow.mqh src/include/ExitTransportReal.mqh \
            src/XauUsdT011ExitManager.mq5 src/XauUsdT011ExitRegister.mq5 src/XauUsdT011DemoOpenPosition.mq5 src/XauUsdT011DemoHarness.mq5 src/presets/XauUsdT011ExitDemoSell_01_open.set \
            src/presets/XauUsdT011ExitDemoSell_02_register.set src/presets/XauUsdT011ExitDemoSell_03_manager.set; do
     git diff --quiet "$BASE" -- "$p" && echo "  PASS $p identical to $BASE" || { echo "  FAIL $p differs from $BASE"; FAIL=1; }

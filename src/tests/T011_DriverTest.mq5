@@ -367,6 +367,96 @@ void TestRestartAndTimer(void)
    ETD_Tick(cfg,GetPointer(t),rt2,FN,Ident(),q,s2,res);
    Check(!armed && flow.final_state==ERF_DONE && t.sends==1,"restart after the send: reconciled first, no second request");
   }
+// the arming proof (after the SELL 58917658014 test: a record whose position the SL had already closed was armed): the REAL position is verified before arming; every failure = NOT armed, zero sends
+#define N_ARM_KINDS 15
+string ArmKindName(const int k)
+  {
+   string n[N_ARM_KINDS]={"position missing","ticket 0","another identifier","another symbol","magic 0","another magic","opposite direction","volume below the plan","volume above the plan","volume zero","volume NaN","account unreadable","another login","another server","half a step less 0.004 is still equal"};
+   return(n[k]);
+  }
+void ApplyArmKind(CFakeTransport &t,const int k)
+  {
+   switch(k)
+     {
+      case 0: t.position.found=false; break;
+      case 1: t.position.ticket=0; break;
+      case 2: t.position.identifier=8; break;
+      case 3: t.position.symbol="EURUSD"; break;
+      case 4: t.position.magic=0; break;
+      case 5: t.position.magic=778; break;
+      case 6: t.position.type=1; break;
+      case 7: t.position.volume=0.4; break;
+      case 8: t.position.volume=0.6; break;
+      case 9: t.position.volume=0.0; break;
+      case 10: t.position.volume=MathSqrt(-1.0); break;
+      case 11: t.account.read_ok=false; break;
+      case 12: t.account.login=99; break;
+      case 13: t.account.server="Other-Server"; break;
+      default: t.position.volume=0.504; break;          // the only kind that still arms
+     }
+  }
+void TestArmingProof(void)
+  {
+   for(int k=0;k<N_ARM_KINDS;k++)
+     {
+      SExConfig cfg;
+      CFakeTransport t;
+      SExQuote q;
+      SEtdState s;
+      SErfResult flow;
+      SXaRaw nyet;
+      BuildRaw(nyet,0);
+      World(cfg,t,q);
+      Prepare(S_GEOM);
+      ApplyArmKind(t,k);
+      int g0;
+      string before=DiskStatus(g0);
+      bool armed=ETD_Init(cfg,GetPointer(t),FN,Ident(),nyet,nyet,s,flow);
+      string tag=ArmKindName(k)+": ";
+      if(k==N_ARM_KINDS-1)
+        {
+         Check(armed && s.armed,tag+"within half a stored step the volume is proven and the record arms");
+         continue;
+        }
+      int g;
+      SExRuntime rt;
+      EX_RuntimeInit(rt);
+      SExResult res;
+      q.bid=2010.0;
+      q.ask=2010.3;
+      bool sent=ETD_Tick(cfg,GetPointer(t),rt,FN,Ident(),q,s,res);
+      q.bid=2050.0;
+      q.ask=2050.3;
+      sent=sent || ETD_Tick(cfg,GetPointer(t),rt,FN,Ident(),q,s,res);
+      Check(!armed && !s.armed && Has(s.reason,"INIT_POSITION_NOT_PROVEN") && !sent && t.sends==0 && s.process_calls==0 && Has(res.reason,"NOT_ARMED") && res.final_state==EX_BLOCKED,tag+"NOT armed, a tick at and beyond the level is NOT_ARMED, zero sends, executor never called");
+      Check(DiskStatus(g)==before && g==g0 && LockFree(),tag+"the IDLE record is untouched (no repair, no deletion) and the lock is released");
+     }
+   // the live SL is no part of the proof and the stored initial SL is never replaced
+   SExConfig cfg;
+   CFakeTransport t;
+   SExQuote q;
+   SEtdState s;
+   SErfResult flow;
+   SXaRaw nyet;
+   BuildRaw(nyet,0);
+   World(cfg,t,q);
+   Prepare(S_GEOM);
+   t.position.sl=2000.0;
+   bool armed=ETD_Init(cfg,GetPointer(t),FN,Ident(),nyet,nyet,s,flow);
+   SExRuntime rt;
+   EX_RuntimeInit(rt);
+   SExResult res;
+   bool sent=ETD_Tick(cfg,GetPointer(t),rt,FN,Ident(),q,s,res);
+   Check(armed && s.level==2010.0 && sent && t.sends==1 && t.last_request.price==2010.0,"a live SL at break even: still armed, the level comes from the stored basis");
+   // a request-bearing record keeps the existing recovery whatever the position says
+   World(cfg,t,q);
+   Prepare(S_PEND_MAP);
+   t.position.found=false;
+   SXaRaw full;
+   BuildRaw(full,1);
+   armed=ETD_Init(cfg,GetPointer(t),FN,Ident(),full,full,s,flow);
+   Check(!armed && Has(s.reason,"INIT_RECOVERY") && flow.final_state==ERF_DONE && t.sends==0,"a request-bearing record goes through the recovery, not through the position proof");
+  }
 void TestRegister(void)
   {
    SExConfig cfg;
@@ -396,6 +486,7 @@ void OnStart()
    TestTick();
    TestBreakEvenAndChangedRecord();
    TestRestartAndTimer();
+   TestArmingProof();
    TestRegister();
    Clean();
    GlobalVariableDel(KEY);

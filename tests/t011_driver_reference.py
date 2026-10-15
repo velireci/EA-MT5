@@ -34,6 +34,24 @@ def register(cfg, tr, rt, store, name, identity, q, locks):
         locks.release(key)
 
 
+def position_proof(cfg, tr, identity, state, o):
+    """the REAL position must exist and be the robot's before the tick path is armed: account identity, the position by identifier, symbol, magic, direction and the volume against the stored plan.
+    The live SL is NOT part of the proof and never replaces the stored initial SL. Returns '' when proven, else the reason (no repair, no retry, no write)."""
+    acct = tr.read_account()
+    if not acct.read_ok:
+        return 'ACCOUNT_UNREADABLE'
+    if acct.login != identity.login or acct.server != identity.server:
+        return 'ACCOUNT_IDENTITY_MISMATCH'
+    pos = tr.find_position(identity.position_id)
+    if not pos.found or pos.ticket == 0 or pos.identifier != identity.position_id:
+        return 'POSITION_NOT_FOUND: the position of the record is absent or unreadable (it may already be closed)'
+    if cfg.ea_magic <= 0 or pos.symbol != identity.symbol or pos.magic != cfg.ea_magic or pos.type != (0 if state.direction == 1 else 1):
+        return 'OWNERSHIP_NOT_PROVEN: symbol, magic or direction differ from the record / configuration'
+    if not o.plan_vol_step > 0.0 or not abs(pos.volume - state.volume_initial) < o.plan_vol_step / 2.0:
+        return 'VOLUME_MISMATCH: the position volume differs from the stored initial volume'
+    return ''
+
+
 def init(cfg, tr, store, name, identity, raw_a, raw_b, s, locks):
     """returns (armed, flow result or None)"""
     s.__dict__.update(State().__dict__)
@@ -57,6 +75,10 @@ def init(cfg, tr, store, name, identity, raw_a, raw_b, s, locks):
             return False, flow
         if not o.plan_set or o.plan_rpol != ex.RPOL_R_GEOM or cfg.r_policy != ex.RPOL_R_GEOM:
             s.reason = 'INIT_PLAN_NOT_R_GEOM: the record carries no R_GEOM plan or the configured policy differs; nothing is armed'
+            return False, None
+        why = position_proof(cfg, tr, identity, o.state, o)
+        if why:
+            s.reason = 'INIT_POSITION_NOT_PROVEN: ' + why + '; nothing is armed, nothing is sent, the record is untouched'
             return False, None
         s.armed, s.direction, s.level, s.reason = True, o.state.direction, o.state.level, 'ARMED'
         return True, None
