@@ -209,7 +209,7 @@ bool ESC_CloseTo(const double a,const double b)
 // "" when the record is valid, otherwise the first reason
 string ESC_Validate(const SEsRecord &r)
   {
-   if(r.generation<1 || r.generation>ESC_MAX_GEN) return("INVALID_GENERATION");
+   if(r.generation<1) return("INVALID_GENERATION");           // int: the upper bound ESC_MAX_GEN is enforced at parse time, before the cast
    if(StringLen(r.id.server)<1 || StringLen(r.id.server)>128) return("INVALID_IDENTITY: server");
    if(r.id.login<1) return("INVALID_IDENTITY: login");
    if(StringLen(r.id.symbol)<1 || StringLen(r.id.symbol)>32) return("INVALID_IDENTITY: symbol");
@@ -422,6 +422,7 @@ bool ESC_Decode(const string text,SEsRecord &rec,string &reason)
    if(!ESC_Unescape(v[13],request_id)) {reason="BAD_STRING: REQUEST_ID"; return(false);}
    if(!ESC_Unescape(v[20],why)) {reason="BAD_STRING: REASON"; return(false);}
    if(status<0 || status>(long)EA_ST_BLOCKED || (bound!=0 && bound!=1) || (mcomp!=0 && mcomp!=1)) {reason="BAD_ENUM"; return(false);}
+   if(gen<1 || gen>ESC_MAX_GEN) {reason="INVALID_GENERATION"; return(false);}
    rec.generation=(int)gen;
    rec.id.server=server;
    rec.id.login=login;
@@ -444,7 +445,6 @@ bool ESC_Decode(const string text,SEsRecord &rec,string &reason)
    rec.state.reason=why;
    rec.send_phase=(int)phase;
    rec.map_complete=(mcomp==1);
-   if(gen>ESC_MAX_GEN || gen<0) {reason="INVALID_GENERATION"; return(false);}
    reason=ESC_Validate(rec);
    return(reason=="");
   }

@@ -387,6 +387,27 @@ class Mql(unittest.TestCase):
         self.assertIsNotNone(m)
         self.assertEqual(m.group(0), fx.emit_mql())
 
+    def test_empty_reason_expectation_means_no_condition_in_the_mql_test(self):
+        t = _read('src', 'tests', 'T011_PersistTest.mq5')
+        self.assertIn('if(expected=="") return(true);', t)
+        self.assertIn('Check(ReasonOk(X_REASON[i],o.reason,st.reason)', t)
+        self.assertNotIn('Check(StringFind(o.reason,X_REASON[i])', t)           # the raw search that failed on an empty expectation
+        self.assertIn('TestReasonOk();', t)
+        # the Python table has the same meaning: '' in text is True, and rows with a non-empty expectation really search
+        empties = [r['name'] for r in fx.ROWS if r['reason'] == '']
+        self.assertTrue(empties and all(r['reason'] for r in fx.ROWS if r['verdict'] == p.RECOVERY_REQUIRED))
+        self.assertTrue(any(r['reason'] for r in fx.ROWS))
+
+    def test_int_generation_and_file_size_are_bounded_before_conversion(self):
+        c = _read('src', 'include', 'ExitStateCodec.mqh')
+        f = _read('src', 'include', 'ExitStateFile.mqh')
+        self.assertNotIn('r.generation>ESC_MAX_GEN', c)                         # an int is never compared with INT_MAX (always false)
+        self.assertLess(c.index('if(gen<1 || gen>ESC_MAX_GEN)'), c.index('rec.generation=(int)gen;'))
+        self.assertIn('ulong size=FileSize(h);', f)
+        self.assertLess(f.index('size>(ulong)(ESC_MAX_TEXT+16)'), f.index('(int)size'))
+        self.assertIsNone(re.search(r'(?<![a-z])long size=FileSize', f))
+        self.assertIn('cur.generation>=ESC_MAX_GEN', f)                         # no int overflow of generation+1
+
     def test_codec_constants_agree_with_the_python_reference(self):
         h = _read('src', 'include', 'ExitStateCodec.mqh')
         self.assertIn('#define ESC_MAX_ORDERS %d' % p.MAX_ORDERS, h)

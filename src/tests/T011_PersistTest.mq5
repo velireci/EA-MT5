@@ -49,6 +49,21 @@ bool Quote(SEaState &s,SEaResult &r,const double bid)
   {
    return(EA_OnQuote(s,POS,1,LEVEL,bid,bid+0.3,VINIT,VINIT,0.01,STEP,100.0,r));
   }
+// an EMPTY expectation means "no condition on the text" (as in the Python table); a non-empty one must be found in one of the two reasons
+bool ReasonOk(const string expected,const string reason_a,const string reason_b)
+  {
+   if(expected=="") return(true);
+   return(StringFind(reason_a,expected)>=0 || StringFind(reason_b,expected)>=0);
+  }
+void TestReasonOk(void)
+  {
+   Check(ReasonOk("","anything","else"),"an empty expectation puts no condition on the reason");
+   Check(ReasonOk("","",""),"an empty expectation accepts empty reasons");
+   Check(ReasonOk("MISSING","MISSING: no state file",""),"a non-empty expectation is found in the first reason");
+   Check(ReasonOk("MISSING","","RECOVERY_REQUIRED: MISSING"),"a non-empty expectation is found in the second reason");
+   Check(!ReasonOk("MISSING","other","reasons"),"a non-empty expectation that is absent fails");
+   Check(!ReasonOk("MISSING","",""),"a non-empty expectation fails against empty reasons");
+  }
 void RunRows(void)
   {
    for(int i=0;i<NROWS;i++)
@@ -67,7 +82,7 @@ void RunRows(void)
       Check((int)st.status==X_STATUS[i],tag+"status "+EA_StateName(st.status));
       Check((int)o.new_request_allowed==X_NEWREQ[i],tag+"new_request_allowed "+(string)o.new_request_allowed);
       Check((int)o.reconcile_required==X_RECON[i],tag+"reconcile_required "+(string)o.reconcile_required);
-      Check(StringFind(o.reason,X_REASON[i])>=0 || StringFind(st.reason,X_REASON[i])>=0,tag+"reason contains '"+X_REASON[i]+"' got '"+o.reason+"'");
+      Check(ReasonOk(X_REASON[i],o.reason,st.reason),tag+"reason contains '"+X_REASON[i]+"' got '"+o.reason+"'");
       if(X_CONF[i]>0) Check(st.confirmations==X_CONF[i],tag+"confirmations preserved "+IntegerToString(st.confirmations));
       if(X_EXEC[i]>0) Check(st.executed_steps==X_EXEC[i],tag+"executed steps preserved");
       if(!(X_VERDICT[i]==3 && X_STATUS[i]==4))
@@ -264,6 +279,7 @@ void TestCrc(void)
   }
 void OnStart()
   {
+   TestReasonOk();
    RunRows();
    TestRoundTripOfRealStates();
    TestNoRoundingAndInvalidRecords();

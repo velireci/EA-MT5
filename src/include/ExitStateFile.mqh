@@ -25,19 +25,20 @@ bool ESF_ReadAll(const string name,string &text)
    ResetLastError();
    int h=FileOpen(name,FILE_READ|FILE_BIN);
    if(h==INVALID_HANDLE) return(false);
-   long size=FileSize(h);
-   if(size<0 || size>ESC_MAX_TEXT+16)
+   ulong size=FileSize(h);
+   if(size>(ulong)(ESC_MAX_TEXT+16))                 // checked BEFORE the conversion to int
      {
       FileClose(h);
       return(false);
      }
+   int isize=(int)size;
    uchar a[];
    int n=0;
-   if(size>0)
-      n=(int)FileReadArray(h,a,0,(int)size);
+   if(isize>0)
+      n=(int)FileReadArray(h,a,0,isize);
    FileClose(h);
-   if(n!=(int)size) return(false);
-   text=(size>0 ? CharArrayToString(a,0,n) : "");
+   if(n!=isize) return(false);
+   text=(isize>0 ? CharArrayToString(a,0,n) : "");
    return(true);
   }
 
@@ -91,7 +92,7 @@ bool ESF_Save(const string name,const SEsRecord &rec,string &reason)
          reason="EXISTING_FILE_OTHER_IDENTITY";
          return(false);
         }
-      if(rec.generation!=cur.generation+1)
+      if(cur.generation>=ESC_MAX_GEN || rec.generation!=cur.generation+1)
         {
          reason=StringFormat("GENERATION_NOT_NEXT: %d after %d",rec.generation,cur.generation);
          return(false);
