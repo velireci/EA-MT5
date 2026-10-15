@@ -9,7 +9,7 @@ import exposure_reference as ex  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MAGIC = 777
-SCENARIOS = ['inputs_unset_block', 'account_not_separable', 'ownership_by_magic', 'pending_policy', 'risk_from_broker', 'risk_unknown_never_zero', 'lists_incomplete', 'list_changes_during_read', 'pending_risk_separate', 'gate_mapping']
+SCENARIOS = ['inputs_unset_block', 'account_not_separable', 'ownership_by_magic', 'pending_policy', 'risk_from_broker', 'risk_unknown_never_zero', 'lists_incomplete', 'list_changes_during_read', 'fill_between_reads', 'pending_risk_separate', 'gate_mapping']
 
 
 def pos(ticket, magic=MAGIC, kind=0, vol=0.1, price=100.0, sl=99.0):
@@ -109,6 +109,28 @@ class Blocks(unittest.TestCase):
         r = run(ex.Port(positions=[pos(1)], orders=[od(2)], change_positions=lambda cur: list(cur), change_orders=lambda cur: list(cur)))
         self.assertTrue(r.ok, 'identical reads are stable')
 
+    def test_fill_between_reads(self):
+        for kind in (0, 1):      # BUY and SELL pending order filled while the account is being read
+            sl = 99.0 if kind == 0 else 101.0
+            for fill_at in (2, 3, 4):
+                port = ex.Port(orders=[od(7, kind=kind, sl=sl)], fill_at=fill_at, fill_ticket=7)
+                r = run(port)
+                label = 'kind %d fill before read %d' % (kind, fill_at)
+                self.assertFalse(r.ok, label)
+                self.assertIn(r.reason, ('POSITIONS_CHANGED', 'ORDERS_CHANGED'), label)
+                self.assertEqual((r.gate_positions(), r.gate_risk()), (-1, -1.0), label + ': never a confirmed zero')
+            # a fill before the first read or after the last one is a consistent snapshot
+            before = run(ex.Port(orders=[od(7, kind=kind, sl=sl)], fill_at=1, fill_ticket=7))
+            self.assertTrue(before.ok)
+            self.assertEqual((before.open_positions, before.pending), (1, 0))
+            after = run(ex.Port(orders=[od(7, kind=kind, sl=sl)], fill_at=5, fill_ticket=7))
+            self.assertTrue(after.ok)
+            self.assertEqual((after.open_positions, after.pending), (1, 1))
+        # the four reads are positions, orders, positions, orders
+        port = ex.Port(positions=[pos(1)], orders=[od(2)])
+        run(port)
+        self.assertEqual((port.pos_reads, port.ord_reads, port.reads), (2, 2, 4))
+
     def test_pending_risk_separate(self):
         port = ex.Port(positions=[pos(1)], orders=[od(2, kind=1, vol=0.1, price=100.0, sl=101.0)])      # position risk 10, pending risk 10
         both = run(port, ex.PEND_COUNT, risk=ex.RISK_INCLUDE)
@@ -174,7 +196,7 @@ class Mutants(unittest.TestCase):
         try:
             suite = unittest.TestSuite()
             for n in ('test_inputs_unset_block', 'test_account_not_separable', 'test_ownership_by_magic', 'test_pending_policy', 'test_risk_from_broker', 'test_risk_unknown_never_zero',
-                      'test_lists_incomplete', 'test_list_changes_during_read', 'test_pending_risk_separate', 'test_gate_mapping'):
+                      'test_lists_incomplete', 'test_list_changes_during_read', 'test_fill_between_reads', 'test_pending_risk_separate', 'test_gate_mapping'):
                 suite.addTest(Blocks(n))
             res = unittest.TestResult()
             suite.run(res)
@@ -188,13 +210,13 @@ class Mutants(unittest.TestCase):
                 ("    r.open_positions = len(owned_pos) + (r.pending if pend_policy == PEND_COUNT else 0)", "    r.open_positions = len(owned_pos) + r.pending"),
                 ("    risk_items = [('position', p) for p in owned_pos] + ([('order', o) for o in owned_ord] if risk_policy == RISK_INCLUDE else [])", "    risk_items = [('position', p) for p in owned_pos] + ([('order', o) for o in owned_ord] if pend_policy == PEND_COUNT else [])"),
                 ("    if owned_ord and risk_policy == RISK_UNSET:", "    if False:"),
-                ("    if not stable:\n        r.reason = 'POSITIONS_CHANGED'", "    if False:\n        r.reason = 'POSITIONS_CHANGED'"),
-                ("    if not ostable:\n        r.reason = 'ORDERS_CHANGED'", "    if False:\n        r.reason = 'ORDERS_CHANGED'"),
+                ("    if not _same(positions, positions2):\n        r.reason = 'POSITIONS_CHANGED'", "    if False:\n        r.reason = 'POSITIONS_CHANGED'"),
+                ("    if not _same(orders, orders2):\n        r.reason = 'ORDERS_CHANGED'", "    if False:\n        r.reason = 'ORDERS_CHANGED'"),
                 ("total += max(0.0, -profit)", "total += -profit"),
                 ("r.risk_known, r.risk_reason = False, '%s %d: no usable SL / price / volume' % (kind, item.ticket)\n            break", "continue"),
                 ("    r.existing_risk = total if r.risk_known else -1.0", "    r.existing_risk = total"),
-                ("    if not ocomplete or len(orders) > 64:", "    if False:"),
-                ("    if not complete or len(positions) > 64:", "    if False:"),
+                ("    if not (ocomplete and ocomplete2) or len(orders) > 64 or len(orders2) > 64:", "    if False:"),
+                ("    if not (pcomplete and pcomplete2) or len(positions) > 64 or len(positions2) > 64:", "    if False:"),
                 ("pend_policy not in (PEND_COUNT, PEND_IGNORE)", "pend_policy not in (PEND_COUNT, PEND_IGNORE, PEND_UNSET)")]
         for old, new in muts:
             self.assertGreater(self._run_mutant(old, new), 0, 'not caught: ' + old)

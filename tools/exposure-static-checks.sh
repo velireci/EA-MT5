@@ -28,14 +28,14 @@ for w in ('OrderSend', 'OrderCheck', 'OrderCalcProfit', 'PositionClose', 'Positi
     assert w not in t, w
 assert re.findall(r'#include "([^"]+)"', t) == [], 'the core includes nothing'
 c = t[t.index('void EX_Compute('):]
-order = ['INPUT_UNSET', 'port.Account(', 'ACCOUNT_UNREADABLE', 'mode!=EX_HEDGING', 'port.Positions(pos,', 'POSITIONS_INCOMPLETE', 'port.Positions(pos2,', 'EX_SameList(pos,np,pos2,np2)', 'POSITIONS_CHANGED',
-         'pos[i].magic!=magic', 'POSITION_TYPE_UNKNOWN', 'port.Orders(ord,', 'ORDERS_INCOMPLETE', 'port.Orders(ord2,', 'EX_SameList(ord,no,ord2,no2)', 'ORDERS_CHANGED', 'ord[i].magic!=magic', 'ORDER_TYPE_UNKNOWN',
+order = ['INPUT_UNSET', 'port.Account(', 'ACCOUNT_UNREADABLE', 'mode!=EX_HEDGING', 'port.Positions(pos,', 'port.Orders(ord,', 'port.Positions(pos2,', 'port.Orders(ord2,', 'POSITIONS_INCOMPLETE', 'ORDERS_INCOMPLETE',
+         'EX_SameList(pos,np,pos2,np2)', 'POSITIONS_CHANGED', 'EX_SameList(ord,no,ord2,no2)', 'ORDERS_CHANGED', 'pos[i].magic!=magic', 'POSITION_TYPE_UNKNOWN', 'ord[i].magic!=magic', 'ORDER_TYPE_UNKNOWN',
          'r.ok=true;', 'r.open_positions=nown_pos+(pend_policy==EX_PEND_COUNT ? nown_ord : 0)', 'nown_ord>0 && risk_policy==EX_RISK_UNSET', 'risk_policy==EX_RISK_INCLUDE ? nown : nown_pos', 'EX_Usable(own[i])',
          'port.Calc(', 'MathMax(0.0,-profit)', 'r.existing_risk=(r.risk_known ? total : -1.0)']
 for o in order:
     assert o in c, 'missing step: ' + o
 pos = [c.index(o) for o in order]
-assert pos == sorted(pos), pos
+assert pos == sorted(pos), 'order of the checks'
 assert c.count('port.Orders(') == 2 and c.count('port.Calc(') == 1 and c.count('port.Positions(') == 2, 'call sites (every list is read twice)'
 assert 'if(pend_policy==EX_PEND_COUNT)' not in c, 'the counting policy must not gate the order read or the risk'
 assert 'risk_policy!=EX_RISK_UNSET && risk_policy!=EX_RISK_INCLUDE && risk_policy!=EX_RISK_EXCLUDE' in c, 'risk policy validation'
@@ -117,6 +117,15 @@ mut J.mqh $CORE 's/   int nrisk=(risk_policy==EX_RISK_INCLUDE ? nown : nown_pos)
 expect_assert "$NEG/x2.py" "$NEG/J.mqh" "the counting policy deciding the risk of a pending order" "missing step: risk_policy==EX_RISK_INCLUDE"
 mut K.mqh $CORE 's/   if(!EX_SameList(pos,np,pos2,np2)) {r.reason="POSITIONS_CHANGED"; return;}/   if(false) {}/'
 expect_assert "$NEG/x2.py" "$NEG/K.mqh" "a position list compared with nothing" "missing step: EX_SameList(pos"
+cp $CORE "$NEG/O.mqh"
+python3 - "$NEG/O.mqh" <<'PYMUT'
+import sys
+t = open(sys.argv[1]).read()
+t = t.replace("   port.Positions(pos,np,pc);\n   port.Orders(ord,no,oc);\n   port.Positions(pos2,np2,pc2);\n   port.Orders(ord2,no2,oc2);", "   port.Positions(pos,np,pc);\n   port.Positions(pos2,np2,pc2);\n   port.Orders(ord,no,oc);\n   port.Orders(ord2,no2,oc2);")
+open(sys.argv[1], 'w').write(t)
+PYMUT
+cmp -s $CORE "$NEG/O.mqh" && { echo "  FAIL control O changed nothing"; FAIL=1; }
+expect_assert "$NEG/x2.py" "$NEG/O.mqh" "the reads ordered positions, positions, orders, orders (a fill between them is missed)" "order of the checks"
 mut L.mqh $REAL 's/PositionGetInteger(POSITION_MAGIC,magic)/(PositionGetInteger(POSITION_MAGIC)>=0)/'
 expect_assert "$NEG/x3.py" "$NEG/L.mqh $EA" "a magic getter without the success flag" "getter without the success flag"
 mut M2.mqh $REAL 's/      if(PositionsTotal()!=total) {complete=false; n=0;}/      \/\/ none/'

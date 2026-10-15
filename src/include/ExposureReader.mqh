@@ -88,17 +88,18 @@ void EX_Compute(const long magic,const string symbol,const int pend_policy,const
    port.Account(acc_ok,mode);
    if(!acc_ok) {r.reason="ACCOUNT_UNREADABLE"; return;}
    if(mode!=EX_HEDGING) {r.reason="OWNERSHIP_NOT_SEPARABLE"; return;}
-   SExItem pos[];
-   int np=0;
-   bool pc=false;
+   // two COMPLETE snapshots, each positions THEN orders, compared afterwards: a pending order that is filled between the reads (it leaves the orders and appears among the positions) can never be missed by both lists
+   SExItem pos[],pos2[],ord[],ord2[];
+   int np=0,np2=0,no=0,no2=0;
+   bool pc=false,pc2=false,oc=false,oc2=false;
    port.Positions(pos,np,pc);
-   if(!pc || np<0 || np>EX_MAX) {r.reason="POSITIONS_INCOMPLETE"; return;}
-   SExItem pos2[];
-   int np2=0;
-   bool pc2=false;
+   port.Orders(ord,no,oc);
    port.Positions(pos2,np2,pc2);
-   if(!pc2) {r.reason="POSITIONS_INCOMPLETE"; return;}
+   port.Orders(ord2,no2,oc2);
+   if(!pc || !pc2 || np<0 || np>EX_MAX || np2<0 || np2>EX_MAX) {r.reason="POSITIONS_INCOMPLETE"; return;}
+   if(!oc || !oc2 || no<0 || no>EX_MAX || no2<0 || no2>EX_MAX) {r.reason="ORDERS_INCOMPLETE"; return;}
    if(!EX_SameList(pos,np,pos2,np2)) {r.reason="POSITIONS_CHANGED"; return;}
+   if(!EX_SameList(ord,no,ord2,no2)) {r.reason="ORDERS_CHANGED"; return;}
    SExItem own[];
    ArrayResize(own,0);
    int nown=0;
@@ -111,17 +112,6 @@ void EX_Compute(const long magic,const string symbol,const int pend_policy,const
       nown++;
      }
    int nown_pos=nown;
-   SExItem ord[];
-   int no=0;
-   bool oc=false;
-   port.Orders(ord,no,oc);
-   if(!oc || no<0 || no>EX_MAX) {r.reason="ORDERS_INCOMPLETE"; return;}
-   SExItem ord2[];
-   int no2=0;
-   bool oc2=false;
-   port.Orders(ord2,no2,oc2);
-   if(!oc2) {r.reason="ORDERS_INCOMPLETE"; return;}
-   if(!EX_SameList(ord,no,ord2,no2)) {r.reason="ORDERS_CHANGED"; return;}
    int nown_ord=0;
    for(int i=0;i<no;i++)
      {

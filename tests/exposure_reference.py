@@ -42,6 +42,10 @@ class Port:
     change_positions: object = None   # callable(list) -> list: the second read of the positions differs
     change_orders: object = None
     pos_reads: int = 0
+    ord_reads: int = 0
+    reads: int = 0                    # every list read, in order
+    fill_at: int = 0                  # from this read number on, the pending order `fill_ticket` has become a position (a fill between two reads)
+    fill_ticket: int = 0
     calls: int = 0
     reads_orders: int = 0
 
@@ -85,18 +89,29 @@ def _same(a, b):
     return len(a) == len(b) and all(x == y for x, y in zip(a, b))
 
 
-def _read(port, which):
-    """two reads of the same list; a difference between them = the list changed while it was read = unknown"""
-    if which == 'pos':
-        first = list(port.positions)
-        port.pos_reads += 1
-        second = list(port.change_positions(first)) if port.change_positions else list(port.positions)
-        complete = port.pos_complete
-    else:
-        first = list(port.orders)
-        second = list(port.change_orders(first)) if port.change_orders else list(port.orders)
-        complete = port.ord_complete
-    return first, complete, _same(first, second)
+def _filled(port):
+    return port.fill_at > 0 and port.reads >= port.fill_at
+
+
+def read_positions(port):
+    port.reads += 1
+    port.pos_reads += 1
+    cur = list(port.positions)
+    if _filled(port):
+        o = next(x for x in port.orders if x.ticket == port.fill_ticket)
+        cur.append(Pos(o.ticket, o.symbol, o.magic, o.kind, o.volume, o.price, o.sl))
+    if port.change_positions and port.pos_reads == 2:
+        cur = list(port.change_positions(cur))
+    return cur, port.pos_complete
+
+
+def read_orders(port):
+    port.reads += 1
+    port.ord_reads += 1
+    cur = [x for x in port.orders if not (_filled(port) and x.ticket == port.fill_ticket)]
+    if port.change_orders and port.ord_reads == 2:
+        cur = list(port.change_orders(cur))
+    return cur, port.ord_complete
 
 
 def compute(magic, symbol, pend_policy, port, risk_policy=RISK_UNSET):
@@ -110,13 +125,25 @@ def compute(magic, symbol, pend_policy, port, risk_policy=RISK_UNSET):
     if port.margin_mode != HEDGING:
         r.reason = 'OWNERSHIP_NOT_SEPARABLE'
         return r
-    positions, complete, stable = _read(port, 'pos')
-    if not complete or len(positions) > 64:
+    # two COMPLETE snapshots, positions then orders each time, compared afterwards: a pending order that is filled between the reads
+    # (it leaves the orders and appears among the positions) can never be missed by both lists
+    positions, pcomplete = read_positions(port)
+    orders, ocomplete = read_orders(port)
+    positions2, pcomplete2 = read_positions(port)
+    orders2, ocomplete2 = read_orders(port)
+    if not (pcomplete and pcomplete2) or len(positions) > 64 or len(positions2) > 64:
         r.reason = 'POSITIONS_INCOMPLETE'
         return r
-    if not stable:
+    if not (ocomplete and ocomplete2) or len(orders) > 64 or len(orders2) > 64:
+        r.reason = 'ORDERS_INCOMPLETE'
+        return r
+    if not _same(positions, positions2):
         r.reason = 'POSITIONS_CHANGED'
         return r
+    if not _same(orders, orders2):
+        r.reason = 'ORDERS_CHANGED'
+        return r
+    port.reads_orders += 1
     owned_pos = []
     for p in positions:
         if p.magic == magic:
@@ -127,14 +154,6 @@ def compute(magic, symbol, pend_policy, port, risk_policy=RISK_UNSET):
         else:
             r.foreign_positions += 1
     owned_ord = []
-    port.reads_orders += 1
-    orders, ocomplete, ostable = _read(port, 'ord')
-    if not ocomplete or len(orders) > 64:
-        r.reason = 'ORDERS_INCOMPLETE'
-        return r
-    if not ostable:
-        r.reason = 'ORDERS_CHANGED'
-        return r
     for o in orders:
         if o.magic == magic:
             if o.kind not in (0, 1):

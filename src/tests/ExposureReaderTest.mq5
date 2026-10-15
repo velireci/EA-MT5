@@ -41,6 +41,9 @@ public:
    int ord_reads;
    bool grow_positions;          // the SECOND read of the positions shows one more item
    bool grow_orders;
+   int reads;                    // every list read, in order
+   int fill_at;                  // from this read number on, the order fill_ticket has become a position
+   ulong fill_ticket;
    bool flip_magic;              // the SECOND read of the positions shows the first item with magic 0
    CFakePort(void)
      {
@@ -58,6 +61,9 @@ public:
       grow_positions=false;
       grow_orders=false;
       flip_magic=false;
+      reads=0;
+      fill_at=0;
+      fill_ticket=0;
      }
    void AddPos(const ulong t,const long magic=MAGIC,const int kind=0,const double vol=0.1,const double price=100.0,const double sl=99.0)
      {
@@ -67,13 +73,20 @@ public:
      {
       if(n_ord<EX_MAX+2) {Item(ord[n_ord],t,magic,kind,vol,price,sl); n_ord++;}
      }
+   bool Filled(void) {return(fill_at>0 && reads>=fill_at);}
    virtual void Account(bool &ok,int &mode) {ok=account_ok; mode=margin_mode;}
    virtual void Positions(SExItem &p[],int &n,bool &complete)
      {
       pos_reads++;
-      ArrayResize(p,n_pos+1);
+      reads++;
+      ArrayResize(p,n_pos+2);
       for(int i=0;i<n_pos;i++) p[i]=pos[i];
       n=n_pos;
+      if(Filled())
+        {
+         for(int k=0;k<n_ord;k++)
+            if(ord[k].ticket==fill_ticket) {p[n]=ord[k]; n++;}
+        }
       if(pos_reads==2 && grow_positions) {Item(p[n],99,MAGIC,0,0.1,100.0,99.0); n++;}
       if(pos_reads==2 && flip_magic && n>0) p[0].magic=0;
       complete=pos_complete;
@@ -82,9 +95,15 @@ public:
      {
       order_reads++;
       ord_reads++;
+      reads++;
       ArrayResize(o,n_ord+1);
-      for(int i=0;i<n_ord;i++) o[i]=ord[i];
-      n=n_ord;
+      n=0;
+      for(int i=0;i<n_ord;i++)
+        {
+         if(Filled() && ord[i].ticket==fill_ticket) continue;
+         o[n]=ord[i];
+         n++;
+        }
       if(ord_reads==2 && grow_orders) {Item(o[n],98,MAGIC,0,0.1,100.0,99.0); n++;}
       complete=ord_complete;
      }
@@ -284,6 +303,46 @@ void Scenario_list_changes_during_read(void)
    Check(r.ok && d.pos_reads==2 && d.ord_reads==2,"identical reads are stable; every list is read twice");
   }
 
+void Scenario_fill_between_reads(void)
+  {
+   for(int d=0;d<2;d++)
+     {
+      int kind=d;                                            // BUY side, then SELL side
+      double sl=(kind==0 ? 99.0 : 101.0);
+      for(int fill_at=2;fill_at<=4;fill_at++)
+        {
+         CFakePort p;
+         p.AddOrd(7,MAGIC,kind,0.1,100.0,sl);
+         p.fill_at=fill_at;
+         p.fill_ticket=7;
+         SExResult r;
+         EX_Compute(MAGIC,"XAUUSD",EX_PEND_COUNT,EX_RISK_INCLUDE,GetPointer(p),r);
+         Check(!r.ok && (r.reason=="POSITIONS_CHANGED" || r.reason=="ORDERS_CHANGED") && EX_GatePositions(r)==-1 && EX_GateRisk(r)==-1.0,
+               StringFormat("kind %d, fill before read %d: unknown, never a confirmed zero",kind,fill_at));
+        }
+      CFakePort b;
+      b.AddOrd(7,MAGIC,kind,0.1,100.0,sl);
+      b.fill_at=1;
+      b.fill_ticket=7;
+      SExResult rb;
+      EX_Compute(MAGIC,"XAUUSD",EX_PEND_COUNT,EX_RISK_INCLUDE,GetPointer(b),rb);
+      Check(rb.ok && rb.open_positions==1 && rb.pending==0,StringFormat("kind %d: a fill before the first read is a consistent snapshot",kind));
+      CFakePort a;
+      a.AddOrd(7,MAGIC,kind,0.1,100.0,sl);
+      a.fill_at=5;
+      a.fill_ticket=7;
+      SExResult ra;
+      EX_Compute(MAGIC,"XAUUSD",EX_PEND_COUNT,EX_RISK_INCLUDE,GetPointer(a),ra);
+      Check(ra.ok && ra.open_positions==1 && ra.pending==1,StringFormat("kind %d: a fill after the last read is a consistent snapshot",kind));
+     }
+   CFakePort c;
+   c.AddPos(1);
+   c.AddOrd(2);
+   SExResult rc;
+   EX_Compute(MAGIC,"XAUUSD",EX_PEND_COUNT,EX_RISK_INCLUDE,GetPointer(c),rc);
+   Check(c.reads==4 && c.pos_reads==2 && c.ord_reads==2,"four reads: positions, orders, positions, orders");
+  }
+
 void Scenario_pending_risk_separate(void)
   {
    CFakePort p;
@@ -332,6 +391,7 @@ void OnStart()
    Scenario_risk_unknown_never_zero();
    Scenario_lists_incomplete();
    Scenario_list_changes_during_read();
+   Scenario_fill_between_reads();
    Scenario_pending_risk_separate();
    Scenario_gate_mapping();
    PrintFormat("T018 EXPOSURE READER TEST finished: %d passed, %d failed",g_pass,g_fail);
