@@ -269,6 +269,7 @@ void Scenario_restart_no_double(void)
       forced.rebase=false;
       forced.key="T003_PROTOTYPE|H4SET1|H4F1";
       forced.have_key=true;
+      forced.previous_context=ob.st.context;
       w.StepWith(forced,ob);
       Check(first && again && restart && w.out.res.outcome==EN_R_DUPLICATE && w.t.sends==1,StringFormat("dir %d: a repeat, a restart and even a lost baseline never send the same signal twice",dir));
      }
@@ -370,7 +371,7 @@ void Scenario_market_missing_blocks(void)
          string status="MARKET_NOT_READY";
          if(k==0) w.mk.sym.read_ok=false;
          if(k==1) w.mk.sym.trade_ok=false;
-         if(k==2) w.mk.sym.reported_tick_value=0.0;
+         if(k==2) w.mk.sym.tick_size=0.0;
          if(k==3) w.mk.q.read_ok=false;
          if(k==4) w.mk.q.time=w.t.now-31;
          if(k==5) w.mk.q.time=w.t.now+5;
@@ -461,6 +462,72 @@ void Scenario_halt_after_uncertainty(void)
      }
   }
 
+void Scenario_market_recovery_rebases(void)
+  {
+   for(int dir=-1;dir<=1;dir+=2)
+      for(int k=0;k<2;k++)
+        {
+         CW w;
+         w.Init(dir);
+         CObs before,after;
+         before.Make(dir,2);
+         after.Make(dir,3);
+         w.StepObs(before);
+         if(k==0) w.mk.sym.read_ok=false; else w.mk.q.read_ok=false;
+         w.StepObs(after);
+         bool blocked=(w.out.status=="MARKET_NOT_READY" && w.Untouched());
+         w.mk.sym.read_ok=true;
+         w.mk.q.read_ok=true;
+         w.StepObs(after);
+         Check(blocked && w.Untouched() && w.o.baseline==after.Cut(),StringFormat("dir %d market %d: recovery rebases without reviving a candidate",dir,k));
+        }
+  }
+
+void Scenario_context_fields_rebase(void)
+  {
+   for(int dir=-1;dir<=1;dir+=2)
+      for(int k=0;k<4;k++)
+        {
+         CW w;
+         w.Init(dir);
+         CObs before,after;
+         before.Make(dir,2);
+         after.Make(dir,3);
+         w.StepObs(before);
+         if(k==0) after.st.context.lower=81;
+         if(k==1) after.st.context.upper=119;
+         if(k==2) after.st.context.confirmed=START-1;
+         if(k==3) {after.st.context.confirmed=START-1; after.st.context.valid_from=START-1;}
+         w.StepObs(after);
+         Check(w.Untouched() && w.o.baseline==after.Cut(),StringFormat("dir %d context field %d: same IDs still rebase",dir,k));
+        }
+  }
+
+void Scenario_probe_independent_of_property(void)
+  {
+   double reported[3]={0.0,0.000001,1000000000.0};
+   for(int dir=-1;dir<=1;dir+=2)
+      for(int k=0;k<3;k++)
+        {
+         CW w;
+         w.Init(dir);
+         w.mk.sym.reported_tick_value=reported[k];
+         w.Live();
+         Check(w.out.request && w.t.sends==1 && w.mk.calls==2 && w.out.spb.plan.volume_out==(dir==1 ? 0.22 : 0.18),StringFormat("dir %d reported value %g: geometry then probe then sizing",dir,reported[k]));
+        }
+  }
+
+void TestOffsetValidation(void)
+  {
+   long values[7]={7200,-50400,50400,99999,7201,4294974496,-50401};
+   for(int i=0;i<7;i++)
+     {
+      int offset=123;
+      bool ok=EO_OffsetSeconds(values[i],offset);
+      Check(ok==(i<3) && (ok ? offset==values[i] : offset==123),StringFormat("offset %I64d: validate before narrowing",values[i]));
+     }
+  }
+
 void OnStart()
   {
    Print("T016 ENTRY ORCHESTRATOR TEST: fake transport, fake store and a scripted market; no file, no terminal read, no order, no trade.");
@@ -475,5 +542,9 @@ void OnStart()
    Scenario_gate_blocks_no_request();
    Scenario_probe_uses_effective_tick();
    Scenario_halt_after_uncertainty();
+   Scenario_market_recovery_rebases();
+   Scenario_context_fields_rebase();
+   Scenario_probe_independent_of_property();
+   TestOffsetValidation();
    PrintFormat("T016 ENTRY ORCHESTRATOR TEST finished: %d passed, %d failed",g_pass,g_fail);
   }

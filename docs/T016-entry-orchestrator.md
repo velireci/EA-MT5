@@ -1,6 +1,6 @@
 # T016 Entry orchestrator EA (FAKE execution only)
 
-Status: written in the sandbox on base e8968bd. Compilation and MT5 run are UNVERIFIED (Codex compiles, the owner runs). Not a verified, live-ready or profitable EA.
+Status: corrected after cf9d92a. Codex compiled the EA and four entry-chain tests with 0 errors / 0 warnings each. Revised MT5 tests await the owner. FAKE execution only; not live-ready.
 
 ## What it is
 One EA, `src/XauUsdEntryOrchestrator.mq5`, that wires the EXISTING flow end to end:
@@ -21,9 +21,9 @@ It is not a diagnostic panel. It draws nothing; it logs one status line and sets
 | EA, inputs, fake transport reads | `src/XauUsdEntryOrchestrator.mq5` | compile only |
 
 ## Rules implemented
-- **Baseline.** The first successful build after the start, after any data defect, after the context was lost or CHANGED (key `source|setup|fvg`) sets `baseline = max(baseline, cut)`. A candidate confirmed at or before the baseline is historical (`live_after`), never a signal. The baseline never moves backwards. Replay, restart, outage and recovery cannot revive an old signal.
+- **Baseline.** The first successful build after the start, after any data defect, after the context was lost or CHANGED (all fields compared with `M4ContextEqual`, including bounds and validity times) sets `baseline = max(baseline, cut)`. A candidate confirmed at or before the baseline is historical (`live_after`), never a signal. The baseline never moves backwards. Replay, restart, outage and recovery cannot revive an old signal.
 - **Order.** H4 updates are applied before M15 at the same boundary by the existing `M4ReplayTimeline`; only closed, confirmed data is used.
-- **Two-pass plan.** Pass 1 obtains the geometry with the REPORTED tick value; `OrderCalcProfit` over the minimum volume gives the EFFECTIVE tick (`PB_ProbeTickValue`); pass 2 is the plan the gate sees. A failed probe blocks (no property fallback). The final volume is checked again with `OrderCalcProfit` (`PB_CheckLoss` in the gate).
+- **Geometry then sizing.** `SPB_Geometry` shares candidate validation with `SPB_Build` and calls the existing `TG_Compute`, without sizing a provisional plan. `OrderCalcProfit` over the minimum volume gives the EFFECTIVE tick (`PB_ProbeTickValue`); only then does one `SPB_Build` size the final plan. Zero, tiny or huge reported tick values cannot prevent the probe. A failed probe blocks (no property fallback). The final volume is checked again with `OrderCalcProfit` (`PB_CheckLoss` in the gate).
 - **Evidence binding.** Snapshot, loss check and daily result carry the plan digest and one shared instant; the permit deadline is the oldest evidence + `InpGateMaxAgeSeconds`.
 - **UNSET blocks.** Risk budget, lot cap, tolerance, quote age, selections, limits, filling, expiry, session / news / spread / daily sources default to UNSET/-1/false and block. A missing value is never zero or CLEAR.
 - **Exposure and counters** (`InpOpenPositions`, `InpTradesToday`, `InpExistingRisk`, limits) are explicit inputs; nothing is accounted by this EA. Unknown = BLOCK.
@@ -35,12 +35,17 @@ It is not a diagnostic panel. It draws nothing; it logs one status line and sets
 2. `ReadUsdCalendar` and the preview's daily/balance glue live inside `XauUsdTradePreview.mq5`; copied into the feed header (`EO_ReadUsdCalendar`, `CEoRealMarket::Daily`). Same extraction recommendation.
 3. `M4TimelineInfo` keeps the broken level's price but not its `known` time; the feed re-derives the broken level with `M4SelectSwingProposal` at the BOS bar and `SPB_Build` verifies id/price/time. A timeline field would be cleaner.
 4. `CEnRealStore` (file store) lives in `EntryTransportReal.mqh` together with the real transport, so a persistent store cannot be used without including `OrderSend` code. The EA therefore uses `CEnFakeStore` (memory); a restart forgets records and the baseline is the only protection. Split the file store into its own header before a persistent or real stage.
-5. `SPB_Build` has no tick-value-aware two-phase API; the orchestrator calls it twice. One `EN_Place` per `SEnRuntime` forces a fresh runtime per signal and an orchestrator-level halt.
+5. Resolved: `SPB_Geometry` prepares geometry without sizing; the original `SPB_Build` API remains compatible. One `EN_Place` per `SEnRuntime` forces a fresh runtime per signal and an orchestrator-level halt.
 6. T011 management is not connected; exposure/counters are not derived from the account.
 
 ## Evidence
 - Relayed (not my runs) for e8968bd, 15.10.2026: Codex two compiles 0 errors / 0 warnings and 82 Python tests; owner MT5 `EntryGateTest` 134 passed / 0 failed and `EntryExecutorTest` 170 / 0.
-- Sandbox: `python3 -m unittest tests.test_eo` and `tools/entry-orchestrator-static-checks.sh` (static only). MetaEditor compile and the MT5 run of `EntryOrchestratorTest` and of the EA are UNVERIFIED.
+- Codex: 128 Python tests passed across test_eo, test_spb, test_entry_gate, test_entry_executor. New regressions failed before implementation; BUY and SELL are covered.
+- Codex MetaEditor: EntryOrchestratorTest, XauUsdEntryOrchestrator, SetupPlanBridgeTest, EntryGateTest, EntryExecutorTest: each 0 errors / 0 warnings.
+- Orchestrator/bridge static scripts passed, including 17 and 6 negative controls. Git-baseline sections were SKIPPED because the local source export has no Git objects.
+- Market/quote failures mark the baseline for recovery. Full context comparison replaces IDs alone. Daily offset is checked within +/-50400 and on a 900-second grid before narrowing; 99999 and overflow-shaped values are rejected without a zero-offset fallback.
+- Independent review of the correction found no actionable issues.
+- Owner MT5 execution of the revised tests remains UNVERIFIED. No EA was attached and no trade was made by Codex.
 
 ## Next action
-Codex compiles `EntryOrchestratorTest.mq5`, `XauUsdEntryOrchestrator.mq5` (and `EntryOrchestratorFeed.mqh` through it); the owner runs the test, then the EA on a demo chart with all inputs set explicitly.
+Owner runs the revised EntryOrchestratorTest and SetupPlanBridgeTest in MT5 and relays their final lines. The EA remains FAKE only. No real entry transport, persistent storage or T011 management integration was added.

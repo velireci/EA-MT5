@@ -109,6 +109,8 @@ struct SSpbResult
    string candidate_id;
    string provenance;
    STpPlan plan;
+   double e_raw,s_raw,target_raw;
+   bool has_target;
   };
 
 void SPB_ResultInit(SSpbResult &r)
@@ -119,6 +121,7 @@ void SPB_ResultInit(SSpbResult &r)
    r.signal_id="";
    r.candidate_id="";
    r.provenance="";
+   r.e_raw=0.0; r.s_raw=0.0; r.target_raw=0.0; r.has_target=false;
    TP_PlanReset(r.plan,"","",0);
   }
 
@@ -167,38 +170,38 @@ string SPB_SetupId(const SM4State &st,const SM4Level &broken)
    return("S|"+st.context.source+"|"+st.context.setup+"|"+st.context.fvg+"|"+broken.id);
   }
 
-void SPB_Build(const SSpbSelection &sel,const SSpbMarket &mkt,const SM4State &st,const SM4Candidate &f[],const SM4Level &broken,const datetime asof,SSpbResult &out)
+bool SPB_Prepare(const SSpbSelection &sel,const SSpbMarket &mkt,const SM4State &st,const SM4Candidate &f[],const SM4Level &broken,const datetime asof,SSpbResult &out)
   {
    SPB_ResultInit(out);
    string bad=SPB_Unset(sel,asof);
-   if(bad!="") {SPB_Block(out,"SELECTION_UNSET: "+bad); return;}
+   if(bad!="") {SPB_Block(out,"SELECTION_UNSET: "+bad); return(false);}
    if(!st.has_context || st.phase=="WAIT_CONTEXT" || !(st.context.ready && st.context.reliable && st.context.selected) || (st.context.direction!=1 && st.context.direction!=-1))
-     {SPB_Block(out,"CONTEXT_LOST_OR_NOT_READY"); return;}
+     {SPB_Block(out,"CONTEXT_LOST_OR_NOT_READY"); return(false);}
    if(st.context.source!=sel.context_source)
-     {SPB_Block(out,"CONTEXT_SOURCE_MISMATCH: the observer runs on "+st.context.source+", the selection names "+sel.context_source); return;}
-   if(st.policy!=sel.timing_policy) {SPB_Block(out,"TIMING_MISMATCH: the observer policy differs from the selected timing"); return;}
-   if(st.phase=="REPLAY_REQUIRED") {SPB_Block(out,"REPLAY_REQUIRED: a revised history never becomes a signal"); return;}
-   if(st.phase=="RETURN_OBSERVED") {SPB_Block(out,"RETURN_ALREADY_OBSERVED: the price already came back; no delayed entry"); return;}
-   if(st.phase!="WAIT_RETURN") {SPB_Block(out,"PHASE_NOT_WAIT_RETURN: "+st.phase); return;}
-   if(st.last_asof>asof || st.context.valid_from>asof || st.bos_known>asof) {SPB_Block(out,"FUTURE_DATA: the observer holds data newer than asof"); return;}
+     {SPB_Block(out,"CONTEXT_SOURCE_MISMATCH: the observer runs on "+st.context.source+", the selection names "+sel.context_source); return(false);}
+   if(st.policy!=sel.timing_policy) {SPB_Block(out,"TIMING_MISMATCH: the observer policy differs from the selected timing"); return(false);}
+   if(st.phase=="REPLAY_REQUIRED") {SPB_Block(out,"REPLAY_REQUIRED: a revised history never becomes a signal"); return(false);}
+   if(st.phase=="RETURN_OBSERVED") {SPB_Block(out,"RETURN_ALREADY_OBSERVED: the price already came back; no delayed entry"); return(false);}
+   if(st.phase!="WAIT_RETURN") {SPB_Block(out,"PHASE_NOT_WAIT_RETURN: "+st.phase); return(false);}
+   if(st.last_asof>asof || st.context.valid_from>asof || st.bos_known>asof) {SPB_Block(out,"FUTURE_DATA: the observer holds data newer than asof"); return(false);}
    if(!broken.valid || SPB_Blank(broken.id) || broken.id!=st.bos_level || !(SPB_Fin(broken.price) && broken.price>0.0) || !(broken.known>0 && broken.known<=st.bos_time))
-     {SPB_Block(out,"BROKEN_LEVEL_MISMATCH: the supplied level is not the one the observer recorded"); return;}
-   if(broken.known>asof) {SPB_Block(out,"FUTURE_DATA: the broken level is newer than asof"); return;}
+     {SPB_Block(out,"BROKEN_LEVEL_MISMATCH: the supplied level is not the one the observer recorded"); return(false);}
+   if(broken.known>asof) {SPB_Block(out,"FUTURE_DATA: the broken level is newer than asof"); return(false);}
    int n=ArraySize(f);
    for(int i=0;i<n;i++)
      {
-      if(SPB_Blank(f[i].id)) {SPB_Block(out,"CANDIDATE_IDS_NOT_UNIQUE"); return;}
+      if(SPB_Blank(f[i].id)) {SPB_Block(out,"CANDIDATE_IDS_NOT_UNIQUE"); return(false);}
       for(int j=i+1;j<n;j++)
-         if(f[j].id==f[i].id) {SPB_Block(out,"CANDIDATE_IDS_NOT_UNIQUE"); return;}
+         if(f[j].id==f[i].id) {SPB_Block(out,"CANDIDATE_IDS_NOT_UNIQUE"); return(false);}
      }
    int pick=-1;
    if(sel.candidate_selector==SPB_CAND_EXPLICIT_ID)
      {
       for(int i=0;i<n;i++)
          if(f[i].id==sel.candidate_id) pick=i;
-      if(pick<0) {SPB_Block(out,"CANDIDATE_NOT_FOUND: "+sel.candidate_id); return;}
-      if(f[pick].invalid) {SPB_Block(out,"CANDIDATE_INVALIDATED: "+f[pick].id); return;}
-      if(f[pick].returned) {SPB_Block(out,"CANDIDATE_RETURN_ALREADY_OBSERVED: "+f[pick].id); return;}
+      if(pick<0) {SPB_Block(out,"CANDIDATE_NOT_FOUND: "+sel.candidate_id); return(false);}
+      if(f[pick].invalid) {SPB_Block(out,"CANDIDATE_INVALIDATED: "+f[pick].id); return(false);}
+      if(f[pick].returned) {SPB_Block(out,"CANDIDATE_RETURN_ALREADY_OBSERVED: "+f[pick].id); return(false);}
      }
    else
      {
@@ -211,15 +214,15 @@ void SPB_Build(const SSpbSelection &sel,const SSpbMarket &mkt,const SM4State &st
             pick=i;
             ids+=(ids=="" ? "" : ",")+f[i].id;
            }
-      if(ne==0) {SPB_Block(out,"NO_ELIGIBLE_CANDIDATE"); return;}
-      if(ne>1) {SPB_Block(out,"AMBIGUOUS_CANDIDATES: "+ids+"; none is chosen"); return;}
+      if(ne==0) {SPB_Block(out,"NO_ELIGIBLE_CANDIDATE"); return(false);}
+      if(ne>1) {SPB_Block(out,"AMBIGUOUS_CANDIDATES: "+ids+"; none is chosen"); return(false);}
      }
    int d=st.context.direction;
-   if(!(SPB_Fin(f[pick].lower) && SPB_Fin(f[pick].upper) && f[pick].lower>0.0 && f[pick].lower<f[pick].upper)) {SPB_Block(out,"CANDIDATE_BOUNDS_INVALID: "+f[pick].id); return;}
+   if(!(SPB_Fin(f[pick].lower) && SPB_Fin(f[pick].upper) && f[pick].lower>0.0 && f[pick].lower<f[pick].upper)) {SPB_Block(out,"CANDIDATE_BOUNDS_INVALID: "+f[pick].id); return(false);}
    string last=StringSubstr(f[pick].id,StringLen(f[pick].id)-1,1);
-   if(last!=(d==1 ? "U" : "D")) {SPB_Block(out,"CANDIDATE_DIRECTION_INCONSISTENT: "+f[pick].id); return;}
-   if(f[pick].confirmed>asof) {SPB_Block(out,"FUTURE_DATA: the candidate is newer than asof"); return;}
-   if((long)f[pick].confirmed<=sel.live_after) {SPB_Block(out,"HISTORICAL_OR_REPLAYED_CANDIDATE: formed at or before the live baseline"); return;}
+   if(last!=(d==1 ? "U" : "D")) {SPB_Block(out,"CANDIDATE_DIRECTION_INCONSISTENT: "+f[pick].id); return(false);}
+   if(f[pick].confirmed>asof) {SPB_Block(out,"FUTURE_DATA: the candidate is newer than asof"); return(false);}
+   if((long)f[pick].confirmed<=sel.live_after) {SPB_Block(out,"HISTORICAL_OR_REPLAYED_CANDIDATE: formed at or before the live baseline"); return(false);}
    double e;
    if(sel.entry_edge==SPB_EDGE_NEAR_SIDE) e=(d==1 ? f[pick].upper : f[pick].lower);
    else e=(d==1 ? f[pick].lower : f[pick].upper);
@@ -237,7 +240,26 @@ void SPB_Build(const SSpbSelection &sel,const SSpbMarket &mkt,const SM4State &st
    out.signal_id=signal;
    out.candidate_id=f[pick].id;
    out.provenance=prov;
-   if(!TP_BuildPlan(signal,setup,d,e,s,has_target,t,mkt.risk_budget,mkt.tick_value,mkt.tick_size,mkt.digits,mkt.point,mkt.stops_level,mkt.has_quote,mkt.bid,mkt.ask,
+   out.e_raw=e; out.s_raw=s; out.has_target=has_target; out.target_raw=t;
+   return(true);
+  }
+
+// Candidate/geometry only: never sizes a provisional plan using a reported tick value.
+bool SPB_Geometry(const SSpbSelection &sel,const SSpbMarket &mkt,const SM4State &st,const SM4Candidate &f[],const SM4Level &broken,const datetime asof,SSpbResult &out,STgResult &geo)
+  {
+   if(!SPB_Prepare(sel,mkt,st,f,broken,asof,out)) return(false);
+   if(!TG_Compute(st.context.direction,out.e_raw,out.s_raw,out.has_target,out.target_raw,mkt.tick_size,mkt.digits,mkt.point,mkt.stops_level,mkt.has_quote,mkt.bid,mkt.ask,geo))
+     {
+      out.reason="GEOMETRY_REFUSED: "+geo.reason;
+      return(false);
+     }
+   return(true);
+  }
+
+void SPB_Build(const SSpbSelection &sel,const SSpbMarket &mkt,const SM4State &st,const SM4Candidate &f[],const SM4Level &broken,const datetime asof,SSpbResult &out)
+  {
+   if(!SPB_Prepare(sel,mkt,st,f,broken,asof,out)) return;
+   if(!TP_BuildPlan(out.signal_id,out.setup_id,st.context.direction,out.e_raw,out.s_raw,out.has_target,out.target_raw,mkt.risk_budget,mkt.tick_value,mkt.tick_size,mkt.digits,mkt.point,mkt.stops_level,mkt.has_quote,mkt.bid,mkt.ask,
                     mkt.vol_min,mkt.vol_step,mkt.vol_max,mkt.cap_lots,out.plan))
      {
       out.reason="PLAN_REFUSED: "+out.plan.reason;

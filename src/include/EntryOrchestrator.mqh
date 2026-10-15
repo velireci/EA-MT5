@@ -2,7 +2,7 @@
 //   H4/M15 observer state (T004: SM4State / SM4Candidate / SM4Level) -> SetupPlanBridge (T014) -> EntryGate (T015) -> EntryExecutor (T013)
 // with a FAKE transport fixed by the caller. It re-implements no H4 / M15 algorithm, no geometry or sizing formula, no filter and no limit: every step is a call into the existing module.
 // What this layer adds: the BASELINE (the first successful build after the start, after ANY data defect, after the context was lost or CHANGED; a candidate confirmed at or before the baseline is
-// historical / replayed and is never a signal), the two-pass plan (pass 1 only obtains the geometry with the REPORTED tick value; the broker probe gives the EFFECTIVE one; pass 2 is the plan the gate
+// historical / replayed and is never a signal), geometry without sizing followed by the broker probe for the EFFECTIVE tick value; the final plan is the one the gate
 // sees), real data only (a missing value is never zero or CLEAR), explicit exposure / limit inputs (unknown by default, nothing is accounted here), one shared instant and the plan digest for the checks of
 // one decision, a fresh executor runtime per signal, and a HALT after an uncertain outcome. No terminal call here: the market port and the transport are supplied.
 #ifndef VELO_ENTRY_ORCHESTRATOR_MQH
@@ -12,6 +12,13 @@
 
 #define EO_FAKE_LABEL "FAKE EXECUTION: a virtual request, nothing is sent to the terminal"
 #define EO_MAX_HANDLED 64
+
+bool EO_OffsetSeconds(const long value,int &offset)
+  {
+   if(value<-50400 || value>50400 || value%900!=0) return(false);
+   offset=(int)value;
+   return(true);
+  }
 
 struct SEoSymbol
   {
@@ -126,6 +133,7 @@ public:
    bool rebase;
    string key;
    bool have_key;
+   SM4Context previous_context;
    string handled[EO_MAX_HANDLED];
    int n_handled;
    string halted;
@@ -136,6 +144,7 @@ public:
       rebase=true;
       key="";
       have_key=false;
+      M4ContextInit(previous_context);
       n_handled=0;
       halted="";
       signals=0;
@@ -163,9 +172,10 @@ public:
          return;
         }
       string k=(st.has_context ? st.context.source+"|"+st.context.setup+"|"+st.context.fvg : "");
-      if(k=="" || !have_key || k!=key) rebase=true;          // a lost or CHANGED context also starts a new baseline
+      if(k=="" || !have_key || !M4ContextEqual(st.context,previous_context)) rebase=true;
       key=k;
       have_key=true;
+      previous_context=st.context;
       if(rebase || baseline==0)
         {
          baseline=MathMax(baseline,(long)cut);
@@ -176,13 +186,13 @@ public:
       if(bad!="") {EO_Set(out,"CONFIG_UNSET","INPUT_UNSET: "+bad); return;}
       SEoSymbol sym;
       mk.Symbol(sym);
-      if(!(sym.read_ok && sym.trade_ok && sym.tick_size>0.0 && sym.vol_min>0.0 && sym.vol_step>0.0 && sym.reported_tick_value>0.0))
-        {EO_Set(out,"MARKET_NOT_READY","SYMBOL_UNREADABLE_OR_NOT_TRADABLE"); return;}
+      if(!(sym.read_ok && sym.trade_ok && sym.tick_size>0.0 && sym.vol_min>0.0 && sym.vol_step>0.0))
+        {Defect(); EO_Set(out,"MARKET_NOT_READY","SYMBOL_UNREADABLE_OR_NOT_TRADABLE"); return;}
       SEoQuote q;
       mk.Quote(q);
       long now=mk.Now();
       if(!(q.read_ok && q.bid>0.0 && q.ask>=q.bid && q.time>0 && now>0 && now-q.time>=0 && now-q.time<=c.max_quote_age))
-        {EO_Set(out,"MARKET_NOT_READY","QUOTE_NOT_READY_OR_STALE"); return;}
+        {Defect(); EO_Set(out,"MARKET_NOT_READY","QUOTE_NOT_READY_OR_STALE"); return;}
       SSpbSelection sel=c.sel;
       sel.live_after=baseline;
       SSpbMarket m;
@@ -201,16 +211,17 @@ public:
       m.vol_max=sym.vol_max;
       m.cap_lots=c.lot_cap;
       SSpbResult r1;
-      SPB_Build(sel,m,st,f,broken,cut,r1);                    // pass 1: the geometry only; discarded
+      STgResult geo;
+      bool geometry_ok=SPB_Geometry(sel,m,st,f,broken,cut,r1,geo);
       out.spb=r1;
-      if(!r1.plan_ready) {EO_Set(out,"NO_PLAN",r1.reason); return;}
+      if(!geometry_ok) {EO_Set(out,"NO_PLAN",r1.reason); return;}
       if(Handled(r1.signal_id)) {EO_Set(out,"ALREADY_HANDLED",r1.signal_id); return;}
       bool buy=(st.context.direction==1);
-      long stop_ticks=(long)MathRound(r1.plan.r_geom/sym.tick_size);
+      long stop_ticks=(long)MathRound(geo.r_geom/sym.tick_size);
       double profit=0.0;
-      bool ok=mk.CalcProfit(buy,sym.vol_min,r1.plan.e_out,r1.plan.s_out,profit);
+      bool ok=mk.CalcProfit(buy,sym.vol_min,geo.e_out,geo.s_out,profit);
       double tick=PB_ProbeTickValue(ok,profit,sym.vol_min,stop_ticks);
-      if(!(tick>0.0)) {EO_Set(out,"PROBE_FAILED","BROKER_PROBE_FAILED: no reliable loss estimate; no property fallback"); return;}
+      if(!(tick>0.0)) {Defect(); EO_Set(out,"PROBE_FAILED","BROKER_PROBE_FAILED: no reliable loss estimate; no property fallback"); return;}
       m.tick_value=tick;
       SSpbResult r2;
       SPB_Build(sel,m,st,f,broken,cut,r2);                    // pass 2: the plan the gate sees
@@ -218,6 +229,7 @@ public:
       if(!r2.plan_ready) {EO_Set(out,"NO_PLAN",r2.reason); return;}
       profit=0.0;
       ok=mk.CalcProfit(buy,r2.plan.volume_out,r2.plan.e_out,r2.plan.s_out,profit);
+      if(!ok || !TG_Finite(profit)) Defect();
       int session=TP_SESSION_UNKNOWN,news=TP_NEWS_UNKNOWN,spread=TP_SPREAD_UNKNOWN;
       mk.Filters(session,news,spread);
       string digest=EN_PlanDigest(r2.plan);

@@ -208,7 +208,8 @@ Mbetet: orari nuk dërgon ende anulime ose mbyllje; persistence/catchup/lajmet t
 - [x] T014: ura kandidat T004 → STpPlan (TP_BuildPlan): çdo zgjedhje e shprehur, UNSET bllokon, WAIT_RETURN vetëm si kandidat pending, RETURN_OBSERVED/invalid/historik/i ardhshëm nuk bëhen sinjal, ID të qëndrueshme; pa leje, pa urdhër; sandbox, kompilimi/MT5 UNVERIFIED (docs/T014-setup-plan-bridge.md)
 - [x] T013 (e përcjellë): ekzekutuesi i hyrjes LIMIT — Codex 0/0 + 62 Python, MT5 EntryExecutorTest 170/0; transporti real i paprovuar
 - [x] T015: porta e hyrjes (plani T014 + TP_CheckPermit + kontrolli i humbjes së brokerit + rezultati ditor T012 i detyrueshëm → leje vetëm për të njëjtin plan → EntryExecutor); bllokimi nuk thërret ekzekutuesin; pa regjistrim sinjali; sandbox me transport fake, kompilimi/MT5 UNVERIFIED (docs/T015-entry-gate.md)
-- [x] T016: EA orkestrues H4/M15 → SetupPlanBridge → EntryGate → EntryExecutor me transport FAKE të fiksuar (baseline kundër replay/restart, probë brokeri, BalanceStore vetëm LOAD, UNSET bllokon); sandbox, kompilimi/MT5 UNVERIFIED; transporti real nuk është përfshirë (docs/T016-entry-orchestrator.md)
+- [x] T016: orkestruesi FAKE i korrigjuar: rikuperimi i të dhënave rinis baseline, M4ContextEqual krahason kontekstin e plotë, sizing-u përdor sondën e brokerit pas gjeometrisë. Codex: 128 Python OK, pesë kompilime 0 errors / 0 warnings, kontrollet statike me 23 kontrolle negative kalojnë; kontrollet e bazës Git u kapërcyen në eksportin lokal.
+- [ ] T016: pronari riekzekuton EntryOrchestratorTest dhe SetupPlanBridgeTest në MT5. Pa transport real, pa integrim T011.
 - [x] T014 (e përcjellë): Codex 0/0 + 27 Python, MT5 SetupPlanBridgeTest 77/0
 
 ## T012 — kufijtë ditorë
@@ -218,3 +219,4 @@ Mbetet: orari nuk dërgon ende anulime ose mbyllje; persistence/catchup/lajmet t
 - [x] Burimi HISTORY_BRIDGE në preview v1.05 (DH_ReadAndBuild → DB_Check → rezultati final; MANUAL dhe DAILY_SNAPSHOT të ruajtura; preset vetëm-lexim). Sandbox: Python 19 + kontrolle statike; kompilimi i preview dhe ekzekutimi në demo — UNVERIFIED.
 - [ ] Vendime klienti/pronari: formula e rezultatit; përkufizimi trade/win/loss/breakeven dhe pjesëmbyllje; 2 apo 3 trade; si merret balance_start; pronësia (mbyllje manuale, magic i përbashkët, pozicione nga dita e mëparshme); kush pohon complete; DST i brokerit.
 - [ ] Teknike të hapura: reset në mesnatë, persistence/restart, lidhja me lejen. T012 NUK është i mbyllur.
+

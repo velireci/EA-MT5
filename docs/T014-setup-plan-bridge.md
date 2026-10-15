@@ -22,3 +22,7 @@ Python `tests/test_spb.py` (27 tests, 18 mutants; the real T004 reference observ
 
 ## Open / UNVERIFIED
 Compile and MT5 of the new files; the choice of source, swing selector, FVG timing, candidate rule, entry edge, SL definition, buffer and target are open client/owner decisions and stay inputs; `live_after` must be supplied by the live orchestrator (which does not exist yet); the market block (risk budget, tick value, symbol limits, quote) is supplied by the caller exactly as `TP_BuildPlan` expects.
+
+## T016 correction: geometry before sizing
+SPB_Build keeps its original signature and one TP_BuildPlan call. Shared SPB_Prepare performs the existing candidate validation and identity work; SPB_Geometry calls TG_Compute without sizing. This prevents unreliable reported tick values from refusing a provisional plan before the broker probe. Codex: SetupPlanBridgeTest compiles 0 errors / 0 warnings; bridge tests pass within 128 targeted entry-chain Python tests. Owner MT5 rerun pending.
+

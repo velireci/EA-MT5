@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 
 import t004_reference as m4
 import t007_planning_reference as tp
+import t005_geometry_reference as tg
 
 SWING_UNSET, SWING_LATEST_FRACTAL_PROPOSAL, SWING_SUPPLIED = 0, 1, 2
 CAND_UNSET, CAND_EXPLICIT_ID, CAND_SOLE_ELIGIBLE = 0, 1, 2
@@ -70,6 +71,9 @@ class Result:
     candidate_id: str = ''
     provenance: str = ''
     plan: object = None
+    e_raw: float = 0.0
+    s_raw: float = 0.0
+    target_raw: object = None
 
 
 def _fin(x):
@@ -120,7 +124,7 @@ def _block(reason, **kw):
     return Result(False, reason, **kw)
 
 
-def build(sel, mkt, ob, broken, asof):
+def prepare(sel, mkt, ob, broken, asof):
     """ob = the T004 observer state (phase, policy, context, candidates, bos_*), broken = the level the observer recorded; both are READ ONLY here"""
     bad = unset_fields(sel, asof)
     if bad:
@@ -187,8 +191,29 @@ def build(sel, mkt, ob, broken, asof):
     prov = 'source=%s swing=%s timing=A_AT_OR_AFTER_BREAK candidate=%s:%s edge=%s sl=%s target=%s' % (
         sel.context_source, SWING_NAMES[sel.swing_selector], 'EXPLICIT_ID' if sel.candidate_selector == CAND_EXPLICIT_ID else 'SOLE_ELIGIBLE', cand.id,
         EDGE_NAMES[sel.entry_edge], SL_NAMES[sel.sl_rule], TGT_NAMES[sel.target_rule] + ('' if t is None else ':' + sel.target_source))
-    plan = tp.build_plan(signal_id, setup_id, 'BUY' if d == 1 else 'SELL', e, s, t, mkt.risk_budget, mkt.tick_value, mkt.tick_size, mkt.digits, mkt.point, mkt.stops_level,
-                         mkt.bid if mkt.has_quote else None, mkt.ask if mkt.has_quote else None, mkt.vol_min, mkt.vol_step, mkt.vol_max, mkt.cap_lots)
-    if plan.status != tp.OK:
-        return Result(False, 'PLAN_REFUSED: ' + plan.reason, setup_id, signal_id, cand.id, prov, plan)
-    return Result(True, '', setup_id, signal_id, cand.id, prov, plan)
+    return Result(False, '', setup_id, signal_id, cand.id, prov, None, e, s, t)
+
+
+def geometry(sel, mkt, ob, broken, asof):
+    r = prepare(sel, mkt, ob, broken, asof)
+    if r.reason:
+        return r, None
+    geo = tg.compute(tg.BUY if ob.context.direction == 1 else tg.SELL, r.e_raw, r.s_raw, mkt.tick_size, mkt.digits, mkt.point, mkt.stops_level,
+                     r.target_raw, mkt.bid if mkt.has_quote else None, mkt.ask if mkt.has_quote else None)
+    if geo.status != tg.OK:
+        r.reason = 'GEOMETRY_REFUSED: ' + geo.reason
+        return r, None
+    return r, geo
+
+
+def build(sel, mkt, ob, broken, asof):
+    r = prepare(sel, mkt, ob, broken, asof)
+    if r.reason:
+        return r
+    r.plan = tp.build_plan(r.signal_id, r.setup_id, 'BUY' if ob.context.direction == 1 else 'SELL', r.e_raw, r.s_raw, r.target_raw, mkt.risk_budget, mkt.tick_value,
+                           mkt.tick_size, mkt.digits, mkt.point, mkt.stops_level, mkt.bid if mkt.has_quote else None, mkt.ask if mkt.has_quote else None,
+                           mkt.vol_min, mkt.vol_step, mkt.vol_max, mkt.cap_lots)
+    r.plan_ready = r.plan.status == tp.OK
+    if not r.plan_ready:
+        r.reason = 'PLAN_REFUSED: ' + r.plan.reason
+    return r

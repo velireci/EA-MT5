@@ -5,8 +5,8 @@ with a FAKE transport fixed in this delivery. It re-implements no H4 / M15 algor
 What this layer adds (and nothing else):
   * BASELINE: the first successful build after the start, after ANY data defect, after the context was lost or CHANGED sets the baseline = the cut of that build (monotone). A candidate confirmed at or
     before the baseline is historical / replayed and is never a signal (SPB live_after). So the replay at start, the recovery after a defect and a restart never produce a signal.
-  * the two-pass plan: pass 1 builds the plan only to obtain the geometry (E, S, r_geom) with the symbol's REPORTED tick value; the broker probe (OrderCalcProfit for the minimum volume over that stop)
-    gives the EFFECTIVE tick value (no property fallback); pass 2 builds the plan the gate sees. The pass-1 plan never leaves this layer.
+  * geometry without sizing: SPB_Geometry selects the candidate and calls TG_Compute. The broker probe (OrderCalcProfit for the minimum volume over that stop)
+    gives the EFFECTIVE tick value (no property fallback); only then does SPB_Build size the plan the gate sees. No provisional plan uses the REPORTED tick value.
   * real data only: symbol, quote (fresh), the loss estimate, the existing filters and the daily result come from the market port; a missing value is never zero / CLEAR (UNKNOWN or a block).
   * exposure, counters and policies that no existing module proves are EXPLICIT inputs, unknown by default (-1): nothing is invented.
   * the checks of one decision share one instant and the plan digest (T015 binds and ages them); the in-memory handled list feeds TP_CheckPermit's duplicate check, the durable guard stays in the entry
@@ -14,6 +14,7 @@ What this layer adds (and nothing else):
   * a fresh executor runtime per signal (the executor allows one send per runtime); an uncertain outcome HALTS the layer until restart.
 Nothing here can reach a real transport: the caller passes the transport; the EA fixes a FAKE one."""
 from dataclasses import dataclass, field, replace
+import copy
 
 import entry_gate_reference as eg
 import entry_reference as en
@@ -81,7 +82,7 @@ HALT_FINALS = (en.R_RECOVERY, en.R_BLOCKED, en.R_CANCEL_UNCERTAIN)
 
 def _key(ob):
     c = ob.context
-    return '' if c is None else '%s|%s|%s' % (c.source, c.setup, c.fvg)
+    return '' if c is None else copy.deepcopy(c)
 
 
 def unset_config(cfg):
@@ -127,30 +128,35 @@ class Orchestrator:
         if bad:
             return Outcome('CONFIG_UNSET', 'INPUT_UNSET: ' + ', '.join(bad))
         sym = mk.symbol()
-        if not (sym.read_ok and sym.trade_ok and sym.tick_size > 0 and sym.vol_min > 0 and sym.vol_step > 0 and sym.reported_tick_value > 0):
+        if not (sym.read_ok and sym.trade_ok and sym.tick_size > 0 and sym.vol_min > 0 and sym.vol_step > 0):
+            self.defect()
             return Outcome('MARKET_NOT_READY', 'SYMBOL_UNREADABLE_OR_NOT_TRADABLE')
         q = mk.quote()
         now = mk.now()
         if not (q.read_ok and q.bid > 0 and q.ask >= q.bid and q.time > 0 and now > 0 and 0 <= now - q.time <= cfg.max_quote_age):
+            self.defect()
             return Outcome('MARKET_NOT_READY', 'QUOTE_NOT_READY_OR_STALE')
         sel = replace(cfg.sel, live_after=self.baseline)
         mkt = sp.Market(risk_budget=cfg.risk_budget, tick_value=sym.reported_tick_value, tick_size=sym.tick_size, digits=sym.digits, point=sym.point, stops_level=sym.stops_level,
                         has_quote=True, bid=q.bid, ask=q.ask, vol_min=sym.vol_min, vol_step=sym.vol_step, vol_max=sym.vol_max, cap_lots=cfg.lot_cap)
-        r1 = sp.build(sel, mkt, ob, broken, cut)                # pass 1: the geometry only; discarded
-        if not r1.plan_ready:
+        r1, geo = sp.geometry(sel, mkt, ob, broken, cut)
+        if geo is None:
             return Outcome('NO_PLAN', r1.reason, spb=r1)
         if r1.signal_id in self.handled:
             return Outcome('ALREADY_HANDLED', r1.signal_id, spb=r1)
         buy = ob.context.direction == 1
-        stop_ticks = int(round(r1.plan.r_geom / sym.tick_size))
-        ok, profit = mk.calc_profit(buy, sym.vol_min, r1.plan.e_out, r1.plan.s_out)
+        stop_ticks = int(round(geo.r_geom / sym.tick_size))
+        ok, profit = mk.calc_profit(buy, sym.vol_min, geo.e_out, geo.s_out)
         tick = bl.probe_tick_value(ok, profit, sym.vol_min, stop_ticks)
         if not tick > 0:
+            self.defect()
             return Outcome('PROBE_FAILED', 'BROKER_PROBE_FAILED: no reliable loss estimate; no property fallback', spb=r1)
         r2 = sp.build(sel, replace(mkt, tick_value=tick), ob, broken, cut)       # pass 2: the plan the gate sees
         if not r2.plan_ready:
             return Outcome('NO_PLAN', r2.reason, spb=r2)
         ok, profit = mk.calc_profit(buy, r2.plan.volume_out, r2.plan.e_out, r2.plan.s_out)
+        if not ok or not sp._fin(profit):
+            self.defect()
         session, news, spread = mk.filters()
         digest = en.plan_digest(eg.entry_plan(r2.plan))
         ctx = ob.context
@@ -176,3 +182,4 @@ class Orchestrator:
         if res.final in HALT_FINALS:
             self.halted = 'HALTED after %s: restart and reconcile first' % res.final
         return out
+

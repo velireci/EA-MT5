@@ -338,17 +338,19 @@ public:
    virtual bool Daily(const STpPlan &plan,SDbResult &r)
      {
       if(!mc.daily_on || MQLInfoInteger(MQL_TESTER)) return(false);
+      int daily_offset=0;
+      if(!EO_OffsetSeconds(mc.daily_offset_seconds,daily_offset)) return(false);
       SDhCfg hcfg;
       hcfg.ea_magic=mc.daily_magic;
       hcfg.utc_in_day=TimeGMT();
-      hcfg.server_offset_seconds=mc.daily_offset_seconds;
+      hcfg.server_offset_seconds=daily_offset;
       hcfg.history_complete_asserted=mc.daily_history_complete;
       SDhFacts facts;
       SDhRaw raw;
       string reason="";
       ENUM_DH_VERDICT verdict=DH_ReadAndBuild(_Symbol,hcfg,facts,reason,raw);
       SDbBalance balance;
-      CDbsRealPort port(mc.daily_magic,(mc.daily_offset_seconds==99999 ? 0 : (int)mc.daily_offset_seconds),mc.daily_history_complete,_Symbol);
+      CDbsRealPort port(mc.daily_magic,daily_offset,mc.daily_history_complete,_Symbol);
       SDbsResult stored;
       DBS_Load(port,stored);
       DBS_ForBridge(stored,balance);

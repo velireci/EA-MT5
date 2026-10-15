@@ -21,7 +21,10 @@ cat > "$NEG/b2.py" <<'PYEOF'
 import re, sys
 t = re.sub(r'//[^\n]*', '', open(sys.argv[1], encoding='ascii').read())
 assert t.count('TP_BuildPlan(') == 1, 'exactly one plan builder call'
-for w in ('TG_Compute', 'PS_Compute', 'TP_CheckPermit', 'TP_Authorize', 'TP_CancelDecision', 'OrderSend', 'OrderCheck', 'CTrade', 'FileOpen', 'FileWrite', 'FileDelete', 'GlobalVariable',
+assert t.count('TG_Compute(') == 1, 'TG_Compute geometry call count'
+geometry = t[t.index('bool SPB_Geometry('):t.index('void SPB_Build(')]
+assert 'TG_Compute(' in geometry and 'TP_BuildPlan(' not in geometry, 'geometry before sizing'
+for w in ('PS_Compute', 'TP_CheckPermit', 'TP_Authorize', 'TP_CancelDecision', 'OrderSend', 'OrderCheck', 'CTrade', 'FileOpen', 'FileWrite', 'FileDelete', 'GlobalVariable',
           'TimeCurrent', 'TimeGMT', 'TimeLocal', 'TimeTradeServer', 'Sleep', 'AccountInfo', 'SymbolInfo', 'CopyRates', 'HistorySelect', 'PositionGet', 'M4Step(', 'M4SetContext(', 'M4Init(',
           'M4SelectSwingProposal', 'H3'):
     assert w not in t, w
@@ -31,7 +34,7 @@ assert sorted(inc) == ['M15Confirmation.mqh', 'TradePlanning.mqh'], inc
 # the bridge only READS the observer: it never assigns a member of st / f / broken
 assert re.search(r'\b(st|f\[[^\]]*\]|broken)\.\w+\s*=[^=]', t) is None, 'the observer state is written'
 # the near edge / stop / target come from explicit selections only; the order of the checks
-b = t[t.index('void SPB_Build('):]
+b = t[t.index('bool SPB_Prepare('):]
 order = ['SPB_Unset(sel,asof)', 'CONTEXT_LOST_OR_NOT_READY', 'CONTEXT_SOURCE_MISMATCH', 'TIMING_MISMATCH', 'REPLAY_REQUIRED', 'RETURN_ALREADY_OBSERVED', 'PHASE_NOT_WAIT_RETURN', 'FUTURE_DATA',
          'BROKEN_LEVEL_MISMATCH', 'CANDIDATE_IDS_NOT_UNIQUE', 'AMBIGUOUS_CANDIDATES', 'CANDIDATE_DIRECTION_INCONSISTENT', 'HISTORICAL_OR_REPLAYED_CANDIDATE', 'TP_BuildPlan(']
 pos = [b.index(o) for o in order]
@@ -44,7 +47,7 @@ init = t[t.index('void SPB_SelectionInit('):t.index('struct SSpbMarket')]
 for need in ('SPB_SWING_UNSET', 'SPB_CAND_UNSET', 'SPB_EDGE_UNSET', 'SPB_SL_UNSET', 'SPB_TGT_UNSET', 'M4_POLICY_UNSET', 'sl_buffer_set=false', 'live_after=0'):
     assert need in init, need
 # no clock / counter / random value in the ids
-ids = t[t.index('string SPB_SetupId('):t.index('void SPB_Build(')]
+ids = t[t.index('string SPB_SetupId('):t.index('bool SPB_Prepare(')]
 assert 'Time' not in ids and 'asof' not in ids and 'live_after' not in ids
 sig = [l for l in b.split('\n') if l.strip().startswith('string signal=')]
 assert sig == ['   string signal=setup+"|"+f[pick].id;'], sig
@@ -83,7 +86,7 @@ expect_assert "$NEG/b2.py" "$NEG/E.mqh" "an include of the execution side" "Trad
 cp $HD "$NEG/F.mqh"; python3 - "$NEG/F.mqh" <<'PYEOF'
 import sys
 t = open(sys.argv[1]).read()
-a = '   if(st.phase=="RETURN_OBSERVED") {SPB_Block(out,"RETURN_ALREADY_OBSERVED: the price already came back; no delayed entry"); return;}\n'
+a = '   if(st.phase=="RETURN_OBSERVED") {SPB_Block(out,"RETURN_ALREADY_OBSERVED: the price already came back; no delayed entry"); return(false);}\n'
 assert a in t
 open(sys.argv[1], 'w').write(t.replace(a, ''))
 PYEOF

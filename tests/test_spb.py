@@ -347,7 +347,11 @@ class Sources(unittest.TestCase):
         for n in SCENARIOS:
             self.assertEqual(len(re.findall(r'Scenario_%s\(\);' % n, tst)), 1, n)
         self.assertEqual(hdr.count('TP_BuildPlan('), 1)
-        for w in ('TG_Compute', 'PS_Compute', 'TP_CheckPermit', 'TP_Authorize', 'TP_CancelDecision', 'OrderSend', 'FileOpen', 'GlobalVariable', 'TimeCurrent', 'TimeGMT', 'M4Step(', 'M4SetContext(', 'M4Init('):
+        self.assertEqual(hdr.count('TG_Compute('), 1)
+        geometry = hdr.split('bool SPB_Geometry(', 1)[1].split('void SPB_Build(', 1)[0]
+        self.assertIn('TG_Compute(', geometry)
+        self.assertNotIn('TP_BuildPlan(', geometry)
+        for w in ('PS_Compute', 'TP_CheckPermit', 'TP_Authorize', 'TP_CancelDecision', 'OrderSend', 'FileOpen', 'GlobalVariable', 'TimeCurrent', 'TimeGMT', 'M4Step(', 'M4SetContext(', 'M4Init('):
             self.assertNotIn(w, hdr, w)
         self.assertIsNone(re.search(r'\b(EN|EX|ETD|ER|XA)_', hdr))
         self.assertNotIn('#include "Entry', hdr)
@@ -366,7 +370,7 @@ class Mutants(unittest.TestCase):
             src = src.replace(old, new, 1)
         ns = {'__name__': 'spb_mutant'}
         exec(compile(src, 'spb_mutant', 'exec'), ns)
-        saved = {k: sp.__dict__[k] for k in ('build', 'ids', 'unset_fields')}
+        saved = {k: sp.__dict__[k] for k in ('prepare', 'build', 'ids', 'unset_fields')}
         for k in saved:
             sp.__dict__[k] = ns[k]
         try:

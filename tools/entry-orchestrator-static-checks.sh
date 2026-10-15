@@ -1,5 +1,5 @@
 #!/bin/bash
-# Static checks for the T016 entry orchestrator: the decision core only calls the existing modules in the pinned order (two plan passes, one probe, one EG_Submit), halts and keeps the baseline; the EA and the feed
+# Static checks for the T016 entry orchestrator: geometry, broker probe, final plan, EG_Submit in order; recovery and context changes rebase; the EA and the feed
 # never send an order, never CAPTURE, never include a real transport, expose no transport selector and label every virtual request; protected modules are untouched. NOT a compiler, NOT an MT5 run.
 # Usage: bash tools/entry-orchestrator-static-checks.sh (from anywhere; it cd's to the repo root)
 set -u
@@ -23,20 +23,22 @@ echo "=== O2: the core reuses the modules, in the pinned order, and touches no t
 cat > "$NEG/o2.py" <<'PYEOF'
 import re, sys
 t = re.sub(r'//[^\n]*', '', open(sys.argv[1], encoding='ascii').read())
-assert t.count('SPB_Build(') == 2 and t.count('EG_Submit(') == 1 and t.count('PB_ProbeTickValue(') == 1, 'call sites'
+assert t.count('SPB_Geometry(') == 1 and t.count('SPB_Build(') == 1 and t.count('EG_Submit(') == 1 and t.count('PB_ProbeTickValue(') == 1, 'call sites'
 for w in ('OrderSend', 'OrderCheck', 'OrderCalcProfit', 'TP_Authorize', 'DG_FinalPreview', 'FileOpen', 'FileWrite', 'GlobalVariable', 'TimeCurrent', 'TimeGMT', 'TimeLocal', 'Sleep', 'AccountInfo', 'SymbolInfo',
           'DBS_Capture', 'DBS_Load', 'CAPTURE', 'TP_BuildPlan', 'TG_Compute', 'PS_Compute', 'M4Step(', 'M4Replay', 'H3Evaluate', 'EntryTransportReal', 'ExitTransportReal', 'EN_Place(', 'store.Write', 'store.Lock', 'MathMax(baseline,0'):
     assert w not in t, w
 step = t[t.index('void Step('):]
-order = ['if(!feed_ok)', 'Defect();', 'k!=key) rebase=true', 'baseline=MathMax(baseline,(long)cut)', 'if(halted!="")', 'EO_UnsetConfig(c)', 'mk.Symbol(sym)', 'mk.Quote(q)', 'sel.live_after=baseline',
-         'SPB_Build(sel,m,st,f,broken,cut,r1)', 'Handled(r1.signal_id)', 'mk.CalcProfit(buy,sym.vol_min', 'PB_ProbeTickValue(', 'm.tick_value=tick', 'SPB_Build(sel,m,st,f,broken,cut,r2)',
+order = ['if(!feed_ok)', 'Defect();', '!M4ContextEqual(st.context,previous_context)) rebase=true', 'baseline=MathMax(baseline,(long)cut)', 'if(halted!="")', 'EO_UnsetConfig(c)', 'mk.Symbol(sym)', 'mk.Quote(q)', 'sel.live_after=baseline',
+         'SPB_Geometry(sel,m,st,f,broken,cut,r1,geo)', 'Handled(r1.signal_id)', 'mk.CalcProfit(buy,sym.vol_min', 'PB_ProbeTickValue(', 'm.tick_value=tick', 'SPB_Build(sel,m,st,f,broken,cut,r2)',
          'mk.CalcProfit(buy,r2.plan.volume_out', 'mk.Filters(', 'chk.daily_present=mk.Daily(', 'EG_Submit(', 'Remember(r2.signal_id)', 'halted="HALTED after']
 for o in order:
     assert o in step, 'missing step: ' + o
 pos = [step.index(o) for o in order]
 assert pos == sorted(pos), pos
 assert 'baseline=MathMax(baseline' in step and 'baseline=cut' not in step and 'baseline=0' not in step, 'baseline can move backwards'
-assert 'if(!(tick>0.0))' in step and 'tick=sym.reported_tick_value' not in step and 'm.tick_value=sym.reported_tick_value;' in step[:step.index('SPB_Build(sel,m,st,f,broken,cut,r1)')], 'tick value'
+assert 'if(!(tick>0.0))' in step and 'tick=sym.reported_tick_value' not in step, 'tick value'
+assert '{Defect(); EO_Set(out,"MARKET_NOT_READY","SYMBOL_UNREADABLE_OR_NOT_TRADABLE")' in step, 'symbol recovery baseline'
+assert '{Defect(); EO_Set(out,"MARKET_NOT_READY","QUOTE_NOT_READY_OR_STALE")' in step, 'quote recovery baseline'
 assert 'chk.snap_digest=digest' in step and 'chk.loss_digest=digest' in step and 'chk.daily_digest=digest' in step, 'plan digest binding'
 assert 'chk.snap_time=now' in step and 'chk.loss_time=now' in step and 'chk.daily_time=now' in step, 'shared instant'
 assert 'EN_RuntimeInit(rt)' in step and step.index('EN_RuntimeInit(rt)') < step.index('EG_Submit('), 'fresh runtime per signal'
@@ -76,6 +78,10 @@ for n in ('InpContextSource=EOI_SRC_UNSELECTED', 'InpM15Level=EOI_SWING_UNSELECT
     assert n in ea, 'default not UNSET: ' + n
 assert sorted(re.findall(r'#include "([^"]+)"', ea)) == ['include/EntryOrchestratorFeed.mqh', 'include/EntryTransportFake.mqh'], 'EA includes'
 assert 'daily_on=InpDailyHistoryBridge' in ea
+daily = fd[fd.index('virtual bool Daily('):]
+assert 'EO_OffsetSeconds(mc.daily_offset_seconds,daily_offset)' in daily, 'offset validation'
+assert daily.index('EO_OffsetSeconds(mc.daily_offset_seconds,daily_offset)') < daily.index('hcfg.server_offset_seconds=daily_offset'), 'offset validation'
+assert 'CDbsRealPort port(mc.daily_magic,daily_offset,' in daily, 'validated store offset'
 PYEOF
 python3 -I "$NEG/o3.py" $EA $FEED && echo "  PASS no order / CAPTURE / file write / real transport, fixed fake transport, no transport selector, UNSET defaults, tester refused, chart symbol, LOAD only" || { echo "  FAIL"; FAIL=1; }
 
@@ -83,7 +89,7 @@ echo "=== O4: the test never includes a real transport or reads the terminal ===
 grep -nE 'EntryTransportReal|ExitTransportReal|OrderSend|SymbolInfo|OrderCalcProfit|TimeCurrent|FileOpen|CopyRates|AccountInfo|DBS_' $TS >/dev/null && { echo "  FAIL the test touches the real side"; FAIL=1; } || echo "  PASS the test uses the fake transport, the fake store and a scripted market only"
 
 echo "=== O5: protected modules are untouched since $BASE ==="
-for p in src/include/EntryTransport.mqh src/include/EntryTransportFake.mqh src/include/EntryTransportReal.mqh src/include/EntryExecutor.mqh src/include/EntryGate.mqh src/include/SetupPlanBridge.mqh \
+for p in src/include/EntryTransport.mqh src/include/EntryTransportFake.mqh src/include/EntryTransportReal.mqh src/include/EntryExecutor.mqh src/include/EntryGate.mqh \
          src/include/TradePlanning.mqh src/include/BrokerLossCheck.mqh src/include/DailyBridge.mqh src/include/DailyLimits.mqh src/include/DailyPreviewGate.mqh src/include/DailyBalanceStore.mqh \
          src/include/M15Confirmation.mqh src/include/M15Timeline.mqh src/include/H4M15Bridge.mqh src/include/H4TouchContext.mqh src/include/TimeframeWatcher.mqh src/include/NewsSpreadFilters.mqh \
          src/include/SessionPolicy.mqh src/include/SymbolSnapshot.mqh src/include/ExitExecutor.mqh src/include/ExitTickDriver.mqh src/include/ExitStateFile.mqh src/XauUsdTradePreview.mq5 \
@@ -106,7 +112,7 @@ mut A.mqh $CORE 's/      baseline=MathMax(baseline,(long)cut);/      baseline=(l
 expect_assert "$NEG/o2.py" "$NEG/A.mqh" "a baseline that can move backwards" "missing step: baseline=MathMax"
 mut B.mqh $CORE 's/   if(halted!="") {EO_Set(out,"HALTED",halted); return;}/   if(false) {}/'
 expect_assert "$NEG/o2.py" "$NEG/B.mqh" "no halt after an uncertain outcome" "missing step: if(halted"
-mut C.mqh $CORE 's/   if(!(tick>0.0)) {EO_Set(out,"PROBE_FAILED"/   if(false) {EO_Set(out,"PROBE_FAILED"/'
+mut C.mqh $CORE 's/if(!(tick>0.0))/if(false)/'
 expect_assert "$NEG/o2.py" "$NEG/C.mqh" "a missing probe that does not block" "tick value"
 mut D.mqh $CORE 's/      chk.snap_digest=digest;/      chk.snap_digest="";/'
 expect_assert "$NEG/o2.py" "$NEG/D.mqh" "evidence not bound to the plan digest" "plan digest binding"
@@ -128,6 +134,14 @@ mut L.mqh $FEED 's/      DBS_Load(port,stored);/      DBS_Load(port,stored); DBS
 expect_assert "$NEG/o3.py" "$EA $NEG/L.mqh" "a CAPTURE in the feed" "DBS_Capture\|LOAD only"
 mut M.mqh $EA 's/   virtual void Send(const SEnRequest \&req,SEnSendResult \&res)/   virtual void Send(const SEnRequest \&req,SEnSendResult \&res) {OrderSend(); }\n   virtual void SendUnused(const SEnRequest \&req,SEnSendResult \&res)/'
 expect_assert "$NEG/o3.py" "$NEG/M.mqh $FEED" "an OrderSend in the EA" "OrderSend"
+mut N.mqh $CORE 's/{Defect(); EO_Set(out,"MARKET_NOT_READY","SYMBOL_UNREADABLE_OR_NOT_TRADABLE")/{EO_Set(out,"MARKET_NOT_READY","SYMBOL_UNREADABLE_OR_NOT_TRADABLE")/'
+expect_assert "$NEG/o2.py" "$NEG/N.mqh" "symbol recovery without rebase" "symbol recovery baseline"
+mut O.mqh $CORE 's/{Defect(); EO_Set(out,"MARKET_NOT_READY","QUOTE_NOT_READY_OR_STALE")/{EO_Set(out,"MARKET_NOT_READY","QUOTE_NOT_READY_OR_STALE")/'
+expect_assert "$NEG/o2.py" "$NEG/O.mqh" "quote recovery without rebase" "quote recovery baseline"
+mut P.mqh $CORE 's/!M4ContextEqual(st.context,previous_context)/k!=key/'
+expect_assert "$NEG/o2.py" "$NEG/P.mqh" "context comparison using IDs only" "missing step"
+mut Q.mqh $FEED 's/if(!EO_OffsetSeconds(mc.daily_offset_seconds,daily_offset))/if(false)/'
+expect_assert "$NEG/o3.py" "$EA $NEG/Q.mqh" "offset narrowed without validation" "offset\|substring not found"
 
 [ $FAIL -eq 0 ] && echo "ENTRY ORCHESTRATOR STATIC CHECKS: ALL PASS (static only; MetaEditor compile and MT5 run UNVERIFIED)" || echo "ENTRY ORCHESTRATOR STATIC CHECKS: FAILURES"
 exit $FAIL

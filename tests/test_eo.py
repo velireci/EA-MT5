@@ -163,7 +163,7 @@ class Baseline(unittest.TestCase):
             self.assertTrue(r.reason.startswith('HISTORICAL'))
             forced = eo.Orchestrator()                                           # even a layer that lost its baseline cannot send twice: the executor record blocks
             forced.baseline, forced.rebase = 1, False
-            forced.key = 'T003_PROTOTYPE|H4SET1|H4F1'
+            forced.key = copy.deepcopy(ob.context)
             r2 = w.step(ob, lvl, orch=forced)
             self.assertEqual((r2.result.final, w.tr.sends), (en.R_DUPLICATE, 1))
 
@@ -231,7 +231,6 @@ class Blocks(unittest.TestCase):
     def test_missing_market_data_is_never_zero_or_clear(self):
         changes = (('symbol unreadable', lambda m: setattr(m.sym, 'read_ok', False), 'MARKET_NOT_READY'),
                    ('symbol not tradable', lambda m: setattr(m.sym, 'trade_ok', False), 'MARKET_NOT_READY'),
-                   ('no reported tick value', lambda m: setattr(m.sym, 'reported_tick_value', 0.0), 'MARKET_NOT_READY'),
                    ('quote missing', lambda m: setattr(m.q, 'read_ok', False), 'MARKET_NOT_READY'),
                    ('quote stale', lambda m: setattr(m.q, 'time', m.tr.now - 31), 'MARKET_NOT_READY'),
                    ('quote in the future', lambda m: setattr(m.q, 'time', m.tr.now + 5), 'MARKET_NOT_READY'),
@@ -289,7 +288,54 @@ class Blocks(unittest.TestCase):
 
 
 SCENARIOS = ['buy_to_fake_request', 'sell_to_fake_request', 'replay_baseline_no_signal', 'restart_no_double', 'defect_rebases', 'context_change_rebases', 'unset_inputs_block',
-             'market_missing_blocks', 'gate_blocks_no_request', 'probe_uses_effective_tick', 'halt_after_uncertainty']
+             'market_missing_blocks', 'gate_blocks_no_request', 'probe_uses_effective_tick', 'halt_after_uncertainty',
+             'market_recovery_rebases', 'context_fields_rebase', 'probe_independent_of_property']
+
+
+class ReviewRegressions(unittest.TestCase):
+    def test_market_data_recovery_does_not_revive_the_candidate(self):
+        for d in (1, -1):
+            for kind in ('symbol', 'quote'):
+                with self.subTest(direction=d, kind=kind):
+                    w = World(d)
+                    ob, lvl = observer_n(d, 2)
+                    w.step(ob, lvl)
+                    ob, lvl = observer_n(d, 3)
+                    source = w.mk.sym if kind == 'symbol' else w.mk.q
+                    source.read_ok = False
+                    self.assertFalse(w.step(ob, lvl).request)
+                    source.read_ok = True
+                    recovered = w.step(ob, lvl)
+                    self.assertFalse(recovered.request)
+                    self.assertEqual(w.tr.sends, 0)
+                    self.assertEqual(w.o.baseline, ob.last_asof)
+
+    def test_changed_context_fields_rebase_even_when_ids_are_unchanged(self):
+        for d in (1, -1):
+            for change in ({'lower': 81}, {'upper': 119}, {'confirmed': START-1}, {'confirmed': START-1, 'valid_from': START-1}):
+                with self.subTest(direction=d, change=change):
+                    w = World(d)
+                    ob, lvl = observer_n(d, 2)
+                    w.step(ob, lvl)
+                    ob, lvl = observer_n(d, 3, change)
+                    result = w.step(ob, lvl)
+                    self.assertFalse(result.request)
+                    self.assertEqual(w.tr.sends, 0)
+                    self.assertEqual(w.o.baseline, ob.last_asof)
+
+    def test_broker_probe_precedes_sizing_with_an_unreliable_property(self):
+        for d in (1, -1):
+            for reported in (0.0, 0.000001, 1e9):
+                with self.subTest(direction=d, reported=reported):
+                    w = World(d)
+                    w.mk.sym.reported_tick_value = reported
+                    ob, lvl = observer_n(d, 2)
+                    w.step(ob, lvl)
+                    ob, lvl = observer_n(d, 3)
+                    result = w.step(ob, lvl)
+                    self.assertTrue(result.request, result.reason)
+                    self.assertEqual(w.mk.calls, 2)
+                    self.assertEqual(result.spb.plan.volume_out, 0.22 if d == 1 else 0.18)
 
 
 class Sources(unittest.TestCase):
@@ -323,7 +369,7 @@ class Mutants(unittest.TestCase):
         eo.Orchestrator = ns['Orchestrator']
         try:
             suite = unittest.TestSuite()
-            for cls in (Chain, Baseline, Blocks):
+            for cls in (Chain, Baseline, Blocks, ReviewRegressions):
                 suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(cls))
             r = unittest.TestResult()
             suite.run(r)
@@ -338,7 +384,10 @@ class Mutants(unittest.TestCase):
             ('a changed context does not restart the baseline', [("        if key == '' or key != self.key:", "        if key == '':")]),
             ('the baseline moves backwards', [("            self.baseline = max(self.baseline, cut)", "            self.baseline = cut")]),
             ('the reported tick value is used', [("replace(mkt, tick_value=tick)", "replace(mkt, tick_value=sym.reported_tick_value)")]),
-            ('a probe failure falls back to the property', [("        if not tick > 0:\n            return Outcome('PROBE_FAILED'", "        if False:\n            return Outcome('PROBE_FAILED'")]),
+            ('a probe failure falls back to the property', [("        if not tick > 0:\n            self.defect()\n            return Outcome('PROBE_FAILED'", "        if False:\n            self.defect()\n            return Outcome('PROBE_FAILED'")]),
+            ('context bounds and times are ignored', [("return '' if c is None else copy.deepcopy(c)", "return '' if c is None else (c.source, c.setup, c.fvg)")]),
+            ('symbol recovery does not rebase', [("            self.defect()\n            return Outcome('MARKET_NOT_READY', 'SYMBOL_UNREADABLE_OR_NOT_TRADABLE')", "            return Outcome('MARKET_NOT_READY', 'SYMBOL_UNREADABLE_OR_NOT_TRADABLE')")]),
+            ('quote recovery does not rebase', [("            self.defect()\n            return Outcome('MARKET_NOT_READY', 'QUOTE_NOT_READY_OR_STALE')", "            return Outcome('MARKET_NOT_READY', 'QUOTE_NOT_READY_OR_STALE')")]),
             ('a stale quote is accepted', [("0 <= now - q.time <= cfg.max_quote_age", "True")]),
             ('unset config is ignored', [("        if bad:\n            return Outcome('CONFIG_UNSET'", "        if False:\n            return Outcome('CONFIG_UNSET'")]),
             ('handled signals are not remembered', [("        if res.final in HANDLED_FINALS:\n            self.handled.append(r2.signal_id)", "        if False:\n            self.handled.append(r2.signal_id)")]),
