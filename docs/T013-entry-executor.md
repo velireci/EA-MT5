@@ -1,6 +1,6 @@
 # T013 - entry executor (pending LIMIT order), fake transport only
 
-Status 2026-10-15: IMPLEMENTED in the sandbox on top of 6026989 (owner-approved as one block). Compile and MT5 run UNVERIFIED (Codex compiles, the owner runs `EntryExecutorTest` in MT5). The real transport exists but is never executed. T011/T012 frozen and untouched.
+Status 2026-10-15: IMPLEMENTED on top of 6026989 (owner-approved as one block). RELAYED at 1b0016a (not my runs): Codex two compiles 0/0 and 62 Python tests; owner MT5 18:06:57 `EntryExecutorTest` 170/0 on XAUUSD.fx. The fake-transport block is verified; the REAL transport exists but has never been executed or tried. T011/T012 frozen and untouched.
 
 ## What it is and what it is not
 - Places AT MOST ONE pending LIMIT order per signal from an explicit T007 plan (`STpPlan`) and an explicit permit; links the result to the order it created; reconciles without ever sending again; cancels only an order proven to be the EA's.
