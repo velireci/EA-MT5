@@ -1,4 +1,6 @@
-# T011 executor contract (minimal) - documentation only, no code
+# T011 executor contract (minimal)
+
+Corrected after a70fde6 (see section 9): a failed save is never proof that the old file is still on disk; every uncertainty is RECOVERY_REQUIRED; no rejection class exists until the return-code table is verified.
 
 Base 377643f. Evidence relayed (not my runs): Codex Python 11/0 and MetaEditor 0/0; owner MT5 T011_FlowTest 261 passed / 0 failed; the diagnostic showed SAVE failure -> RECOVERY_REQUIRED,
 a saved DONE, and a repeat with one confirmation. These are FIXTURE runs of the flow: no broker execution, no trading-EA restart. This file defines what the still-unbuilt executor must do
@@ -72,3 +74,12 @@ The executor makes ONE trading call per request and never repeats it (no retry l
 4. Execution parameters of the close: order type, deviation (slippage), filling type, behaviour when the price is beyond the level at send time; whether spread / news / session filters apply to an exit.
 5. Ownership model for existing positions (magic reuse, positions opened before the executor, manual intervention) and who may clear a RECOVERY_REQUIRED.
 6. Cost / +0.2% / breakeven handling and the move of the stop-loss after the partial close (not part of this contract; not built).
+
+## 9. Corrections (executor stage, base a70fde6)
+* SAVE = false does NOT prove the old file stayed on disk: the move may have happened and the read-back may have failed. The executor therefore treats ANY save failure (INTENT or MAP) as RECOVERY_REQUIRED,
+  latches the position in memory, sends nothing (or nothing more) and relies on the next `ESF_Load` after a restart. After a successful INTENT save it re-loads the file independently and requires
+  exactly generation + 1, PENDING + INTENT, no map; anything else is RECOVERY_REQUIRED and nothing is sent.
+* Section 4 is replaced: there is no "definitive rejection" class. Only an ACCEPTED answer (the call returned true AND a result exists AND retcode is 10008 / 10009 / 10010 AND an order ticket > 0) maps an order;
+  every other answer, including a clear-looking reject code, leaves the intent on disk and is RECOVERY_REQUIRED without retry. A rejection table may be added only after the return codes are verified.
+* Returned true is not a fill proof; a fill is proven only by the reconciliation. The executor never calls `EA_OnReport(FULL)`.
+* Implemented (detached, DISABLED by default, fake transport in tests, real transport never executed): `ExitExecutor.mqh`, `ExitTransport.mqh`, `ExitTransportFake.mqh`, `ExitTransportReal.mqh`. Open points: docs/T011-executor-api-verification.md.
