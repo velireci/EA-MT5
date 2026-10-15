@@ -28,7 +28,7 @@ for f in files:
     code = strip(open(f, encoding='ascii').read())
     for w in ('OrderSend', 'OrderSendAsync', 'CTrade', 'PositionClose', 'PositionOpen', 'OrderDelete', 'OrderModify', 'OrderCalcMargin'):
         n = len(re.findall(r'\b%s\s*\(' % w, code)) + (len(re.findall(r'\bCTrade\b', code)) if w == 'CTrade' else 0)
-        if n and not (w == 'OrderSend' and (f.endswith('ExitTransportReal.mqh') or f.endswith('XauUsdT011DemoOpenPosition.mq5')) and n == 1):
+        if n and not (w == 'OrderSend' and ((f.endswith('ExitTransportReal.mqh') or f.endswith('XauUsdT011DemoOpenPosition.mq5')) and n == 1 or (f.endswith('EntryTransportReal.mqh') and n == 2))):   # T013: the entry real transport (place + cancel), compile-only
             # legacy / earlier modules must not have gained a call; only report calls outside the allowed one
             calls.setdefault(f, []).append(w)
 legacy_ok = ('MA_Crossover',)

@@ -220,7 +220,8 @@ class Sources(unittest.TestCase):
                 holders.append(os.path.relpath(f, ROOT).replace(os.sep, '/'))
             for w in ('OrderSendAsync', 'CTrade', 'PositionClose', 'PositionOpen'):
                 self.assertNotRegex(code, r'\b%s\b' % w, f)
-        self.assertEqual(sorted(holders), ['src/XauUsdT011DemoOpenPosition.mq5', 'src/include/ExitTransportReal.mqh'])
+        # T013 added its own real entry transport (never executed, compile-only); no other file may hold a trading call
+        self.assertEqual(sorted(holders), ['src/XauUsdT011DemoOpenPosition.mq5', 'src/include/EntryTransportReal.mqh', 'src/include/ExitTransportReal.mqh'])
 
     def test_the_harness_core_has_no_transport_no_trading_and_no_deletion(self):
         core = strip_comments(_read('src', 'include', 'DemoHarness.mqh'))

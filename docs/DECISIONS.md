@@ -42,3 +42,4 @@ The owner authorised Codex to act as the sole T004 writer while Claude is paused
 
 ## Documentation workflow, 2026-10-14
 Owner authorised consolidation of the client strategy, progress checklist and visual snapshot after Claude finished the task. Current requirements reference: STRATEGY_SPEC.md; progress: PROJECT_CHECKLIST.md and STATE.md; visual: PROJECT_PROGRESS.html. Consult these before each directive and update after evidence. The previous specification is an explicitly historical archive. This adds no client trading decision, merge or live activation.
+| 2026-10-15 | Owner conversation | Approved building the entry executor for pending LIMIT orders as ONE block with a fake transport (validation, intent, one attempt, result link, recovery / cancel). It selects no signal, direction, FVG, E/SL/TP or policy; the real transport is not executed; the demo opener is not an entry engine; T011/T012 stay frozen. | T013 |
