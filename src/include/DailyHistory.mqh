@@ -10,6 +10,7 @@
 #ifndef VELO_DAILY_HISTORY_MQH
 #define VELO_DAILY_HISTORY_MQH
 
+#include "SessionPolicy.mqh"          // T009: SSessionPolicy / SP_Evaluate (the Tirane day); declared here, not taken from the includer's order
 #include "ExitSnapshotAdapter.mqh"
 
 #define DH_MAX_DEALS 200

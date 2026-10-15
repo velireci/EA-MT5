@@ -95,6 +95,10 @@ for f in $HDR $TST; do
   if grep -nE "\b(bool|int|long|double|string|ulong|uint|datetime|color|char|short|uchar|ushort|float)\s+($RESERVED)\b\s*(=|;|,|\))" "$f" >/dev/null; then echo "  FAIL $f declares a variable with a reserved MQL5 word"; FAIL=1; else echo "  PASS $f: no variable is named with a reserved MQL5 word"; fi
 done
 
+echo "=== S4b: the header declares the T009 dependency itself (Codex compile of 3b963d7: SSessionPolicy / SP_Evaluate undeclared) ==="
+if strip $HDR | grep -qE '\b(SSessionPolicy|SP_Evaluate)\b'; then
+  grep -qF '#include "SessionPolicy.mqh"' $HDR && echo "  PASS the header uses T009 and includes SessionPolicy.mqh directly" || { echo "  FAIL the header uses T009 but does not include SessionPolicy.mqh"; FAIL=1; }
+else echo "  FAIL the header no longer uses T009 (the day window must come from T009)"; FAIL=1; fi
 echo "=== S5: balance, format strings, includes, ASCII ==="
 python3 tools/t001-check-balance.py $HDR $TST $DIAG || FAIL=1
 python3 - $HDR $TST $DIAG <<'PYEOF' || FAIL=1
@@ -152,6 +156,8 @@ grep -qF 'f.result_formula="UNSET";' "$NEG/Sel.mqh" && { echo "  FAIL formula co
 cp $HDR "$NEG/Wrong.mqh"; sed -i 's/SymbolInfoDouble(symbol,SYMBOL_VOLUME_STEP,step)/SymbolInfoDouble(symbol)/' "$NEG/Wrong.mqh"
 grep -qF 'SymbolInfoDouble(symbol)' "$NEG/Wrong.mqh" || { echo "  FAIL arity control did not apply"; FAIL=1; }
 if arity "$NEG/Wrong.mqh" >/dev/null 2>&1; then echo "  FAIL the two-argument AccountInfoInteger was not detected"; FAIL=1; else echo "  PASS a wrong-arity terminal call is detected"; fi
+cp $HDR "$NEG/NoSp.mqh"; sed -i '/#include "SessionPolicy.mqh"/d' "$NEG/NoSp.mqh"
+if strip "$NEG/NoSp.mqh" | grep -qE '\b(SSessionPolicy|SP_Evaluate)\b' && ! grep -qF '#include "SessionPolicy.mqh"' "$NEG/NoSp.mqh"; then echo "  PASS a header that uses T009 without including it is detected"; else echo "  FAIL missing-include control"; FAIL=1; fi
 cp $HDR "$NEG/Unbalanced.mqh"; echo "void x(){" >> "$NEG/Unbalanced.mqh"
 python3 tools/t001-check-balance.py "$NEG/Unbalanced.mqh" >/dev/null 2>&1 && { echo "  FAIL unbalanced brace not detected"; FAIL=1; } || echo "  PASS unbalanced brace detected"
 
