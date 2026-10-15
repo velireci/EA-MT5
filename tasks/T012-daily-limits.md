@@ -1,0 +1,17 @@
+# T012 - daily limits (pure check)
+
+Branch `codex/t004-m15-confirmation` (PR #4), base `ca3bd57`. Writer: Claude. Codex reviews and compiles; the owner runs MT5. T011 stays PARTLY OPEN (executor, the real request -> order map, restart, exit policies); this task does not close it.
+
+Scope: a pure check that blocks NEW ENTRIES for the Tirane day and says when a daily limit is PROVEN reached. No order, no cancellation, no account or position read, no clock, no persistence, no real reset, no EA wiring. Existing positions are never touched.
+
+Client rules (STRATEGY_SPEC section 9, K B1) - named constants: block entries at >= 1 win; at >= 2 consecutive losses; when the closed result is <= -2% of the balance at the start of the day (equality blocks; a 4-ulp tolerance absorbs binary noise, orders of magnitude below a cent); and when the number of trades reaches the SUPPLIED limit. 2 versus 3 trades is NOT decided: the limit is an input, a missing limit is POLICY_UNSET -> blocked. Closed results of the robot only; floating is not an input.
+Not done here (supplied by the caller): classification of partial exits, costs and breakeven as win / loss / trade; the balance at the start of the day; the counters. The midnight reset (zeroing the counters) is the caller's; this module only refuses to mix days.
+
+Inputs: utc, snapshot_day (Tirane yyyymmdd of the figures), balance_start (> 0), closed_result, trades_today, wins_today, consecutive_losses (counters 0..100000), max_trades + max_trades_set. Unknown values (None, NaN, infinity, negative or non-integer counters, wrong types) are invalid.
+The Tirane day: T009 (`SP_Evaluate` / `t009.evaluate`), not recomputed; DST is not copied. Tests compare the day against an independent tzdata computation and sweep every full hour of 2026-2027 (+-1 s), which includes every Tirane midnight and DST switch.
+
+Consistency checks (counting identities only; no new definition of a trade): wins <= trades; consecutive losses <= trades; wins + consecutive losses <= trades. The sign of the closed result is NOT compared with wins or losses. A snapshot of another Tirane day is STALE_SNAPSHOT_DAY.
+Output: entry_allowed, primary reason, ALL reasons in a fixed order, cancel_pending_due, daily_limit_reached, day_key. Order: validity reasons (UNSUPPORTED_YEAR | INVALID_UTC, INVALID_SNAPSHOT:snapshot_day, STALE_SNAPSHOT_DAY, INVALID_SNAPSHOT:balance_start / closed_result / trades_today / wins_today / consecutive_losses / max_trades_per_day, INCONSISTENT_COUNTERS:...); if any exists ONLY those are returned and nothing is judged. With valid inputs: DAILY_WIN_STOP, CONSECUTIVE_LOSSES_STOP, DAILY_LOSS_LIMIT, MAX_TRADES_REACHED, then POLICY_UNSET:max_trades_per_day.
+`cancel_pending_due` / `daily_limit_reached` are true ONLY when one of the four limit reasons is proven with valid inputs; an error or a missing policy never invents a daily limit (a missing policy together with a proven limit lists both and sets the flag, because the limit is proven).
+Limits: the figures are only as true as the caller makes them; no reset, no persistence, no restart recovery; session hours are T009's, not combined here; the open client questions (2 vs 3 trades, how partial exits / costs / breakeven count, the exact accounting and recovery of the 2% loss) stay open.
+Files: src/include/DailyLimits.mqh, src/tests/T012_DailyLimitsTest.mq5, tests/t012_daily_{reference,fixtures}.py, tests/test_t012_daily.py, tools/t012-static-checks.sh, reports/T012-verification.md.
