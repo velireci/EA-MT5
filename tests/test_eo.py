@@ -51,6 +51,12 @@ class FakeMarket:
         self.fail_call = 0
         self.session, self.news, self.spread = tp.SESSION_OPEN, tp.NEWS_CLEAR, tp.SPREAD_CLEAR
         self.daily_result = (True, br.Result(entry_allowed=True, primary='', dl_called=True))
+        self.bal = eo.Balance(True, 10000.0, tr.now, True)           # the CURRENT balance of a DEMO account
+        self.balance_calls = 0
+
+    def balance(self):
+        self.balance_calls += 1
+        return self.bal
 
     def now(self):
         return self.tr.now
@@ -287,9 +293,88 @@ class Blocks(unittest.TestCase):
             self.assertEqual((nxt.status, w.tr.sends), ('HALTED', 1))
 
 
+class RiskFromBalance(unittest.TestCase):
+    """DEMO policy (owner agreement 2026-10-15, D2 stays a client question before live): risk budget = 1% of the CURRENT account balance, read at every step. A failed / invalid / stale /
+    non-demo read blocks with no fallback. The budget that sizes the plan is the budget the loss check uses (one value, one instant). The daily-limit base is not touched here."""
+
+    def world(self, d, balance=10000.0, **cfg):
+        w = World(d)
+        w.cfg.risk_source = eo.RISK_SOURCE_DEMO_BALANCE_PCT
+        w.cfg.risk_budget = -1.0                              # the explicit amount is NOT the fallback
+        w.mk.bal = eo.Balance(True, balance, w.tr.now, True)
+        for k, v in cfg.items():
+            setattr(w.cfg, k, v)
+        return w
+
+    def test_one_percent_of_the_current_balance_sizes_the_plan_and_the_loss_check(self):
+        for d in (1, -1):
+            w = self.world(d, 10000.0)
+            ob, lvl, out = w.live_candidate(self)
+            self.assertEqual((out.status, out.request, out.risk_budget, out.risk_base), ('EXECUTOR', True, 100.0, 10000.0), out.reason)
+            ref = World(d)                                                      # the same world with the explicit amount 100 gives the identical plan
+            ob2, lvl2, ref_out = ref.live_candidate(self)
+            self.assertEqual(out.spb.plan, ref_out.spb.plan)
+            half = self.world(d, 5000.0)                                         # the balance follows the account: half the balance, half the budget
+            ob3, lvl3, out3 = half.live_candidate(self)
+            self.assertEqual((out3.request, out3.risk_budget), (True, 50.0), out3.reason)
+            self.assertLessEqual(out3.spb.plan.risk_model, 50.0)
+            self.assertLess(out3.spb.plan.volume_out, out.spb.plan.volume_out)
+            self.assertEqual(out.decision.permit.digest, en.plan_digest(eg.entry_plan(out.spb.plan)))
+
+    def test_the_balance_is_read_at_every_step_and_not_cached(self):
+        w = self.world(1, 10000.0)
+        o1, l1 = observer_n(1, 2)
+        w.step(o1, l1)
+        w.step(o1, l1)
+        self.assertEqual(w.mk.balance_calls, 2)
+
+    def test_an_unreadable_invalid_stale_or_non_demo_base_blocks_with_no_fallback(self):
+        bad = [('unreadable', eo.Balance(False, 10000.0, 0, True)), ('zero', eo.Balance(True, 0.0, 0, True)), ('negative', eo.Balance(True, -5.0, 0, True)),
+               ('nan', eo.Balance(True, float('nan'), 0, True)), ('inf', eo.Balance(True, float('inf'), 0, True)), ('not demo', eo.Balance(True, 10000.0, 0, False)),
+               ('stale', eo.Balance(True, 10000.0, -1000, True))]
+        for d in (1, -1):
+            for label, b in bad:
+                w = self.world(d)
+                w.cfg.risk_budget = 100.0                                         # an explicit amount exists: it must NOT be used as a fallback
+                w.mk.bal = eo.Balance(b.read_ok, b.amount, w.tr.now + (b.time if label == 'stale' else 0), b.demo)
+                ob, lvl, out = w.live_candidate(self)
+                self.assertEqual((out.status, out.request), ('RISK_BASE_NOT_READY', False), '%s dir %d: %s' % (label, d, out.reason))
+                w.untouched(self)
+
+    def test_an_unknown_source_value_is_unset(self):
+        for d in (1, -1):
+            w = self.world(d)
+            w.cfg.risk_source = 7
+            ob, lvl, out = w.live_candidate(self)
+            self.assertEqual(out.status, 'CONFIG_UNSET')
+            self.assertIn('risk_source', out.reason)
+            w.untouched(self)
+
+    def test_the_explicit_amount_source_ignores_the_balance(self):
+        for d in (1, -1):
+            w = World(d)
+            w.mk.bal = eo.Balance(False, 0.0, 0, False)
+            ob, lvl, out = w.live_candidate(self)
+            self.assertEqual((out.status, out.request, w.mk.balance_calls), ('EXECUTOR', True, 0))
+
+    def test_a_balance_outage_does_not_revive_a_signal_formed_during_it(self):
+        for d in (1, -1):
+            w = self.world(d)
+            o1, l1 = observer_n(d, 2)
+            w.step(o1, l1)
+            w.mk.bal = eo.Balance(False, 0.0, 0, True)
+            o2, l2 = observer_n(d, 3)
+            self.assertEqual(w.step(o2, l2).status, 'RISK_BASE_NOT_READY')
+            w.mk.bal = eo.Balance(True, 10000.0, w.tr.now, True)
+            out = w.step(o2, l2)
+            self.assertEqual(out.status, 'NO_PLAN')
+            self.assertTrue(out.reason.startswith('HISTORICAL'), out.reason)
+            w.untouched(self)
+
+
 SCENARIOS = ['buy_to_fake_request', 'sell_to_fake_request', 'replay_baseline_no_signal', 'restart_no_double', 'defect_rebases', 'context_change_rebases', 'unset_inputs_block',
              'market_missing_blocks', 'gate_blocks_no_request', 'probe_uses_effective_tick', 'halt_after_uncertainty',
-             'market_recovery_rebases', 'context_fields_rebase', 'probe_independent_of_property', 'reservation_before_every_send']
+             'market_recovery_rebases', 'context_fields_rebase', 'probe_independent_of_property', 'reservation_before_every_send', 'risk_budget_from_current_balance', 'risk_base_failure_blocks']
 
 
 class Reservation(unittest.TestCase):
@@ -412,7 +497,7 @@ class Mutants(unittest.TestCase):
         eo.Orchestrator = ns['Orchestrator']
         try:
             suite = unittest.TestSuite()
-            for cls in (Chain, Baseline, Blocks, ReviewRegressions):
+            for cls in (Chain, Baseline, Blocks, ReviewRegressions, RiskFromBalance):
                 suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(cls))
             r = unittest.TestResult()
             suite.run(r)
@@ -426,6 +511,11 @@ class Mutants(unittest.TestCase):
             ('a defect does not restart the baseline', [("        if not feed_ok or ob is None:\n            self.defect()\n", "        if not feed_ok or ob is None:\n")]),
             ('a changed context does not restart the baseline', [("        if key == '' or key != self.key:", "        if key == '':")]),
             ('the baseline moves backwards', [("            self.baseline = max(self.baseline, cut)", "            self.baseline = cut")]),
+            ('the balance is not demo-checked', [("b.read_ok and b.demo and _finite", "b.read_ok and _finite")]),
+            ('a stale balance is accepted', [(" and 0 <= now - b.time <= cfg.max_quote_age):\n                self.defect()\n                return Outcome('RISK_BASE_NOT_READY', 'BALANCE", "):\n                self.defect()\n                return Outcome('RISK_BASE_NOT_READY', 'BALANCE")]),
+            ('a failed balance falls back to the explicit amount', [("                return Outcome('RISK_BASE_NOT_READY', 'BALANCE_UNREADABLE_INVALID_STALE_OR_NOT_DEMO: the demo risk policy (1% of the current balance) has no usable base; no fallback')", "                budget, b = cfg.risk_budget, mk.balance()")]),
+            ('the loss check uses the explicit amount', [("risk_budget=budget, loss_time=now", "risk_budget=cfg.risk_budget, loss_time=now")]),
+            ('the policy is not one percent', [("RISK_PCT_DEMO = 1.0", "RISK_PCT_DEMO = 2.0")]),
             ('the reported tick value is used', [("replace(mkt, tick_value=tick)", "replace(mkt, tick_value=sym.reported_tick_value)")]),
             ('a probe failure falls back to the property', [("        if not tick > 0:\n            self.defect()\n            return Outcome('PROBE_FAILED'", "        if False:\n            self.defect()\n            return Outcome('PROBE_FAILED'")]),
             ('context bounds and times are ignored', [("return '' if c is None else copy.deepcopy(c)", "return '' if c is None else (c.source, c.setup, c.fvg)")]),

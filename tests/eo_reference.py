@@ -30,6 +30,7 @@ FAKE_LABEL = 'FAKE EXECUTION: a virtual request, nothing is sent to the terminal
 class Config:
     sel: sp.Selection = field(default_factory=sp.Selection)
     risk_budget: float = -1.0
+    risk_source: int = 0                   # 0 = the explicit amount above (-1 blocks); 1 = DEMO policy: 1% of the CURRENT account balance, read at every step (a failed / invalid / stale / non-demo read blocks; no fallback)
     lot_cap: float = -1.0
     model_tolerance: float = -1.0
     max_quote_age: int = -1
@@ -65,6 +66,18 @@ class Quote:
     time: int = 0
 
 
+RISK_SOURCE_AMOUNT, RISK_SOURCE_DEMO_BALANCE_PCT = 0, 1
+RISK_PCT_DEMO = 1.0                         # fixed: the demo policy is 1% and nothing else; it is NOT a client confirmation for live (D2)
+
+
+@dataclass
+class Balance:
+    read_ok: bool = False
+    amount: float = 0.0
+    time: int = 0
+    demo: bool = False
+
+
 @dataclass
 class Outcome:
     status: str = ''
@@ -74,6 +87,8 @@ class Outcome:
     decision: object = None
     spb: object = None
     label: str = ''
+    risk_budget: float = -1.0              # the budget this step sized the plan with AND checked the loss against (one value)
+    risk_base: float = -1.0                # the balance it came from (policy 1), else -1
 
 
 HANDLED_FINALS = (en.R_PLACED, en.R_FILLED, en.R_DUPLICATE, en.R_REJECTED, en.R_RECOVERY, en.R_BLOCKED, en.R_PRECHECK_REFUSED, en.R_CANCELLED, en.R_EXPIRED, en.R_NOCHANGE)
@@ -85,9 +100,15 @@ def _key(ob):
     return '' if c is None else copy.deepcopy(c)
 
 
+def _finite(x):
+    return x == x and x not in (float('inf'), float('-inf'))
+
+
 def unset_config(cfg):
     bad = []
-    if not cfg.risk_budget > 0:
+    if cfg.risk_source not in (RISK_SOURCE_AMOUNT, RISK_SOURCE_DEMO_BALANCE_PCT):
+        bad.append('risk_source')
+    elif cfg.risk_source == RISK_SOURCE_AMOUNT and not cfg.risk_budget > 0:
         bad.append('risk_budget')
     if not cfg.lot_cap > 0:
         bad.append('lot_cap')
@@ -136,8 +157,19 @@ class Orchestrator:
         if not (q.read_ok and q.bid > 0 and q.ask >= q.bid and q.time > 0 and now > 0 and 0 <= now - q.time <= cfg.max_quote_age):
             self.defect()
             return Outcome('MARKET_NOT_READY', 'QUOTE_NOT_READY_OR_STALE')
+        budget, base = cfg.risk_budget, -1.0
+        if cfg.risk_source == RISK_SOURCE_DEMO_BALANCE_PCT:
+            b = mk.balance()
+            if not (b.read_ok and b.demo and _finite(b.amount) and b.amount > 0 and 0 <= now - b.time <= cfg.max_quote_age):
+                self.defect()
+                return Outcome('RISK_BASE_NOT_READY', 'BALANCE_UNREADABLE_INVALID_STALE_OR_NOT_DEMO: the demo risk policy (1% of the current balance) has no usable base; no fallback')
+            base = b.amount
+            budget = b.amount * RISK_PCT_DEMO / 100.0
+            if not (_finite(budget) and budget > 0):
+                self.defect()
+                return Outcome('RISK_BASE_NOT_READY', 'RISK_BUDGET_INVALID')
         sel = replace(cfg.sel, live_after=self.baseline)
-        mkt = sp.Market(risk_budget=cfg.risk_budget, tick_value=sym.reported_tick_value, tick_size=sym.tick_size, digits=sym.digits, point=sym.point, stops_level=sym.stops_level,
+        mkt = sp.Market(risk_budget=budget, tick_value=sym.reported_tick_value, tick_size=sym.tick_size, digits=sym.digits, point=sym.point, stops_level=sym.stops_level,
                         has_quote=True, bid=q.bid, ask=q.ask, vol_min=sym.vol_min, vol_step=sym.vol_step, vol_max=sym.vol_max, cap_lots=cfg.lot_cap)
         r1, geo = sp.geometry(sel, mkt, ob, broken, cut)
         if geo is None:
@@ -167,9 +199,9 @@ class Orchestrator:
         reg = tp.Registry(ids=list(self.handled) + [''], count=len(self.handled))
         present, daily = mk.daily(r2)
         checks = eg.Checks(snapshot=snap, snapshot_time=now, snapshot_digest=digest, limits=lim, registry=reg, calc_ok=ok, profit=profit, tolerance=cfg.model_tolerance,
-                           risk_budget=cfg.risk_budget, loss_time=now, loss_digest=digest, daily_present=present, daily=daily, daily_time=now, daily_digest=digest)
+                           risk_budget=budget, loss_time=now, loss_digest=digest, daily_present=present, daily=daily, daily_time=now, daily_digest=digest)
         res, dec = eg.submit(cfg.gate, cfg.exec, tr, store, en.Runtime(), r2, checks, pre_send)
-        out = Outcome('EXECUTOR', res.reason, False, res, dec, r2)
+        out = Outcome('EXECUTOR', res.reason, False, res, dec, r2, risk_budget=budget, risk_base=base)
         if not dec.allow:
             out.status = 'GATE_BLOCKED'
             return out

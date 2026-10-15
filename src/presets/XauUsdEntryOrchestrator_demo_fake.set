@@ -1,0 +1,119 @@
+; XauUsdEntryOrchestrator v1.08 - COMPLETE DEMO preset, FAKE entry transport + READ-ONLY management transport. Every input of the EA is listed exactly once.
+; NOTHING HERE IS A CLIENT APPROVAL FOR LIVE. Labels (the line above each input): CONFIRMED = the client's own answer (source given) | DEMO-PROPOSAL = a TEMPORARY demo choice for a point the client has not answered
+; (the decision id of docs/EA_INTEGRATION_PLAN.md list B; each must be answered by the client before live) | TECHNICAL = a technical parameter, no client rule | OFF = inert default | OWNER-FILL = a value only the owner's
+; terminal can give | MANUAL-DAILY = a counter the owner sets by hand each Tirane day (not derived by the EA) | NOT-USED = ignored under the other settings.
+; NO real transport: InpEntryTransport=0 (FAKE) and InpManagementTransport=0 (READ_ONLY) with empty phrases. This file does not authorise any order.
+; BEFORE the first signal each Tirane day (not inputs, the daily gate blocks without them): (1) run XauUsdT012BalanceStore with a CAPTURE preset to store the balance at the start of the day (the -2% daily limit
+; base is unchanged: the START-OF-DAY balance); (2) set InpTradesToday / InpDailyWins / InpDailyConsecutiveLosses to the day's real counts (0 / 0 / 0 on a day without trades); (3) check InpDailyServerOffsetSeconds
+; against TimeTradeServer()-TimeGMT() (printed by the T012 history diagnostic) - a wrong value does not block, it changes which deals count as today's.
+; Run tests/preset_check.py (python3 tests/preset_check.py) to list what still blocks for a given preset: it replays the EA's own blocking rules offline.
+; [DEMO-PROPOSAL D4] H4 context source: 1 = T003 re-confirmation (after a wick the client wants the H4 FVG re-confirmed, DEC S3/S4); 0 UNSELECTED, 2 / 3 = T002 touch variants.
+InpContextSource=1
+; [DEMO-PROPOSAL D5] M15 level: 1 = latest unbroken fractal 2/2 (the only implemented definition); 0 UNSELECTED.
+InpM15Level=1
+; [DEMO-PROPOSAL D5] FVG timing: 1 = evaluated on CLOSED candles, at or after the break (no repaint, S:172); 0 UNSELECTED.
+InpFvgTiming=1
+; [DEMO-PROPOSAL D5] candidate: 2 = only when exactly one eligible FVG exists, otherwise skip; 0 UNSELECTED.
+InpCandidate=2
+; [CONFIRMED point 5, S:24-26] entry edge: 1 = near side (BUY upper edge, SELL lower edge), LIMIT order; 2 = far side; 0 UNSELECTED.
+InpEntryEdge=1
+; [DEMO-PROPOSAL D6] SL rule: 1 = price of the broken level plus buffer; 0 UNSELECTED.
+InpSlRule=1
+; [DEMO-PROPOSAL D6] SL buffer in PRICE UNITS (USD for XAUUSD); the client gives no value; -1 = UNSET (blocks); 0 would be a deliberate "no buffer".
+InpSlBuffer=0.50
+; [DEMO-PROPOSAL D7] target rule: 1 = none beyond the 2R minimum (TP = the 2R level of the plan). NOTE D8: T011 refuses a TP at the real 2R level, so the management registration of a REAL fill can be refused.
+InpTargetRule=1
+; [NOT-USED] explicit risk amount; ignored while InpRiskSource=1.
+InpRiskBudget=-1
+; [DEMO-PROPOSAL D2, owner agreement 2026-10-15] risk source: 1 = 1% of the CURRENT ACCOUNT_BALANCE read at every step, demo accounts only, no fallback. D2 (base and costs) stays a client question before live.
+InpRiskSource=1
+; [CONFIRMED S:66-68] maximum lot 10; a conflict skips.
+InpLotCap=10
+; [TECHNICAL] relative tolerance between the model loss and the broker's OrderCalcProfit loss (0..1).
+InpModelTolerance=0.02
+; [TECHNICAL] maximum age in seconds of the quote / the gate evidence / the executor permit (the poll runs every 2 s).
+InpMaxQuoteAgeSeconds=30
+InpGateMaxAgeSeconds=60
+InpPermitMaxAgeSeconds=60
+; [TECHNICAL] exposure source: 1 = READ-ONLY account reader (this EA's magic, hedging account); the two explicit exposure inputs below are then ignored.
+InpExposureSource=1
+; [DEMO-PROPOSAL D3] an owned pending order RESERVES a position: 1 = count as position, 2 = ignore; 0 UNSET blocks.
+InpPendingPolicy=1
+; [DEMO-PROPOSAL D3] the RISK of an owned pending order is part of the existing risk: 1 = include, 2 = exclude; 0 UNSET.
+InpPendingRiskPolicy=1
+; [NOT-USED] explicit exposure snapshot; ignored while InpExposureSource=1.
+InpOpenPositions=-1
+; [MANUAL-DAILY] trades already taken today (also the counter of the daily check); -1 = unknown (blocks). Set to the real count each Tirane day.
+InpTradesToday=0
+; [NOT-USED] explicit existing risk; ignored while InpExposureSource=1.
+InpExistingRisk=-1
+; [CONFIRMED S:70] maximum 2 open positions.
+InpMaxPositions=2
+; [DEMO-PROPOSAL D1] maximum trades per day: the form says 2 (S:69), the preliminary note says 3 (S:133); the demo uses 2 (the form answer, the more cautious). The contradiction stays open for the client.
+InpMaxTrades=2
+; [OWNER-FILL] combined risk cap in ACCOUNT CURRENCY = 2% of the balance (S:71). 200 assumes a 10000 balance: EDIT it to 2% of the real balance (the cap is an amount, it does not follow the balance).
+InpCombinedRiskCap=200
+; [CONFIRMED S:86-94] session Mon-Fri 00:00-20:30 Europe/Tirane (DST handled), Friday close 21:00; minutes are Tirane local minutes; weekday mask 62 = Monday-Friday.
+InpSessionClock=true
+InpSessionStartMinute=0
+InpSessionEndMinute=1230
+InpSessionWeekdayMask=62
+InpFridayCloseEnabled=true
+InpFridayCloseMinute=1260
+; [CONFIRMED S:95-98] all USD high-impact news, 30 minutes before / after (MT5 calendar).
+InpNewsCalendar=true
+; [TECHNICAL, S:39 delegates the threshold to the developer] maximum spread in POINTS; 0.01 point size = 100 points per USD: 50 points = 0.50 USD. A measured value from the account replaces it.
+InpMaxSpreadPoints=50
+; [CONFIRMED S:73-83] daily result from the deal history (T012 bridge) with the day balance from the store (LOAD only).
+InpDailyHistoryBridge=true
+InpDailyEaMagic=777
+; [OWNER-FILL] server time minus UTC in seconds, a multiple of 900; 10800 = UTC+3 (broker summer time, 2026-10-15). It changes with the broker's DST: verify it.
+InpDailyServerOffsetSeconds=10800
+; [DEMO-PROPOSAL, owner assertion] the owner asserts the deal history of the day is complete (demo account, no missing deals).
+InpDailyHistoryComplete=true
+; [DEMO-PROPOSAL D12] result formula: net of all deals including commission, swap and fee.
+InpDailyResultFormula=PROFIT_COMMISSION_SWAP_FEE
+; [TECHNICAL] the only supported classification: wins / losses / trades are supplied by the owner (counters).
+InpDailyClassification=CALLER_CLASSIFIED
+; [MANUAL-DAILY] winning trades today and the current streak of consecutive losses; -1 = unknown (blocks).
+InpDailyWins=0
+InpDailyConsecutiveLosses=0
+; [TECHNICAL] magic of this EA's orders (> 0).
+InpEaMagic=777
+; [CONFIRMED technical rule] pending orders use filling RETURN (1); 0 UNSET.
+InpFilling=1
+; [TECHNICAL, docs C] expiry: 1 = GTC; the pending order is cancelled by the events below, not by a time limit.
+InpExpiryMode=1
+InpExpirySeconds=-1
+; [TECHNICAL] observer windows (H4 / M15 rebuild, lookback, fractal 2/2, replay), the values the T004 flow was verified with.
+InpH4RebuildBars=2000
+InpH4LookbackBars=300
+InpH4LeftBars=2
+InpH4RightBars=2
+InpOrdinaryWarmBars=120
+InpM15ReplayBars=512
+InpM15LookbackBars=300
+InpM15LeftBars=2
+InpM15RightBars=2
+; [CONFIRMED S:31-32, S:82, S:94] cancel an open pending order at the end of the session, before news, at the daily limit. Only a FAKE order exists in this preset.
+InpCancelOnSessionEnd=true
+InpCancelOnNewsBlock=true
+InpCancelOnDailyLimit=true
+; [OFF] owner acknowledgement of a persisted halt; only at a start after the cause was read.
+InpAcknowledgeLifecycleHalt=false
+; [OFF] registration and management of a filled entry. The FAKE entry transport never fills a real position; turning this on needs InpManagementAuthorisation=I_AUTHORISE_T011_DEMO_PARTIAL_CLOSE and InpManagementRPolicy=1 (the closing inputs below are already set).
+InpManagementRegistration=false
+InpManagementAuthorisation=
+InpManagementRPolicy=0
+; [OFF] 0 = FAKE entry transport; the phrase stays empty.
+InpEntryTransport=0
+InpEntryAuthorisation=
+; [OFF] 0 = READ_ONLY management transport (every closing request is refused); confirmation false.
+InpManagementTransport=0
+InpManagementConfirmAutoSend=false
+; [TECHNICAL, diagnostic values of the owner's earlier demo test XauUsdT011ExitDemoSell_03_manager] closing request: filling 2 = IOC, deviation 20 points, filters ignored (1), state CLEAR (1). They do not settle any client rule.
+InpMgmtFilling=2
+InpMgmtDeviation=20
+InpMgmtFilterPolicy=1
+InpMgmtFilterState=1
+InpPollSeconds=2

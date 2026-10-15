@@ -109,6 +109,27 @@ Rekomandimi është propozim i Claude, jo përgjigje; pa përgjigje shkon defaul
 
 Pa D4–D7 EA-ja nuk prodhon plan me përkufizime të klientit (prototipi mund të shërbejë si konfigurim pune, D5); pa D1–D3 dhe D12 porta bllokon; D8–D9 vendosin vetëm menaxhimin pas mbushjes; D10, D11, D13 nuk ndalojnë hyrjen.
 
+## Preseti demo FAKE/READ_ONLY: zgjedhjet e përkohshme (15.10.2026; `src/presets/XauUsdEntryOrchestrator_demo_fake.set`, EA v1.08)
+Të gjitha janë **vetëm për provë demo, jo miratim për live**; çdo "Pyetje klienti" mbetet në listën B. Konfirmimet e klientit (hyrja `NEAR_SIDE`, lot max 10, max 2 pozicione, seanca/lajmet, anulimet, 1% si fakt S:132) janë në preset me etiketën CONFIRMED dhe burimin. Buxheti i riskut = 1% e `ACCOUNT_BALANCE` aktuale (`InpRiskSource=1`): lexohet në çdo hap, vetëm llogari demo, pa fallback; i njëjti buxhet përcakton volumin dhe kontrollin e humbjes; baza e kufirit ditor −2% (balanca e fillimit të ditës nga store) nuk preket.
+
+| Zgjedhja në preset | Vlera | Pyetje klienti para live | Pse duhet për plan/portë |
+|---|---|---|---|
+| Burimi i kontekstit H4 | T003 rikonfirmim | D4 | pa të nuk ka kontekst |
+| Swing M15 / koha e FVG / kandidati | fractal 2/2 / candle të mbyllura / vetëm një FVG | D5 | pa të nuk ka sinjal |
+| SL | niveli i thyer + buffer **0.50** USD | D6 | pa të nuk ka SL |
+| Targeti | vetëm minimumi 2R (TP = 2R) | D7 / D8 | pa të nuk ka TP |
+| Baza e riskut | 1% e balancës aktuale (demo) | D2 | pa të nuk ka volum |
+| Pending rezervon pozicion dhe risk | po / po | D3 | porta e kërkon (UNSET bllokon) |
+| Trade/ditë | **2** (forma S:69; shënimi paraprak S:133 thotë 3) | D1 (kundërshti e dokumentuar) | porta e kërkon |
+| Formula e rezultatit ditor | `PROFIT_COMMISSION_SWAP_FEE` + numëratorë me dorë | D12 | porta ditore bllokon pa to |
+| Cap i riskut të kombinuar | **200** = 2% e një balance të supozuar 10000 (shumë, jo përqindje) | — (S:71 jep 2%) | porta e kërkon; redakto sipas balancës |
+| Tolerancë modeli / moshat e kuotës, provës, lejes | 0.02 / 30 / 60 / 60 s | teknike | UNSET bllokon |
+| Spread maksimal | 50 pikë (0.50 USD) | S:39 e delegon matjen | spread UNKNOWN bllokon |
+| Kompensimi i orës së serverit, historia e plotë | 10800 s (verifiko), e pohuar nga pronari | — | e kërkon burimi ditor |
+
+**Hapa para çdo ditë (jo input, nuk shfaqen si "UNSET" por bllokojnë portën):** CAPTURE i balancës së fillimit të ditës me `XauUsdT012BalanceStore`; numëratorët ditorë (`InpTradesToday`, `InpDailyWins`, `InpDailyConsecutiveLosses`) me dorë; kontrolli i `InpDailyServerOffsetSeconds` kundrejt `TimeTradeServer()-TimeGMT()`; `InpCombinedRiskCap` = 2% e balancës reale.
+**Kontrolli offline:** `python3 tests/preset_check.py [preset]` rishikon të gjitha rregullat e bllokimit të EA-së mbi një preset; për presetin e dorëzuar dalin 0 inpute bllokuese. **Çfarë mbetet bllokuese pas gjithë kësaj:** me TP = 2R regjistrimi i një mbushjeje REALE mund të refuzohet nga T011 (varet nga çmimi real, D8), prandaj menaxhimi 2R mbetet i bllokuar; transporti FAKE nuk mbush kurrë. Pyetjet për klientin para live (D1–D8, D10–D13) mbeten të ruajtura në listën B.
+
 ## Gjendja pas paketës së menaxhimit (15.10.2026; kompilim/MT5 UNVERIFIED)
 - **Përcaktuar dhe lidhur:** hyrja LIMIT `NEAR_SIDE` (pika 5), max 2 pozicione dhe 2% (pika 9), seanca/lajmet/spread si filtra (pika 11–13), anulimi në fund seance/lajm/limit ditor (pika 16), regjistrimi + menaxhimi 80/20 në 2R brenda orkestruesit me driver-in T011 ekzistues (pika 17–19, i çaktivizuar si parazgjedhje), transporti real DEMO i përgatitur (pika 22, i çaktivizuar, me frazë; dërgimi real nuk është i autorizuar nga ndërtimi).
 - **Përcaktuar nga klienti por ende jo i lidhur (teknike):** anulimi i pending-it në ndryshim drejtimi / sinjal të kundërt (S:29-30) dhe njoftimet push (S:100, S:173).

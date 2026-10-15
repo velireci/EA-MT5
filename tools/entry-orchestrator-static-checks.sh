@@ -47,6 +47,13 @@ assert 'RESERVATION_FAILED' in step and step.index('GATE_BLOCKED') < step.index(
 assert 'EN_R_CANCEL_UNCERTAIN' in step and 'EN_R_RECOVERY' in step and 'EN_R_BLOCKED' in step, 'halt results'
 assert 'EO_FAKE_LABEL' in step and 'out.request=true' in step, 'label'
 assert re.search(r'out\.request=true;\s*out\.label=EO_FAKE_LABEL', step), 'request without label'
+assert 'EO_RISK_PCT_DEMO 1.0' in t, 'the demo policy is exactly 1%'
+assert 'if(c.risk_source==EO_RISK_SOURCE_DEMO_BALANCE_PCT)' in step and 'mk.Balance(bal);' in step, 'the balance is read at every step, inside the policy branch only'
+assert 'bal.read_ok && bal.demo && TG_Finite(bal.amount) && bal.amount>0.0 && now-bal.time>=0 && now-bal.time<=c.max_quote_age' in step, 'read ok, demo, finite, positive and fresh'
+assert 'RISK_BASE_NOT_READY' in step and step.count('mk.Balance(') == 1, 'a failed read blocks (no fallback)'
+assert 'budget=bal.amount*EO_RISK_PCT_DEMO/100.0;' in step and 'm.risk_budget=budget;' in step and 'chk.risk_budget=budget;' in step and 'c.risk_budget' not in step.replace('double budget=c.risk_budget;', ''), 'one budget sizes the plan and checks the loss'
+assert step.index('mk.Balance(') < step.index('m.risk_budget=budget;') < step.index('SPB_Geometry('), 'the budget is known before the plan is sized'
+assert 'virtual void Balance(SEoBalance &b) {b.read_ok=false;' in t, 'the default market gives no balance'
 inc = re.findall(r'#include "([^"]+)"', t)
 assert inc == ['EntryGate.mqh'], inc
 PYEOF
@@ -91,7 +98,7 @@ assert 'g_registrar.provenance=(g_real_entry ? MH_PROV_BROKER : MH_PROV_SYNTHETI
 assert 'g_cfg.exec.real_authorised=g_real_entry;' in ea, 'the executor authorisation follows the explicit selection'
 # every selection / policy input is UNSET by default
 for n in ('InpContextSource=EOI_SRC_UNSELECTED', 'InpM15Level=EOI_SWING_UNSELECTED', 'InpFvgTiming=EOI_TIMING_UNSELECTED', 'InpCandidate=EOI_CAND_UNSELECTED', 'InpEntryEdge=EOI_EDGE_UNSELECTED',
-          'InpSlRule=EOI_SL_UNSELECTED', 'InpSlBuffer=-1', 'InpTargetRule=EOI_TGT_UNSELECTED', 'InpRiskBudget=-1', 'InpLotCap=-1', 'InpModelTolerance=-1', 'InpMaxQuoteAgeSeconds=-1', 'InpGateMaxAgeSeconds=-1',
+          'InpSlRule=EOI_SL_UNSELECTED', 'InpRiskSource=EOI_RISK_AMOUNT', 'InpSlBuffer=-1', 'InpTargetRule=EOI_TGT_UNSELECTED', 'InpRiskBudget=-1', 'InpLotCap=-1', 'InpModelTolerance=-1', 'InpMaxQuoteAgeSeconds=-1', 'InpGateMaxAgeSeconds=-1',
           'InpPermitMaxAgeSeconds=-1', 'InpOpenPositions=-1', 'InpTradesToday=-1', 'InpExistingRisk=-1', 'InpMaxPositions=-1', 'InpMaxTrades=-1', 'InpCombinedRiskCap=-1', 'InpSessionClock=false',
           'InpNewsCalendar=false', 'InpMaxSpreadPoints=-1', 'InpDailyHistoryBridge=false', 'InpDailyServerOffsetSeconds=99999', 'InpDailyHistoryComplete=false', 'InpFilling=EOI_FILL_UNSET', 'InpExpiryMode=EOI_EXP_UNSET'):
     assert n in ea, 'default not UNSET: ' + n
@@ -172,6 +179,17 @@ mut R4.mqh $EA 's/g_registrar.provenance=(g_real_entry ? MH_PROV_BROKER : MH_PRO
 expect_assert "$NEG/o3.py" "$NEG/R4.mqh $FEED" "a FAKE entry transport declared as a broker" "provenance follows"
 mut R5.mqh $FEED 's/      DBS_Load(port,stored);/      DBS_Load(port,stored); CEnRealTransport x;/'
 expect_assert "$NEG/o3.py" "$EA $NEG/R5.mqh" "the real transport in the feed" "feed: CEnRealTransport"
+
+mut S1.mqh $CORE 's/         if(!(bal.read_ok \&\& bal.demo \&\& TG_Finite(bal.amount)/         if(!(bal.read_ok \&\& TG_Finite(bal.amount)/'
+expect_assert "$NEG/o2.py" "$NEG/S1.mqh" "a balance that is not demo-checked" "read ok, demo"
+mut S2.mqh $CORE 's/      chk.risk_budget=budget;/      chk.risk_budget=c.risk_budget;/'
+expect_assert "$NEG/o2.py" "$NEG/S2.mqh" "a loss check against another budget than the sized one" "one budget"
+mut S3.mqh $CORE 's/#define EO_RISK_PCT_DEMO 1.0/#define EO_RISK_PCT_DEMO 2.0/'
+expect_assert "$NEG/o2.py" "$NEG/S3.mqh" "a policy that is not one percent" "exactly 1%"
+mut S4.mqh $CORE 's/ \&\& now-bal.time<=c.max_quote_age//'
+expect_assert "$NEG/o2.py" "$NEG/S4.mqh" "a stale balance accepted" "fresh"
+mut S5.mqh $EA 's/^input ENUM_EO_RISK_SOURCE InpRiskSource=EOI_RISK_AMOUNT;/input ENUM_EO_RISK_SOURCE InpRiskSource=EOI_RISK_DEMO_1PCT_CURRENT_BALANCE;/'
+expect_assert "$NEG/o3.py" "$NEG/S5.mqh $FEED" "the demo balance policy on by default" "default not UNSET"
 
 [ $FAIL -eq 0 ] && echo "ENTRY ORCHESTRATOR STATIC CHECKS: ALL PASS (static only; MetaEditor compile and MT5 run UNVERIFIED)" || echo "ENTRY ORCHESTRATOR STATIC CHECKS: FAILURES"
 exit $FAIL

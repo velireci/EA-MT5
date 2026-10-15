@@ -42,6 +42,18 @@ struct SEoQuote
    long time;
   };
 
+#define EO_RISK_SOURCE_AMOUNT 0
+#define EO_RISK_SOURCE_DEMO_BALANCE_PCT 1
+#define EO_RISK_PCT_DEMO 1.0     // fixed: the demo policy is 1% and nothing else; it is NOT a client confirmation for live (D2)
+
+struct SEoBalance
+  {
+   bool read_ok;
+   double amount;               // ACCOUNT_BALANCE (the CURRENT balance)
+   long time;
+   bool demo;
+  };
+
 // everything the core needs from the terminal; the EA implements it with READ-ONLY reads, the test with scripted values
 class CEoMarket
   {
@@ -52,12 +64,14 @@ public:
    virtual bool CalcProfit(const bool buy,const double volume,const double e,const double s,double &profit)=0;     // OrderCalcProfit; false = not obtained
    virtual void Filters(int &session,int &news,int &spread)=0;                                                    // TP_SESSION_* / TP_NEWS_* / TP_SPREAD_*; UNKNOWN when a filter is not configured or not readable
    virtual bool Daily(const STpPlan &plan,SDbResult &r)=0;                                                       // false = the T012 daily result was not evaluated
+   virtual void Balance(SEoBalance &b) {b.read_ok=false; b.amount=0.0; b.time=0; b.demo=false;}             // the CURRENT balance of a DEMO account; the default is 'unreadable' (blocks)
   };
 
 struct SEoConfig
   {
    SSpbSelection sel;           // live_after is set by the core
    double risk_budget;
+   int risk_source;             // EO_RISK_SOURCE_AMOUNT (0, the explicit amount above) | EO_RISK_SOURCE_DEMO_BALANCE_PCT (1: 1% of the current balance read at every step, demo only, no fallback)
    double lot_cap;
    double model_tolerance;
    long max_quote_age;
@@ -75,6 +89,7 @@ void EO_ConfigInit(SEoConfig &c)
   {
    SPB_SelectionInit(c.sel);
    c.risk_budget=-1.0;
+   c.risk_source=EO_RISK_SOURCE_AMOUNT;
    c.lot_cap=-1.0;
    c.model_tolerance=-1.0;
    c.max_quote_age=-1;
@@ -97,6 +112,8 @@ struct SEoOutcome
    SEgDecision dec;
    SSpbResult spb;
    string label;
+   double risk_budget;          // the budget this step sized the plan with AND checked the loss against (one value)
+   double risk_base;            // the balance it came from (policy 1), else -1
   };
 
 void EO_OutcomeInit(SEoOutcome &o)
@@ -108,6 +125,8 @@ void EO_OutcomeInit(SEoOutcome &o)
    EG_DecisionInit(o.dec);
    SPB_ResultInit(o.spb);
    o.label="";
+   o.risk_budget=-1.0;
+   o.risk_base=-1.0;
   }
 
 void EO_Set(SEoOutcome &o,const string status,const string reason)
@@ -119,7 +138,9 @@ void EO_Set(SEoOutcome &o,const string status,const string reason)
 string EO_UnsetConfig(const SEoConfig &c)
   {
    string bad="";
-   if(!(c.risk_budget>0.0)) bad+=(bad=="" ? "" : ", ")+"risk_budget";
+   if(c.risk_source!=EO_RISK_SOURCE_AMOUNT && c.risk_source!=EO_RISK_SOURCE_DEMO_BALANCE_PCT) bad+=(bad=="" ? "" : ", ")+"risk_source";
+   else
+      if(c.risk_source==EO_RISK_SOURCE_AMOUNT && !(c.risk_budget>0.0)) bad+=(bad=="" ? "" : ", ")+"risk_budget";
    if(!(c.lot_cap>0.0)) bad+=(bad=="" ? "" : ", ")+"lot_cap";
    if(!(c.model_tolerance>=0.0 && c.model_tolerance<=1.0)) bad+=(bad=="" ? "" : ", ")+"model_tolerance";
    if(!(c.max_quote_age>0)) bad+=(bad=="" ? "" : ", ")+"max_quote_age";
@@ -193,11 +214,23 @@ public:
       long now=mk.Now();
       if(!(q.read_ok && q.bid>0.0 && q.ask>=q.bid && q.time>0 && now>0 && now-q.time>=0 && now-q.time<=c.max_quote_age))
         {Defect(); EO_Set(out,"MARKET_NOT_READY","QUOTE_NOT_READY_OR_STALE"); return;}
+      double budget=c.risk_budget;
+      double base=-1.0;
+      if(c.risk_source==EO_RISK_SOURCE_DEMO_BALANCE_PCT)
+        {
+         SEoBalance bal;
+         mk.Balance(bal);
+         if(!(bal.read_ok && bal.demo && TG_Finite(bal.amount) && bal.amount>0.0 && now-bal.time>=0 && now-bal.time<=c.max_quote_age))
+           {Defect(); EO_Set(out,"RISK_BASE_NOT_READY","BALANCE_UNREADABLE_INVALID_STALE_OR_NOT_DEMO: the demo risk policy (1% of the current balance) has no usable base; no fallback"); return;}
+         base=bal.amount;
+         budget=bal.amount*EO_RISK_PCT_DEMO/100.0;
+         if(!(TG_Finite(budget) && budget>0.0)) {Defect(); EO_Set(out,"RISK_BASE_NOT_READY","RISK_BUDGET_INVALID"); return;}
+        }
       SSpbSelection sel=c.sel;
       sel.live_after=baseline;
       SSpbMarket m;
       SPB_MarketInit(m);
-      m.risk_budget=c.risk_budget;
+      m.risk_budget=budget;
       m.tick_value=sym.reported_tick_value;
       m.tick_size=sym.tick_size;
       m.digits=sym.digits;
@@ -254,7 +287,7 @@ public:
       chk.calc_ok=ok;
       chk.profit=profit;
       chk.tolerance=c.model_tolerance;
-      chk.risk_budget=c.risk_budget;
+      chk.risk_budget=budget;
       chk.loss_time=now;
       chk.loss_digest=digest;
       SDbResult daily;
@@ -279,6 +312,8 @@ public:
       EG_Submit(c.gate,c.exec,tr,store,rt,r2,chk,reg,n_handled,out.res,out.dec,pre_send);
       out.status="EXECUTOR";
       out.reason=out.res.reason;
+      out.risk_budget=budget;
+      out.risk_base=base;
       if(!out.dec.allow) {out.status="GATE_BLOCKED"; return;}
       if(StringFind(out.res.reason,"PRE_SEND_RESERVATION_FAILED")==0) {out.status="RESERVATION_FAILED"; return;}      // nothing was placed and the signal is NOT consumed
       if(out.res.outcome==EN_R_PLACED || out.res.outcome==EN_R_FILLED)

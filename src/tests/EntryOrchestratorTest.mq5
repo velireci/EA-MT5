@@ -87,8 +87,15 @@ public:
    int session,news,spread;
    bool daily_present;
    SDbResult daily;
+   SEoBalance bal;
+   int balance_calls;
    CFakeMarket(void)
      {
+      balance_calls=0;
+      bal.read_ok=true;
+      bal.amount=10000.0;
+      bal.time=0;
+      bal.demo=true;
       tr=NULL;
       eff_tick=1.0;
       calls=0;
@@ -123,7 +130,9 @@ public:
       q.bid=(dir==1 ? 108.0 : 90.0);
       q.ask=q.bid+0.3;
       q.time=tr.now;
+      bal.time=tr.now;
      }
+   virtual void Balance(SEoBalance &b) {balance_calls++; b=bal;}
    virtual long Now(void) {return(tr.now);}
    virtual void Symbol(SEoSymbol &s) {s=sym;}
    virtual void Quote(SEoQuote &x) {x=q;}
@@ -590,6 +599,65 @@ void Scenario_reservation_before_every_send(void)
      }
   }
 
+void Scenario_risk_budget_from_current_balance(void)
+  {
+   for(int d=0;d<2;d++)
+     {
+      int dir=(d==0 ? 1 : -1);
+      CW w;
+      w.Init(dir);
+      w.cfg.risk_source=EO_RISK_SOURCE_DEMO_BALANCE_PCT;
+      w.cfg.risk_budget=-1.0;                                  // the explicit amount is NOT the fallback
+      w.Live();
+      Check(w.out.status=="EXECUTOR" && w.out.request && w.out.risk_budget==100.0 && w.out.risk_base==10000.0,StringFormat("dir %d: 1%% of a 10000 balance = 100, one value for the plan and the loss check",dir));
+      CW ref;
+      ref.Init(dir);
+      ref.Live();
+      Check(w.out.spb.plan.volume_out==ref.out.spb.plan.volume_out && w.out.spb.plan.risk_model==ref.out.spb.plan.risk_model,StringFormat("dir %d: the plan equals the plan of the explicit amount 100",dir));
+      CW h;
+      h.Init(dir);
+      h.cfg.risk_source=EO_RISK_SOURCE_DEMO_BALANCE_PCT;
+      h.cfg.risk_budget=-1.0;
+      h.mk.bal.amount=5000.0;
+      h.Live();
+      Check(h.out.request && h.out.risk_budget==50.0 && h.out.spb.plan.risk_model<=50.0 && h.out.spb.plan.volume_out<w.out.spb.plan.volume_out,StringFormat("dir %d: the budget follows the balance (half the balance, half the budget)",dir));
+      Check(w.mk.balance_calls>=2,StringFormat("dir %d: the balance is read at every step",dir));
+      CW e;
+      e.Init(dir);
+      e.mk.bal.read_ok=false;
+      e.Live();
+      Check(e.out.status=="EXECUTOR" && e.mk.balance_calls==0,StringFormat("dir %d: the explicit-amount source never reads the balance",dir));
+      CW u;
+      u.Init(dir);
+      u.cfg.risk_source=7;
+      u.Live();
+      Check(u.out.status=="CONFIG_UNSET" && Has(u.out.reason,"risk_source") && u.Untouched(),StringFormat("dir %d: an unknown source value is UNSET",dir));
+     }
+  }
+
+void Scenario_risk_base_failure_blocks(void)
+  {
+   string label[7]={"unreadable","zero","negative","not a number","infinite","not demo","stale"};
+   for(int d=0;d<2;d++)
+      for(int k=0;k<7;k++)
+        {
+         int dir=(d==0 ? 1 : -1);
+         CW w;
+         w.Init(dir);
+         w.cfg.risk_source=EO_RISK_SOURCE_DEMO_BALANCE_PCT;
+         w.cfg.risk_budget=100.0;                               // an explicit amount exists: it must NOT be used as a fallback
+         if(k==0) w.mk.bal.read_ok=false;
+         if(k==1) w.mk.bal.amount=0.0;
+         if(k==2) w.mk.bal.amount=-5.0;
+         if(k==3) w.mk.bal.amount=MathSqrt(-1.0);
+         if(k==4) w.mk.bal.amount=MathPow(10.0,400.0);
+         if(k==5) w.mk.bal.demo=false;
+         if(k==6) w.mk.bal.time=w.t.now-1000;
+         w.Live();
+         Check(w.out.status=="RISK_BASE_NOT_READY" && !w.out.request && w.t.sends==0,StringFormat("%s dir %d: blocked with no fallback",label[k],dir));
+        }
+  }
+
 void OnStart()
   {
    Print("T016 ENTRY ORCHESTRATOR TEST: fake transport, fake store and a scripted market; no file, no terminal read, no order, no trade.");
@@ -608,6 +676,8 @@ void OnStart()
    Scenario_context_fields_rebase();
    Scenario_probe_independent_of_property();
    Scenario_reservation_before_every_send();
+   Scenario_risk_budget_from_current_balance();
+   Scenario_risk_base_failure_blocks();
    TestOffsetValidation();
    PrintFormat("T016 ENTRY ORCHESTRATOR TEST finished: %d passed, %d failed",g_pass,g_fail);
   }

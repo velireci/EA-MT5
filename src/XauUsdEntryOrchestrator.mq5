@@ -9,7 +9,7 @@
 //   A filled order is registered with the existing T011 executor and then managed by the T011 driver inside this EA (OnTick = the 2R level, OnTimer = reconcile only) only when InpManagementRegistration is true;
 //   the registered fill stays in the lifecycle index until the T011 record is DONE or the position is proven closed (that index is the restart memory). Not proof of broker execution. UNVERIFIED: not compiled or run.
 #property strict
-#property version "1.07"
+#property version "1.08"
 #include "include/EntryOrchestratorFeed.mqh"
 #include "include/EntryTransportFake.mqh"
 #include "include/ExposureReaderReal.mqh"
@@ -32,6 +32,7 @@ enum ENUM_EO_PENDING_RISK {EOI_PENDRISK_UNSET=0,EOI_PENDRISK_INCLUDE=1,EOI_PENDR
 enum ENUM_EO_FILLING {EOI_FILL_UNSET=0,EOI_FILL_RETURN=1};
 enum ENUM_EO_EXPIRY {EOI_EXP_UNSET=0,EOI_EXP_GTC=1,EOI_EXP_SECONDS=2};
 enum ENUM_EO_MGMT_RPOL {EOI_MGMT_RPOL_UNSET=0,EOI_MGMT_RPOL_R_GEOM=1};
+enum ENUM_EO_RISK_SOURCE {EOI_RISK_AMOUNT=0,EOI_RISK_DEMO_1PCT_CURRENT_BALANCE=1};
 enum ENUM_EO_ENTRY_TRANSPORT {EOI_ETR_FAKE=0,EOI_ETR_BROKER_DEMO=1};
 enum ENUM_EO_MGMT_TRANSPORT {EOI_MTR_READ_ONLY=0,EOI_MTR_BROKER_DEMO=1};
 
@@ -44,6 +45,7 @@ input ENUM_EO_SL InpSlRule=EOI_SL_UNSELECTED;
 input double InpSlBuffer=-1;                 // price units; -1 = UNSET (blocks); 0 is a deliberate "no buffer"
 input ENUM_EO_TARGET InpTargetRule=EOI_TGT_UNSELECTED;
 input double InpRiskBudget=-1;               // account currency, NOT percent; -1 = UNSET
+input ENUM_EO_RISK_SOURCE InpRiskSource=EOI_RISK_AMOUNT; // AMOUNT = InpRiskBudget above (default). DEMO_1PCT_CURRENT_BALANCE = DEMO-ONLY policy: 1% of the CURRENT ACCOUNT_BALANCE read at every step (InpRiskBudget is then ignored, there is NO fallback: an unreadable / invalid / stale / non-demo balance blocks). Not a client confirmation for live (D2)
 input double InpLotCap=-1;                   // -1 = UNSET
 input double InpModelTolerance=-1;           // 0..1; -1 = UNSET
 input long InpMaxQuoteAgeSeconds=-1;         // -1 = UNSET
@@ -149,7 +151,21 @@ public:
   };
 
 CEoFeed g_feed;
-CEoRealMarket g_market;
+// DEMO risk policy: the CURRENT balance of a DEMO account, read now (the feed header stays untouched); anything else is "unreadable" and the core blocks, with no fallback
+class CEoDemoMarket : public CEoRealMarket
+  {
+public:
+   virtual void Balance(SEoBalance &b)
+     {
+      ResetLastError();
+      b.amount=AccountInfoDouble(ACCOUNT_BALANCE);
+      b.demo=(AccountInfoInteger(ACCOUNT_TRADE_MODE)==ACCOUNT_TRADE_MODE_DEMO);
+      b.time=(long)TimeTradeServer();
+      b.read_ok=(GetLastError()==0 && TerminalInfoInteger(TERMINAL_CONNECTED)!=0 && AccountInfoInteger(ACCOUNT_LOGIN)>0 && MathIsValidNumber(b.amount));
+     }
+  };
+
+CEoDemoMarket g_market;
 CEoTerminalFake g_tr;
 CEnFakeFileStore g_store;
 CEnRealStore g_rstore;             // real entry records (BROKER_DEMO only)
@@ -188,6 +204,7 @@ bool Configure(void)
    g_trp=GetPointer(g_tr);
    g_storep=GetPointer(g_store);
    g_lockp=GetPointer(g_lockstore);
+   if((int)InpRiskSource!=(int)EOI_RISK_AMOUNT && (int)InpRiskSource!=(int)EOI_RISK_DEMO_1PCT_CURRENT_BALANCE) return(false);
    if((int)InpEntryTransport!=(int)EOI_ETR_FAKE && (int)InpEntryTransport!=(int)EOI_ETR_BROKER_DEMO) return(false);
    if((int)InpManagementTransport!=(int)EOI_MTR_READ_ONLY && (int)InpManagementTransport!=(int)EOI_MTR_BROKER_DEMO) return(false);
    if(InpEntryTransport==EOI_ETR_BROKER_DEMO)
@@ -257,6 +274,7 @@ bool Configure(void)
    g_cfg.sel.sl_buffer=(InpSlBuffer>=0.0 ? InpSlBuffer : 0.0);
    g_cfg.sel.target_rule=(InpTargetRule==EOI_TGT_NONE_2R_MINIMUM ? SPB_TGT_NONE_2R_MINIMUM : SPB_TGT_UNSET);
    g_cfg.risk_budget=InpRiskBudget;
+   g_cfg.risk_source=(int)InpRiskSource;
    g_cfg.lot_cap=InpLotCap;
    g_cfg.model_tolerance=InpModelTolerance;
    g_cfg.max_quote_age=InpMaxQuoteAgeSeconds;
