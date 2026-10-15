@@ -1,0 +1,15 @@
+; XauUsdT011ExitDemoSell_01_open - step 1 of the ONE demo SELL test of the exit manager: opens ONE owned SELL (reuses XauUsdT011DemoOpenPosition.mq5). DISABLED: InpEnabled=false, authorisation empty.
+; SEPARATE from the earlier test: magic 778 (not 777) -> a new intent file VELO_T011_DEMO_OPEN_INTENT_<login>_778.txt and a new lock key; the position gets a new identifier -> new state file.
+; Volume 0.05 = 5 steps, split 4 / 1 (0.04 closed, 0.01 remains). SL distance 5.00 -> R_GEOM = 5.00, the geometric 2R level lies 10.00 below the open price; TP distance 15.00 is beyond it.
+; All distances are DIAGNOSTIC test values (demo money), not rules. The owner types the phrase I_AUTHORISE_T011_DEMO_OPEN_POSITION deliberately, after the Codex review.
+; InpDirection 1 BUY, -1 SELL | InpFilling 0 UNSET, 1 FOK, 2 IOC, 3 RETURN
+InpEnabled=false
+InpAuthorisation=
+InpEaMagic=778
+InpSymbol=XAUUSD
+InpDirection=-1
+InpVolume=0.05
+InpStopLossDistance=5.00
+InpTakeProfitDistance=15.00
+InpFilling=2
+InpDeviation=20

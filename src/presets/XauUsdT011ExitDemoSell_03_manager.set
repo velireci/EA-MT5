@@ -1,0 +1,20 @@
+; XauUsdT011ExitDemoSell_03_manager - step 3: the tick-path EA for the SELL registered in step 2 (XauUsdT011ExitManager.mq5). DISABLED: InpEnabled=false, authorisation empty, InpConfirmAutoSend=false.
+; Fill in ONLY the same three values as in step 2: InpPositionId, InpInitialSl, InpTpPrice. Then set InpEnabled=true, type the phrase I_AUTHORISE_T011_DEMO_PARTIAL_CLOSE and set InpConfirmAutoSend=true.
+; The level 2R is NOT an input: the EA derives it from the registered E and S. Filling 2 (IOC), deviation 20 and the exit-filter policy 1 (IGNORE, state CLEAR) are TEST parameters, not strategy decisions.
+; InpRPolicy 0 UNSET, 2 R_GEOM | InpDirection 0 UNSET, 1 BUY, -1 SELL | InpFilling 0 UNSET, 1 FOK, 2 IOC, 3 RETURN | InpFilterPolicy 0 UNSET, 1 IGNORE, 2 NEEDS_CLEAR | InpFilterState 0 UNKNOWN, 1 CLEAR, 2 BLOCKED
+InpEnabled=false
+InpAuthorisation=
+InpConfirmAutoSend=false
+InpRPolicy=2
+InpEaMagic=778
+InpPositionId=0
+InpSymbol=XAUUSD
+InpDirection=-1
+InpInitialSl=0
+InpTpPrice=0
+InpVolumeInitial=0.05
+InpFilling=2
+InpDeviation=20
+InpFilterPolicy=1
+InpFilterState=1
+InpTimerSeconds=60

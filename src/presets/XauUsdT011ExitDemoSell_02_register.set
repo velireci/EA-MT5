@@ -1,0 +1,15 @@
+; XauUsdT011ExitDemoSell_02_register - step 2: the EXPLICIT registration of the SELL opened in step 1 (XauUsdT011ExitRegister.mq5). DISABLED: InpEnabled=false, authorisation empty.
+; Fill in ONLY these three values from the step-1 log line "position ticket ... POSITION_IDENTIFIER ... SL ... TP ...": InpPositionId (the IDENTIFIER, not the ticket), InpInitialSl (the SL printed), InpTpPrice (the TP printed).
+; Everything else is fixed. InpRPolicy 2 = R_GEOM (price distance |open price - initial SL|; not the client's final R; no costs). The open price is read by the code from the position, it is NOT an input.
+; Then set InpEnabled=true and type the phrase I_AUTHORISE_T011_DEMO_PARTIAL_CLOSE. The registration refuses when the live SL differs from InpInitialSl.
+; InpRPolicy 0 UNSET, 2 R_GEOM | InpDirection 0 UNSET, 1 BUY, -1 SELL
+InpEnabled=false
+InpAuthorisation=
+InpRPolicy=2
+InpEaMagic=778
+InpPositionId=0
+InpSymbol=XAUUSD
+InpDirection=-1
+InpInitialSl=0
+InpTpPrice=0
+InpVolumeInitial=0.05

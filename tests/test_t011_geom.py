@@ -205,6 +205,45 @@ class Presets(unittest.TestCase):
         self.assertLess(oninit.index('ETD_Init('), oninit.index('EventSetTimer('))
 
 
+class DemoSellPackage(unittest.TestCase):
+    """the presets of the ONE demo SELL test: complete, disabled, separate magic, 0.05 -> 4 / 1, TP beyond the geometric 2R"""
+    P = Presets.values
+
+    def test_presets_are_complete_and_disabled(self):
+        for step, src in (('01_open', 'XauUsdT011DemoOpenPosition.mq5'), ('02_register', 'XauUsdT011ExitRegister.mq5'), ('03_manager', 'XauUsdT011ExitManager.mq5')):
+            names = sorted(Presets.inputs(('src', src)))
+            v = Presets.values(('src', 'presets', 'XauUsdT011ExitDemoSell_%s.set' % step))
+            self.assertEqual(sorted(v), names, step)
+            self.assertEqual((v['InpEnabled'], v['InpAuthorisation']), ('false', ''), step)
+            self.assertEqual((v['InpEaMagic'], v['InpSymbol'], v['InpDirection']), ('778', 'XAUUSD', '-1'), step)       # a magic separate from 777; SELL
+        m = Presets.values(('src', 'presets', 'XauUsdT011ExitDemoSell_03_manager.set'))
+        self.assertEqual(m['InpConfirmAutoSend'], 'false')
+        for step in ('02_register', '03_manager'):
+            v = Presets.values(('src', 'presets', 'XauUsdT011ExitDemoSell_%s.set' % step))
+            self.assertEqual((v['InpPositionId'], v['InpInitialSl'], v['InpTpPrice']), ('0', '0', '0'), step)             # filled in ONLY from the opener's log
+            self.assertEqual((v['InpRPolicy'], v['InpVolumeInitial']), ('2', '0.05'), step)
+
+    def test_the_volume_splits_four_and_one_and_the_tp_is_beyond_the_geometric_2r(self):
+        import t011_split_reference as es
+        sp = es.split(0.05, 0.01, 0.01, 100.0)
+        self.assertEqual(sp.status, 'OK')
+        self.assertEqual((round(sp.close_volume, 8), round(sp.remaining_volume, 8)), (0.04, 0.01))
+        o = Presets.values(('src', 'presets', 'XauUsdT011ExitDemoSell_01_open.set'))
+        self.assertEqual(o['InpVolume'], '0.05')
+        sl, tp = float(o['InpStopLossDistance']), float(o['InpTakeProfitDistance'])
+        self.assertGreater(tp, 2 * sl)                                      # TP is neither equal to nor before the 2R level
+        self.assertEqual(o['InpFilling'], '2')
+
+    def test_nothing_of_the_first_test_is_referenced(self):
+        for step in ('01_open', '02_register', '03_manager'):
+            txt = _read('src', 'presets', 'XauUsdT011ExitDemoSell_%s.set' % step)
+            self.assertNotIn('58913478802', txt)
+            self.assertNotIn('InpEaMagic=777', txt)
+        doc = _read('docs', 'T011-exit-manager-demo-sell.md')
+        for need in ('PENDING proof', 'magic **778**', 'Zero requests before the level', 'At most one request', 'Restart without a second send', 'SL is NOT moved'):
+            self.assertIn(need, doc)
+
+
 class MqlBlock(unittest.TestCase):
     def test_fixture_block_equals_generator(self):
         txt = _read('src', 'tests', 'T011_GeomTest.mq5')
