@@ -29,6 +29,8 @@ public:
       symbol.vol_step=0.01;
       symbol.vol_max=100.0;
       symbol.tick_size=0.01;
+      symbol.digits=2;
+      symbol.point=0.01;
       symbol.close_allowed=true;
       position.found=true;
       position.ticket=9;
@@ -37,6 +39,8 @@ public:
       position.magic=777;
       position.type=0;
       position.volume=0.5;
+      position.price_open=0.0;
+      position.sl=0.0;
       precheck_ok=true;
       response.returned_true=false;
       response.have_result=false;

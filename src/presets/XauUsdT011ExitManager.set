@@ -1,0 +1,19 @@
+; XauUsdT011ExitManager - the tick-path EA for ONE registered position. DISABLED: InpEnabled=false, authorisation empty, InpConfirmAutoSend=false, InpRPolicy 0 (UNSET blocks).
+; The owner fills in the values of the REGISTERED plan and enables it only after Codex has reviewed the file and the registration was read back. R_GEOM (2) does not settle the client's final R or the costs.
+; Complete preset: every input is listed once. InpRPolicy 0 UNSET, 2 R_GEOM | InpDirection 0 UNSET, 1 BUY, -1 SELL | InpFilling 0 UNSET, 1 FOK, 2 IOC, 3 RETURN | InpFilterPolicy 0 UNSET, 1 IGNORE, 2 NEEDS_CLEAR | InpFilterState 0 UNKNOWN, 1 CLEAR, 2 BLOCKED
+InpEnabled=false
+InpAuthorisation=
+InpConfirmAutoSend=false
+InpRPolicy=0
+InpEaMagic=777
+InpPositionId=0
+InpSymbol=XAUUSD
+InpDirection=0
+InpInitialSl=0
+InpTpPrice=0
+InpVolumeInitial=0
+InpFilling=0
+InpDeviation=-1
+InpFilterPolicy=0
+InpFilterState=0
+InpTimerSeconds=60

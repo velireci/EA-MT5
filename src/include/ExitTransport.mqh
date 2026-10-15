@@ -23,6 +23,8 @@ struct SExSymbol
    double vol_step;
    double vol_max;
    double tick_size;
+   int digits;             // SYMBOL_DIGITS and SYMBOL_POINT feed TG_Compute only (R_GEOM)
+   double point;
    bool close_allowed;
   };
 
@@ -35,6 +37,8 @@ struct SExPosition
    long magic;
    int type;               // 0 = buy, 1 = sell
    double volume;
+   double price_open;      // POSITION_PRICE_OPEN: read ONCE at registration as the entry E of R_GEOM
+   double sl;              // POSITION_SL (0 = none): compared with the asserted initial stop at registration only, never used for R afterwards
   };
 
 struct SExSendRequest

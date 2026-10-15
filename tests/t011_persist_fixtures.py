@@ -22,11 +22,17 @@ def pending(**kw):
     return bound(**d)
 
 
-PLAN = dict(plan_set=True, plan_tp=4320.5, plan_vol_min=0.01, plan_vol_step=0.01, plan_vol_max=100.0)
+PLAN = dict(plan_set=True, plan_tp=4320.5, plan_vol_min=0.01, plan_vol_step=0.01, plan_vol_max=100.0, plan_rpol=p.RPOL_TYPED)       # diagnostic typed level: no E / S
+# R_GEOM: the declared basis (source and TG-normalized E and S) is stored; the level (bound(): 4310.5) and the direction live in the bound state
+PLAN_GEOM = dict(plan_set=True, plan_tp=4320.5, plan_vol_min=0.01, plan_vol_step=0.01, plan_vol_max=100.0, plan_rpol=p.RPOL_R_GEOM,
+                 plan_e_src=4300.0, plan_s_src=4295.0, plan_e_out=4300.0, plan_s_out=4295.0)
+PLAN_GEOM_SELL = dict(PLAN_GEOM, plan_tp=4280.5, plan_e_src=4300.0, plan_s_src=4305.0, plan_e_out=4300.0, plan_s_out=4305.0)
 
 
 def rec(state, phase=p.SEND_NONE, orders=(), complete=False, gen=3, ident=IDENT, plan=False):
-    return p.Record(gen, ident, state, phase, complete, list(orders), **(PLAN if plan else {}))
+    """plan: False / True (typed diagnostic) / 'geom' (BUY R_GEOM) / 'sell' (SELL R_GEOM)"""
+    kw = {'geom': PLAN_GEOM, 'sell': PLAN_GEOM_SELL}.get(plan, PLAN if plan else {})
+    return p.Record(gen, ident, state, phase, complete, list(orders), **kw)
 
 
 def text_of(r):
@@ -48,7 +54,8 @@ def row(name, text, verdict, status, new_req=0, recon=0, reason='', kind='text',
                      executed=executed, nord=nord, gen=gen, plan=plan))
 
 
-PZ = 'PLAN_SET=0\nPLAN_TP=0.000000000000\nPLAN_VOL_MIN=0.000000000000\nPLAN_VOL_STEP=0.000000000000\nPLAN_VOL_MAX=0.000000000000\n'
+PZ = ('PLAN_SET=0\nPLAN_TP=0.000000000000\nPLAN_VOL_MIN=0.000000000000\nPLAN_VOL_STEP=0.000000000000\nPLAN_VOL_MAX=0.000000000000\nPLAN_RPOL=0\n'
+      'PLAN_E_SRC=0.000000000000\nPLAN_S_SRC=0.000000000000\nPLAN_E_OUT=0.000000000000\nPLAN_S_OUT=0.000000000000\n')
 U, R, B, X = p.USABLE_IDLE, p.USABLE_REQUEST, p.USABLE_BLOCKED, p.RECOVERY_REQUIRED
 # ---- usable records
 t_idle0 = text_of(rec(act.State(), gen=1))
@@ -86,9 +93,9 @@ row('STATUS_EDITED_WITHOUT_CRC', t_pend.replace('STATUS=1', 'STATUS=2', 1), X, '
 row('TRAILING_GARBAGE', t_pend + 'X', X, 'BLOCKED', reason='TRUNCATED')
 row('TWO_RECORDS_CONCATENATED', t_pend + t_pend, X, 'BLOCKED', reason='TRUNCATED')
 row('GARBAGE_TEXT', 'not a state file\n', X, 'BLOCKED', reason='TRUNCATED')
-row('WRONG_VERSION_WITH_VALID_CRC', reseal(t_pend, 'VERSION=2', 'VERSION=3'), X, 'BLOCKED', reason='UNSUPPORTED_VERSION')
+row('WRONG_VERSION_WITH_VALID_CRC', reseal(t_pend, 'VERSION=3', 'VERSION=4'), X, 'BLOCKED', reason='UNSUPPORTED_VERSION')
 # a genuine version 1 record: the same text without the PLAN block, version 1, valid CRC. It has no complete plan and is NEVER migrated.
-_b1 = '\n'.join(l for l in t_pend[:t_pend.index('CRC=')].split('\n') if not l.startswith('PLAN_')).replace('VERSION=2', 'VERSION=1', 1)
+_b1 = '\n'.join(l for l in t_pend[:t_pend.index('CRC=')].split('\n') if not l.startswith('PLAN_')).replace('VERSION=3', 'VERSION=1', 1)
 row('OLD_VERSION_1_RECORD_WITHOUT_A_PLAN_IS_NOT_MIGRATED', _b1 + 'CRC=%08X\n' % p.crc32(_b1), X, 'BLOCKED', reason='UNSUPPORTED_VERSION: 1')
 t_reg = text_of(rec(bound(), gen=1, plan=True))
 t_pend_plan = text_of(rec(pending(), p.SEND_MAPPED, [111222], gen=4, plan=True))
@@ -97,10 +104,33 @@ row('PENDING_KEEPS_THE_AUTHORISED_PLAN', t_pend_plan, R, 'REQUEST_PENDING', reco
 row('PLAN_TP_ZERO_WITH_VALID_CRC', reseal(t_reg, 'PLAN_TP=4320.500000000000', 'PLAN_TP=0.000000000000'), X, 'BLOCKED', reason='INVALID_PLAN')
 row('PLAN_MAX_BELOW_MIN_WITH_VALID_CRC', reseal(t_reg, 'PLAN_VOL_MAX=100.000000000000', 'PLAN_VOL_MAX=0.001000000000'), X, 'BLOCKED', reason='INVALID_PLAN')
 row('PLAN_VALUES_WITHOUT_PLAN_SET', reseal(t_idle1, 'PLAN_TP=0.000000000000', 'PLAN_TP=1.000000000000'), X, 'BLOCKED', reason='INVALID_PLAN: values without plan_set')
-row('PLAN_SET_ON_AN_UNBOUND_STATE', reseal(t_idle0, 'PLAN_SET=0\nPLAN_TP=0.000000000000\nPLAN_VOL_MIN=0.000000000000\nPLAN_VOL_STEP=0.000000000000\nPLAN_VOL_MAX=0.000000000000',
-                                            'PLAN_SET=1\nPLAN_TP=1.000000000000\nPLAN_VOL_MIN=0.010000000000\nPLAN_VOL_STEP=0.010000000000\nPLAN_VOL_MAX=1.000000000000'),
+row('PLAN_SET_ON_AN_UNBOUND_STATE', reseal(t_idle0, 'PLAN_SET=0\nPLAN_TP=0.000000000000\nPLAN_VOL_MIN=0.000000000000\nPLAN_VOL_STEP=0.000000000000\nPLAN_VOL_MAX=0.000000000000\nPLAN_RPOL=0',
+                                            'PLAN_SET=1\nPLAN_TP=1.000000000000\nPLAN_VOL_MIN=0.010000000000\nPLAN_VOL_STEP=0.010000000000\nPLAN_VOL_MAX=1.000000000000\nPLAN_RPOL=1'),
     X, 'BLOCKED', reason='INVALID_PLAN: a plan needs a bound state')
 row('PLAN_STEP_DIFFERS_FROM_THE_REQUEST_STEP', reseal(t_pend_plan, 'PLAN_VOL_STEP=0.010000000000', 'PLAN_VOL_STEP=0.020000000000'), X, 'BLOCKED', reason='INVALID_PLAN: the request step differs')
+# ---- VERSION 3 (Part 14): the declared R basis. Version 2 records (no PLAN_RPOL / E / S) are rejected for the configured file only, never migrated.
+t_geom = text_of(rec(bound(), gen=1, plan='geom'))
+t_geom_sell = text_of(rec(bound(direction=-1, level=4290.5), gen=1, plan='sell'))
+t_geom_pend = text_of(rec(pending(), p.SEND_MAPPED, [111222], gen=4, plan='geom'))
+row('REGISTERED_IDLE_WITH_THE_R_GEOM_BASIS', t_geom, U, 'IDLE', new_req=1, canon=1, gen=1, plan=2)
+row('REGISTERED_SELL_WITH_THE_R_GEOM_BASIS', t_geom_sell, U, 'IDLE', new_req=1, canon=1, gen=1, plan=2)
+row('PENDING_KEEPS_THE_R_GEOM_BASIS', t_geom_pend, R, 'REQUEST_PENDING', recon=1, canon=1, nord=1, gen=4, plan=2)
+_v2 = t_reg[:t_reg.index('CRC=')]
+_v2 = '\n'.join(l for l in _v2.split('\n') if not l.startswith(('PLAN_RPOL', 'PLAN_E_', 'PLAN_S_'))).replace('VERSION=3', 'VERSION=2', 1)
+row('OLD_VERSION_2_RECORD_WITHOUT_THE_BASIS_IS_NOT_MIGRATED', _v2 + 'CRC=%08X\n' % p.crc32(_v2), X, 'BLOCKED', reason='UNSUPPORTED_VERSION: 2')
+row('R_GEOM_E_SRC_ZERO', reseal(t_geom, 'PLAN_E_SRC=4300.000000000000', 'PLAN_E_SRC=0.000000000000'), X, 'BLOCKED', reason='INVALID_PLAN')
+row('R_GEOM_S_SRC_ZERO', reseal(t_geom, 'PLAN_S_SRC=4295.000000000000', 'PLAN_S_SRC=0.000000000000'), X, 'BLOCKED', reason='INVALID_PLAN')
+row('R_GEOM_E_OUT_ZERO', reseal(t_geom, 'PLAN_E_OUT=4300.000000000000', 'PLAN_E_OUT=0.000000000000'), X, 'BLOCKED', reason='INVALID_PLAN')
+row('R_GEOM_S_OUT_ZERO', reseal(t_geom, 'PLAN_S_OUT=4295.000000000000', 'PLAN_S_OUT=0.000000000000'), X, 'BLOCKED', reason='INVALID_PLAN')
+row('R_GEOM_BUY_STOP_ABOVE_ENTRY', reseal(t_geom, 'PLAN_S_OUT=4295.000000000000', 'PLAN_S_OUT=4305.000000000000'), X, 'BLOCKED', reason='INVALID_PLAN')
+row('R_GEOM_SELL_STOP_BELOW_ENTRY', reseal(t_geom_sell, 'PLAN_S_OUT=4305.000000000000', 'PLAN_S_OUT=4295.000000000000'), X, 'BLOCKED', reason='INVALID_PLAN')
+row('R_GEOM_LEVEL_NOT_BEYOND_ENTRY', reseal(t_geom, 'PLAN_E_OUT=4300.000000000000', 'PLAN_E_OUT=4311.000000000000'), X, 'BLOCKED', reason='INVALID_PLAN')
+row('R_GEOM_NORMALIZED_BASIS_DIFFERS_FROM_THE_SOURCE', reseal(t_geom, 'PLAN_E_OUT=4300.000000000000', 'PLAN_E_OUT=4300.010000000000'), X, 'BLOCKED', reason='INVALID_PLAN')
+row('PLAN_RPOL_UNSET_WITH_A_PLAN', reseal(t_reg, 'PLAN_RPOL=1', 'PLAN_RPOL=0'), X, 'BLOCKED', reason='INVALID_PLAN')
+row('PLAN_RPOL_UNKNOWN_VALUE', reseal(t_reg, 'PLAN_RPOL=1', 'PLAN_RPOL=3'), X, 'BLOCKED', reason='BAD_ENUM')
+row('TYPED_PLAN_CARRIES_A_BASIS', reseal(t_reg, 'PLAN_E_SRC=0.000000000000', 'PLAN_E_SRC=4300.000000000000'), X, 'BLOCKED', reason='INVALID_PLAN')
+row('BASIS_WITHOUT_PLAN_SET', reseal(t_idle1, 'PLAN_S_OUT=0.000000000000', 'PLAN_S_OUT=1.000000000000'), X, 'BLOCKED', reason='INVALID_PLAN')
+row('RPOL_WITHOUT_PLAN_SET', reseal(t_idle1, 'PLAN_RPOL=0', 'PLAN_RPOL=2'), X, 'BLOCKED', reason='INVALID_PLAN')
 row('WRONG_HEADER_WITH_VALID_CRC', reseal(t_pend, 'VELO_EXIT_STATE', 'VELO_OTHER_STATE'), X, 'BLOCKED', reason='BAD_HEADER')
 row('FIELDS_OUT_OF_ORDER_WITH_VALID_CRC', reseal(t_pend, 'GEN=4\nSERVER=MetaQuotes-Demo', 'SERVER=MetaQuotes-Demo\nGEN=4'), X, 'BLOCKED', reason='BAD_FIELD_ORDER')
 row('LEADING_ZERO_NUMBER_WITH_VALID_CRC', reseal(t_pend, 'GEN=4', 'GEN=04'), X, 'BLOCKED', reason='BAD_NUMBER')

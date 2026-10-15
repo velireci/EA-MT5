@@ -91,7 +91,7 @@ def run(prm, tr, quote, raw_a, raw_b, store, locks):
         res.detail = 'verdict %s state %s generation %d plan_set %d orders %d confirmations %d new_request_allowed %d reconcile_required %d %s' % (
             o.verdict, o.state.status, o.generation, int(o.plan_set), len(o.orders), o.state.confirmations, int(o.new_request_allowed), int(o.reconcile_required), o.reason)
         return True, res
-    cfg = ex.Config(enabled=True, real_authorised=(prm.authorisation == ex.AUTH_PHRASE), authorisation=prm.authorisation, ea_magic=prm.magic, filling=prm.filling,
+    cfg = ex.Config(enabled=True, r_policy=ex.RPOL_TYPED, real_authorised=(prm.authorisation == ex.AUTH_PHRASE), authorisation=prm.authorisation, ea_magic=prm.magic, filling=prm.filling,
                     deviation=prm.deviation, filter_policy=prm.filter_policy, filter_state=prm.filter_state, tp_set=prm.tp_price > 0, tp_price=prm.tp_price)
     q = ex.Quote(prm.direction, prm.level_2r, quote.bid, quote.ask, prm.volume_initial)
     key = prm.lock_key or lock_key(acct.login, prm.position_id)

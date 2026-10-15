@@ -37,7 +37,7 @@ assert not bad, bad
 real = strip(open('src/include/ExitTransportReal.mqh', encoding='ascii').read())
 assert len(re.findall(r'\bOrderSend\s*\(', real)) == 1
 includers = [f for f in files if re.search(r'#include\s+"[^"]*ExitTransportReal\.mqh"', strip(open(f, encoding='ascii').read()))]
-assert sorted(includers) == ['src/XauUsdT011DemoHarness.mq5', 'src/tests/T011_ExecutorRealCompile.mq5'], includers
+assert sorted(includers) == ['src/XauUsdT011DemoHarness.mq5', 'src/XauUsdT011ExitManager.mq5', 'src/XauUsdT011ExitRegister.mq5', 'src/tests/T011_ExecutorRealCompile.mq5'], includers
 stub = strip(open('src/tests/T011_ExecutorRealCompile.mq5', encoding='ascii').read())
 assert not re.search(r'\btransport\s*\.', stub), 'the compile stub calls a method'
 for f in ('src/include/ExitExecutor.mqh', 'src/tests/T011_ExecutorTest.mq5', 'src/include/ExitTransportFake.mqh'):
@@ -49,8 +49,8 @@ python3 -I - $CORE <<'PYEOF' && echo "  PASS gate order, single tr.Send, single 
 import re, sys
 c = re.sub(r'//[^\n]*', '', open(sys.argv[1], encoding='ascii').read())
 body = c[c.index('bool EX_Process('):]
-order = ['!cfg.enabled', 'cfg.ea_magic<=0', 'EX_FILL_UNSET', 'cfg.deviation<0', 'EX_POL_UNSET', 'EX_POL_NEEDS_CLEAR', '!cfg.tp_set', 'rt.latched', 'rt.send_calls>=1', 'tr.ReadAccount(', 'tr.IsReal()',
-         'EX_AUTH_PHRASE', 'acct.demo', 'acct.login', 'trade_allowed', 'margin_mode!=2', 'tr.ReadSymbol(', 'EX_OnGrid(q.level_2r', 'TP_EQUALS_2R', 'tr.FindPosition(', 'OWNERSHIP_NOT_PROVEN',
+order = ['!cfg.enabled', 'cfg.ea_magic<=0', 'EX_RPOL_UNSET', 'EX_FILL_UNSET', 'cfg.deviation<0', 'EX_POL_UNSET', 'EX_POL_NEEDS_CLEAR', '!cfg.tp_set', 'rt.latched', 'rt.send_calls>=1', 'tr.ReadAccount(', 'tr.IsReal()',
+         'EX_AUTH_PHRASE', 'acct.demo', 'acct.login', 'trade_allowed', 'margin_mode!=2', 'tr.ReadSymbol(', 'EX_PlanRefusal(q.level_2r', 'tr.FindPosition(', 'OWNERSHIP_NOT_PROVEN',
          'ESF_Load(', 'EA_OnQuote(', 'tr.PreCheck(', 'EX_Save(', 'ESF_Load(', 'tr.Send(', 'EX_Save(']
 at, pos = 0, []
 for s in order:
@@ -65,11 +65,11 @@ for need in ('c.enabled=false;', 'c.real_authorised=false;', 'c.ea_magic=0;', 'E
     assert need in init, need
 assert re.search(r'accepted=\(sr\.returned_true && sr\.have_result && \(sr\.retcode==10008 \|\| sr\.retcode==10009 \|\| sr\.retcode==10010\) && sr\.order>0\)', c)
 assert '8.0*DBL_EPSILON*MathMax(1.0,MathAbs(r))' in c and '1e-6' not in c, 'the grid tolerance must be floating-point noise only'
-for need in ('(int)cfg.filling>(int)EX_FILL_RETURN', '(int)cfg.filter_policy>(int)EX_POL_NEEDS_CLEAR', '(int)cfg.filter_state>(int)EX_FS_BLOCKED', 'q.direction!=1 && q.direction!=-1', 'ESC_Fnum(q.level_2r,exact)'):
+for need in ('(int)cfg.filling>(int)EX_FILL_RETURN', '(int)cfg.filter_policy>(int)EX_POL_NEEDS_CLEAR', '(int)cfg.filter_state>(int)EX_FS_BLOCKED', 'q.direction!=1 && q.direction!=-1', 'ESC_Fnum(level,exact)'):
     assert need in c, need
 real = re.sub(r'//[^\n]*', '', open('src/include/ExitTransportReal.mqh', encoding='ascii').read())
 assert 'else return(false);' in real and not re.search(r'else\s+r\.type_filling\s*=\s*ORDER_FILLING_RETURN', real), 'an unknown filling must not map to RETURN'
-for need in ('bool EX_Register(', 'if(!o.plan_set)', 'PLAN_CHANGED', 'st.direction!=q.direction', 'st.level!=q.level_2r', 'st.volume_initial!=q.volume_initial', 'o.plan_tp!=cfg.tp_price',
+for need in ('bool EX_Register(', 'if(!o.plan_set)', 'PLAN_CHANGED', 'st.direction!=q.direction', 'st.level!=level', 'st.volume_initial!=q.volume_initial', 'o.plan_tp!=cfg.tp_price',
              'o.plan_vol_min!=sym.vol_min', 'o.plan_vol_step!=sym.vol_step', 'o.plan_vol_max!=sym.vol_max', 'rec.plan_set=o.plan_set;', 'mapped.plan_set=o.plan_set;',
              'ESF_Exists(name) || ESF_Exists(name+ESF_TMP_SUFFIX)', 'ES_Split(q.volume_initial,sym.vol_min,sym.vol_step,sym.vol_max,sp)', 'pos.magic!=cfg.ea_magic'):
     assert need in c, need
@@ -78,7 +78,7 @@ assert body_.index('if(!o.plan_set)') < body_.index('EA_OnQuote(') and body_.ind
 reg_ = c[c.index('bool EX_Register('):c.index('bool EX_Reconcile(')]
 assert 'tr.Send(' not in reg_ and 'rt.send_calls' not in reg_ and 'ESF_InitFresh' not in reg_, 'registration never sends'
 cod = re.sub(r'//[^\n]*', '', open('src/include/ExitStateCodec.mqh', encoding='ascii').read())
-assert '#define ESC_VERSION 2' in cod and all(k in cod for k in ('"PLAN_SET="', '"PLAN_TP="', '"PLAN_VOL_MIN="', '"PLAN_VOL_STEP="', '"PLAN_VOL_MAX="', '"PLAN_SET","PLAN_TP","PLAN_VOL_MIN","PLAN_VOL_STEP","PLAN_VOL_MAX"')), 'codec plan block'
+assert '#define ESC_VERSION 3' in cod and all(k in cod for k in ('"PLAN_SET="', '"PLAN_TP="', '"PLAN_VOL_MIN="', '"PLAN_VOL_STEP="', '"PLAN_VOL_MAX="', '"PLAN_SET","PLAN_TP","PLAN_VOL_MIN","PLAN_VOL_STEP","PLAN_VOL_MAX"')), 'codec plan block'
 flw = re.sub(r'//[^\n]*', '', open('src/include/ExitRestartFlow.mqh', encoding='ascii').read())
 assert all(k in flw for k in ('rec.plan_set=o.plan_set;', 'rec.plan_tp=o.plan_tp;', 'rec.plan_vol_min=o.plan_vol_min;', 'rec.plan_vol_step=o.plan_vol_step;', 'rec.plan_vol_max=o.plan_vol_max;')), 'the flow must carry the plan over'
 assert not re.search(r'FileOpen|FileMove|FileWrite|FileRead|FileDelete|TimeCurrent|TimeGMT|TimeLocal|Sleep\s*\(|[rR]etry\w*\s*(=|\(|\+\+)|NormalizeDouble|MathRound\(\s*q\.', c), 'forbidden code in the core'

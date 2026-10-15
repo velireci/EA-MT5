@@ -128,6 +128,7 @@ bool DM_Run(const SDmParams &p,CExitTransport *tr,const SDmQuote &quote,const SX
    SExConfig cfg;
    EX_ConfigInit(cfg);
    cfg.enabled=true;
+   cfg.r_policy=EX_RPOL_TYPED;                  // the harness uses a DIAGNOSTIC typed level; the R_GEOM policy belongs to the tick-path EA
    cfg.real_authorised=(p.authorisation==EX_AUTH_PHRASE);
    cfg.authorisation=p.authorisation;
    cfg.ea_magic=p.magic;

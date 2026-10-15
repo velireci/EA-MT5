@@ -324,12 +324,12 @@ class Mutants(unittest.TestCase):
             ('filling not mandatory', "    if cfg.filling == FILL_UNSET:", "    if False:"),
             ('deviation not mandatory', "    if cfg.deviation < 0:", "    if False:"),
             ('filter policy not mandatory', "    if cfg.filter_policy == POL_UNSET:", "    if False:"),
-            ('TP equals 2R allowed', "    if abs(cfg.tp_price - q.level_2r) < sym.tick_size / 2:", "    if False:"),
+            ('TP equals 2R allowed', "    if abs(cfg.tp_price - level) < sym.tick_size / 2:", "    if False:"),
             ('real transport without authorisation', "        if not (cfg.real_authorised and cfg.authorisation == AUTH_PHRASE):", "        if False:"),
             ('real transport on a live account', "        if not acct.read_ok or not acct.demo:", "        if False:"),
             ('netting allowed', "    if acct.margin_mode != 2:", "    if False:"),
             ('ownership not proven', "    if pos.symbol != identity.symbol or pos.magic != cfg.ea_magic or pos.type != (0 if q.direction == 1 else 1):", "    if False:"),
-            ('plan rounded instead of refused', "    if not _on_grid(q.level_2r, sym.tick_size):", "    if False:"),
+            ('plan rounded instead of refused', "    if not _on_grid(level, sym.tick_size):", "    if False:"),
             ('latch ignored', "    if rt.latched:", "    if False:"),
             ('intent save failure ignored', "    if not ok:\n        return recovery('INTENT_SAVE_FAILED", "    if False:\n        return recovery('INTENT_SAVE_FAILED"),
             ('intent not verified', "    if not (chk.verdict == p.RECOVERY_REQUIRED", "    if False and not (chk.verdict == p.RECOVERY_REQUIRED"),
@@ -348,11 +348,11 @@ class Mutants(unittest.TestCase):
             ('unknown direction accepted', "    if not _int(q.direction) or q.direction not in (1, -1):", "    if False:"),
             ('wide grid tolerance', "8 * sys.float_info.epsilon * max(1.0, abs(r))", "1e-6 * max(1.0, abs(r))"),
             ('non finite price on the grid', "    if not _finite(x) or not _finite(tick) or x <= 0 or tick <= 0:\n        return False", "    if False:\n        return False"),
-            ('non representable plan persisted', "    if p.fnum(q.level_2r) is None or p.fnum(cfg.tp_price) is None:", "    if False:"),
+            ('non representable plan persisted', "    if p.fnum(level) is None or p.fnum(cfg.tp_price) is None or (volume is not None and p.fnum(volume) is None):", "    if False:"),
             ('plan not compared', "        if stored != now:", "        if False:"),
             ('missing plan filled in', "    if not o.plan_set:", "    if False:"),
-            ('plan not carried into the intent record', "return p.Record(gen, identity, st, phase, complete, list(orders), o.plan_set, o.plan_tp, o.plan_vol_min, o.plan_vol_step, o.plan_vol_max)",
-             "return p.Record(gen, identity, st, phase, complete, list(orders))"),
+            ('plan not carried into the intent record', "o.plan_set, o.plan_tp, o.plan_vol_min, o.plan_vol_step, o.plan_vol_max, o.plan_rpol, o.plan_e_src, o.plan_s_src,\n                    o.plan_e_out, o.plan_s_out)",
+             ")"),
             ('registration adopts any magic', "    if pos.symbol != identity.symbol or pos.magic != cfg.ea_magic or pos.type != (0 if q.direction == 1 else 1):\n        return block('OWNERSHIP_NOT_PROVEN: a manual", "    if False:\n        return block('OWNERSHIP_NOT_PROVEN: a manual"),
             ('registration overwrites', "    if store.exists(name) or store.exists(name + '.tmp'):\n        return block('ALREADY_EXISTS", "    if False:\n        return block('ALREADY_EXISTS"),
             ('registration of a position with another volume', "    if pos.volume != q.volume_initial:", "    if False:"),
@@ -417,11 +417,12 @@ class Sources(unittest.TestCase):
         self.assertLess(real.index('if(!Fill(req,r)) return;'), real.index('OrderSend('))
         self.assertIn('8.0*DBL_EPSILON*MathMax(1.0,MathAbs(r))', core)
         self.assertNotIn('1e-6*MathMax', core)
-        for need in ('cfg.filling<(int)EX_FILL_UNSET', 'cfg.filter_policy>(int)EX_POL_NEEDS_CLEAR', 'cfg.filter_state>(int)EX_FS_BLOCKED', 'q.direction!=1 && q.direction!=-1', 'ESC_Fnum(q.level_2r'):
+        for need in ('cfg.filling<(int)EX_FILL_UNSET', 'cfg.filter_policy>(int)EX_POL_NEEDS_CLEAR', 'cfg.filter_state>(int)EX_FS_BLOCKED', 'q.direction!=1 && q.direction!=-1', 'ESC_Fnum(level,exact)'):
             self.assertIn(need.replace('cfg.filling<(int)EX_FILL_UNSET', '(int)cfg.filling<(int)EX_FILL_UNSET').replace('cfg.filter_policy>(int)', '(int)cfg.filter_policy>(int)').replace('cfg.filter_state>(int)', '(int)cfg.filter_state>(int)'), core)
         body = core[core.index('bool EX_Process('):]
         self.assertLess(body.index('INVALID_INPUT: filling'), body.index('tr.ReadAccount('))
-        self.assertLess(body.index('PLAN_NOT_REPRESENTABLE_IN_RECORD'), body.index('EX_Save('))
+        self.assertIn('PLAN_NOT_REPRESENTABLE_IN_RECORD', core)
+        self.assertLess(body.index('EX_PlanRefusal('), body.index('EX_Save('))
 
     def test_fixture_block_equals_generator(self):
         txt = _read('src', 'tests', 'T011_ExecutorTest.mq5')

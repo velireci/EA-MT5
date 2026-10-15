@@ -1,0 +1,13 @@
+; XauUsdT011ExitRegister - explicit registration of the exit plan of ONE owned position. DISABLED: InpEnabled=false, authorisation empty, InpRPolicy 0 (UNSET blocks).
+; The owner fills in position id, initial SL, TP and volume from the position and enables it only after Codex has reviewed the file. R_GEOM (2) does not settle the client's final R or the costs.
+; Complete preset: every input is listed once. InpRPolicy 0 UNSET, 2 R_GEOM | InpDirection 0 UNSET, 1 BUY, -1 SELL
+InpEnabled=false
+InpAuthorisation=
+InpRPolicy=0
+InpEaMagic=777
+InpPositionId=0
+InpSymbol=XAUUSD
+InpDirection=0
+InpInitialSl=0
+InpTpPrice=0
+InpVolumeInitial=0

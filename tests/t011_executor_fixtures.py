@@ -31,7 +31,7 @@ def response(i):
 
 
 def setup(tweak, resp):
-    cfg = ex.Config(enabled=True, ea_magic=777, filling=ex.FILL_IOC, deviation=20, filter_policy=ex.POL_IGNORE, filter_state=ex.FS_CLEAR, tp_set=True, tp_price=2010.0)
+    cfg = ex.Config(enabled=True, r_policy=ex.RPOL_TYPED, ea_magic=777, filling=ex.FILL_IOC, deviation=20, filter_policy=ex.POL_IGNORE, filter_state=ex.FS_CLEAR, tp_set=True, tp_price=2010.0)
     tr = ex.FakeTransport()
     tr.response = response(resp)
     q = ex.Quote(1, 2000.0, 2000.0, 2000.3, 0.5)
@@ -84,8 +84,9 @@ def setup(tweak, resp):
     return cfg, tr, q
 
 
-PLAN_KW = dict(plan_set=True, plan_tp=2010.0, plan_vol_min=0.01, plan_vol_step=0.01, plan_vol_max=100.0)
-PZ = 'PLAN_SET=0\nPLAN_TP=0.000000000000\nPLAN_VOL_MIN=0.000000000000\nPLAN_VOL_STEP=0.000000000000\nPLAN_VOL_MAX=0.000000000000\n'
+PLAN_KW = dict(plan_set=True, plan_tp=2010.0, plan_vol_min=0.01, plan_vol_step=0.01, plan_vol_max=100.0, plan_rpol=p.RPOL_TYPED)
+PZ = ('PLAN_SET=0\nPLAN_TP=0.000000000000\nPLAN_VOL_MIN=0.000000000000\nPLAN_VOL_STEP=0.000000000000\nPLAN_VOL_MAX=0.000000000000\nPLAN_RPOL=0\n'
+      'PLAN_E_SRC=0.000000000000\nPLAN_S_SRC=0.000000000000\nPLAN_E_OUT=0.000000000000\nPLAN_S_OUT=0.000000000000\n')
 
 
 def start_text(kind, inputs=None):
@@ -93,7 +94,7 @@ def start_text(kind, inputs=None):
         return None
     if kind == K_OLD_V1:
         ok, t = p.encode(p.Record(1, IDENT, act.State()))
-        body = t[:t.index('CRC=')].replace(PZ, '').replace('VERSION=2', 'VERSION=1', 1)
+        body = t[:t.index('CRC=')].replace(PZ, '').replace('VERSION=3', 'VERSION=1', 1)
         return body + 'CRC=%08X\n' % p.crc32(body)
     ok, t = p.encode(start_record(kind, inputs))
     if not ok and inputs is not None:      # inputs the codec cannot store (an unknown direction, a value not exact with 12 decimals): the default plan
@@ -113,7 +114,7 @@ def start_record(kind, inputs=None):
             return p.Record(1, IDENT, s, **PLAN_KW)
         cfg, tr, q = inputs
         s.bound, s.position_id, s.direction, s.level, s.volume_initial = True, 7, q.direction, q.level_2r, q.volume_initial
-        return p.Record(1, IDENT, s, plan_set=True, plan_tp=cfg.tp_price, plan_vol_min=tr.symbol.vol_min, plan_vol_step=tr.symbol.vol_step, plan_vol_max=tr.symbol.vol_max)
+        return p.Record(1, IDENT, s, plan_set=True, plan_tp=cfg.tp_price, plan_vol_min=tr.symbol.vol_min, plan_vol_step=tr.symbol.vol_step, plan_vol_max=tr.symbol.vol_max, plan_rpol=p.RPOL_TYPED)
     act.on_quote(s, 7, act.BUY, 2000.0, 2000.0, 2000.3, 0.5, 0.5, 0.01, 0.01, 100.0)
     if kind == K_PEND_INTENT:
         return p.Record(2, IDENT, s, p.SEND_INTENT, **PLAN_KW)

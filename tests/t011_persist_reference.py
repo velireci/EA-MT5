@@ -7,7 +7,7 @@ WHAT IS STORED (one record per position, text, versioned, fully validated, check
               volume, initial steps, executed steps, CONFIRMATIONS, duplicates, reason)  -> a restore neither adds a confirmation nor forgets the request
   send      : send phase NONE | INTENT | MAPPED and the executor's order tickets (the request -> order map) with its completeness flag
   generation: positive counter, +1 per save
-FORMAT: lines KEY=VALUE in a fixed order, header VELO_EXIT_STATE, VERSION=2, ..., END, then CRC=<8 hex> (CRC-32 of everything up to and including "END\\n")
+FORMAT: lines KEY=VALUE in a fixed order, header VELO_EXIT_STATE, VERSION=3, ..., END, then CRC=<8 hex> (CRC-32 of everything up to and including "END\\n")
 and a final newline. Strings are escaped (only A-Z a-z 0-9 . _ - literal, everything else %XXXX of the UTF-16 code unit). Doubles are written with 12 decimals
 and ONLY if that text parses back to the identical double (otherwise the encode is refused: the executor must pass price/volume values normalised to the symbol,
 because the activation compares level / volume with ==). A truncated, edited, empty, oversized, unknown-version or out-of-order text is rejected.
@@ -31,7 +31,9 @@ from dataclasses import dataclass, field
 
 import t011_activation_reference as act
 
-VERSION = 2          # 2 adds the authorised PLAN block; version 1 records have no plan and are never migrated
+VERSION = 3          # 3 adds the declared R basis (PLAN_RPOL, PLAN_E_SRC, PLAN_S_SRC, PLAN_E_OUT, PLAN_S_OUT); version 1 and 2 records are never migrated
+RPOL_NONE, RPOL_TYPED, RPOL_R_GEOM = 0, 1, 2     # how the level was obtained: typed diagnostic level (no basis) or R_GEOM from the stored E and S
+BASIS_TOL = 1e-9     # relative tolerance between the source price and its normalized value (floating-point noise only)
 HEADER = 'VELO_EXIT_STATE'
 STATUSES = [act.IDLE, act.REQUEST_PENDING, act.DONE, act.NEEDS_RECONCILIATION, act.BLOCKED]
 SEND_NONE, SEND_INTENT, SEND_MAPPED = 0, 1, 2
@@ -66,6 +68,11 @@ class Record:
     plan_vol_min: float = 0.0
     plan_vol_step: float = 0.0
     plan_vol_max: float = 0.0
+    plan_rpol: int = 0
+    plan_e_src: float = 0.0        # R_GEOM only: the declared entry / initial stop as read, and the values TG_Compute normalized them to (R itself is NOT stored)
+    plan_s_src: float = 0.0
+    plan_e_out: float = 0.0
+    plan_s_out: float = 0.0
 
 
 @dataclass
@@ -83,6 +90,11 @@ class Restore:
     plan_vol_min: float = 0.0
     plan_vol_step: float = 0.0
     plan_vol_max: float = 0.0
+    plan_rpol: int = 0
+    plan_e_src: float = 0.0
+    plan_s_src: float = 0.0
+    plan_e_out: float = 0.0
+    plan_s_out: float = 0.0
 
 
 def crc32(text):
@@ -185,7 +197,14 @@ def validate(rec):
         v = getattr(rec, name)
         if fnum(v) is None or v < 0:
             return 'INVALID_PLAN: ' + name
-    if not rec.plan_set and (rec.plan_tp or rec.plan_vol_min or rec.plan_vol_step or rec.plan_vol_max):
+    if isinstance(rec.plan_rpol, bool) or not isinstance(rec.plan_rpol, int) or rec.plan_rpol not in (RPOL_NONE, RPOL_TYPED, RPOL_R_GEOM):
+        return 'INVALID_PLAN: plan_rpol'
+    basis = ('plan_e_src', 'plan_s_src', 'plan_e_out', 'plan_s_out')
+    for name in basis:
+        v = getattr(rec, name)
+        if fnum(v) is None or v < 0:
+            return 'INVALID_PLAN: ' + name
+    if not rec.plan_set and (rec.plan_tp or rec.plan_vol_min or rec.plan_vol_step or rec.plan_vol_max or rec.plan_rpol or any(getattr(rec, n) for n in basis)):
         return 'INVALID_PLAN: values without plan_set'
     if rec.plan_set:
         if not st.bound:
@@ -194,6 +213,19 @@ def validate(rec):
             return 'INVALID_PLAN: tp and the volume parameters must be positive and min <= max'
         if st.status not in (act.IDLE, act.BLOCKED) and st.volume_step != rec.plan_vol_step:
             return 'INVALID_PLAN: the request step differs from the authorised plan step'
+        if rec.plan_rpol == RPOL_NONE:
+            return 'INVALID_PLAN: the R policy of a plan must be set'
+        if rec.plan_rpol == RPOL_TYPED and any(getattr(rec, n) for n in basis):
+            return 'INVALID_PLAN: a typed diagnostic level carries no E / S basis'
+        if rec.plan_rpol == RPOL_R_GEOM:
+            if any(getattr(rec, n) <= 0 for n in basis):
+                return 'INVALID_PLAN: the R_GEOM basis (E and S, source and normalized) must be positive'
+            if abs(rec.plan_e_src - rec.plan_e_out) > BASIS_TOL * max(1.0, rec.plan_e_src) or abs(rec.plan_s_src - rec.plan_s_out) > BASIS_TOL * max(1.0, rec.plan_s_src):
+                return 'INVALID_PLAN: the normalized basis differs from the declared source'
+            if st.direction == 1 and not rec.plan_s_out < rec.plan_e_out < st.level:
+                return 'INVALID_PLAN: BUY needs stop < entry < level 2R'
+            if st.direction == -1 and not st.level < rec.plan_e_out < rec.plan_s_out:
+                return 'INVALID_PLAN: SELL needs level 2R < entry < stop'
     if st.status == act.BLOCKED:
         return '' if st.reason else 'INVALID_STATE: BLOCKED without a reason'
     if st.status == act.IDLE:
@@ -232,7 +264,8 @@ def encode(rec):
              'EXECUTED_STEPS=%d' % st.executed_steps, 'CONFIRMATIONS=%d' % st.confirmations, 'DUPLICATES=%d' % st.duplicates_ignored,
              'REASON=' + esc(st.reason), 'SEND_PHASE=%d' % rec.send_phase, 'MAP_COMPLETE=%d' % int(rec.map_complete),
              'PLAN_SET=%d' % int(rec.plan_set), 'PLAN_TP=' + fnum(rec.plan_tp), 'PLAN_VOL_MIN=' + fnum(rec.plan_vol_min), 'PLAN_VOL_STEP=' + fnum(rec.plan_vol_step),
-             'PLAN_VOL_MAX=' + fnum(rec.plan_vol_max), 'MAP_N=%d' % len(rec.orders)]
+             'PLAN_VOL_MAX=' + fnum(rec.plan_vol_max), 'PLAN_RPOL=%d' % rec.plan_rpol, 'PLAN_E_SRC=' + fnum(rec.plan_e_src), 'PLAN_S_SRC=' + fnum(rec.plan_s_src),
+             'PLAN_E_OUT=' + fnum(rec.plan_e_out), 'PLAN_S_OUT=' + fnum(rec.plan_s_out), 'MAP_N=%d' % len(rec.orders)]
     lines += ['MAP_ORDER_%d=%d' % (k, o) for k, o in enumerate(rec.orders)]
     lines.append('END')
     body = '\n'.join(lines) + '\n'
@@ -275,7 +308,7 @@ def decode(text):
         return False, 'BAD_HEADER'
     keys = ['VERSION', 'GEN', 'SERVER', 'LOGIN', 'SYMBOL', 'POSITION', 'STATUS', 'BOUND', 'STATE_POSITION', 'DIRECTION', 'LEVEL', 'VOLUME_INITIAL', 'VOLUME_STEP',
             'REQUEST_ID', 'REQUEST_STEPS', 'CLOSE_VOLUME', 'INITIAL_STEPS', 'EXECUTED_STEPS', 'CONFIRMATIONS', 'DUPLICATES', 'REASON', 'SEND_PHASE', 'MAP_COMPLETE',
-            'PLAN_SET', 'PLAN_TP', 'PLAN_VOL_MIN', 'PLAN_VOL_STEP', 'PLAN_VOL_MAX', 'MAP_N']
+            'PLAN_SET', 'PLAN_TP', 'PLAN_VOL_MIN', 'PLAN_VOL_STEP', 'PLAN_VOL_MAX', 'PLAN_RPOL', 'PLAN_E_SRC', 'PLAN_S_SRC', 'PLAN_E_OUT', 'PLAN_S_OUT', 'MAP_N']
     if len(lines) < 2 or not lines[1].startswith('VERSION='):
         return False, 'BAD_FIELD_ORDER: expected VERSION'
     if _geti(lines[1][len('VERSION='):]) != VERSION:
@@ -305,8 +338,8 @@ def decode(text):
             return False, 'BAD_NUMBER: MAP_ORDER_%d' % k2
         orders.append(o)
     ints = {k2: _geti(vals[k2]) for k2 in ('GEN', 'LOGIN', 'POSITION', 'STATUS', 'BOUND', 'STATE_POSITION', 'DIRECTION', 'REQUEST_STEPS', 'INITIAL_STEPS', 'EXECUTED_STEPS',
-                                            'CONFIRMATIONS', 'DUPLICATES', 'SEND_PHASE', 'MAP_COMPLETE', 'PLAN_SET')}
-    dbls = {k2: _getd(vals[k2]) for k2 in ('LEVEL', 'VOLUME_INITIAL', 'VOLUME_STEP', 'CLOSE_VOLUME', 'PLAN_TP', 'PLAN_VOL_MIN', 'PLAN_VOL_STEP', 'PLAN_VOL_MAX')}
+                                            'CONFIRMATIONS', 'DUPLICATES', 'SEND_PHASE', 'MAP_COMPLETE', 'PLAN_SET', 'PLAN_RPOL')}
+    dbls = {k2: _getd(vals[k2]) for k2 in ('LEVEL', 'VOLUME_INITIAL', 'VOLUME_STEP', 'CLOSE_VOLUME', 'PLAN_TP', 'PLAN_VOL_MIN', 'PLAN_VOL_STEP', 'PLAN_VOL_MAX', 'PLAN_E_SRC', 'PLAN_S_SRC', 'PLAN_E_OUT', 'PLAN_S_OUT')}
     for k2, v in list(ints.items()) + list(dbls.items()):
         if v is None:
             return False, 'BAD_NUMBER: ' + k2
@@ -314,14 +347,15 @@ def decode(text):
     for k2, v in strs.items():
         if v is None:
             return False, 'BAD_STRING: ' + k2
-    if not 0 <= ints['STATUS'] < len(STATUSES) or ints['BOUND'] not in (0, 1) or ints['MAP_COMPLETE'] not in (0, 1) or ints['PLAN_SET'] not in (0, 1):
+    if not 0 <= ints['STATUS'] < len(STATUSES) or ints['BOUND'] not in (0, 1) or ints['MAP_COMPLETE'] not in (0, 1) or ints['PLAN_SET'] not in (0, 1) or ints['PLAN_RPOL'] not in (0, 1, 2):
         return False, 'BAD_ENUM'
     st = act.State(status=STATUSES[ints['STATUS']], bound=bool(ints['BOUND']), position_id=ints['STATE_POSITION'], direction=ints['DIRECTION'], level=dbls['LEVEL'],
                    volume_initial=dbls['VOLUME_INITIAL'], volume_step=dbls['VOLUME_STEP'], request_id=strs['REQUEST_ID'], request_steps=ints['REQUEST_STEPS'],
                    close_volume=dbls['CLOSE_VOLUME'], initial_steps=ints['INITIAL_STEPS'], executed_steps=ints['EXECUTED_STEPS'], confirmations=ints['CONFIRMATIONS'],
                    duplicates_ignored=ints['DUPLICATES'], reason=strs['REASON'])
     rec = Record(ints['GEN'], Identity(strs['SERVER'], ints['LOGIN'], strs['SYMBOL'], ints['POSITION']), st, ints['SEND_PHASE'], bool(ints['MAP_COMPLETE']), orders,
-               bool(ints['PLAN_SET']), dbls['PLAN_TP'], dbls['PLAN_VOL_MIN'], dbls['PLAN_VOL_STEP'], dbls['PLAN_VOL_MAX'])
+               bool(ints['PLAN_SET']), dbls['PLAN_TP'], dbls['PLAN_VOL_MIN'], dbls['PLAN_VOL_STEP'], dbls['PLAN_VOL_MAX'], ints['PLAN_RPOL'], dbls['PLAN_E_SRC'], dbls['PLAN_S_SRC'],
+               dbls['PLAN_E_OUT'], dbls['PLAN_S_OUT'])
     bad = validate(rec)
     if bad:
         return False, bad
@@ -348,7 +382,7 @@ def restore(text, expected, tmp_present=False):
         return Restore(RECOVERY_REQUIRED, 'IDENTITY_MISMATCH: the record belongs to another server / account / symbol / position', _blocked('IDENTITY_MISMATCH'))
     st = rec.state
     out = Restore(RECOVERY_REQUIRED, '', st, False, False, list(rec.orders), rec.map_complete, rec.generation, rec.plan_set, rec.plan_tp, rec.plan_vol_min, rec.plan_vol_step,
-                  rec.plan_vol_max)
+                  rec.plan_vol_max, rec.plan_rpol, rec.plan_e_src, rec.plan_s_src, rec.plan_e_out, rec.plan_s_out)
     if st.status == act.BLOCKED:
         out.verdict, out.reason = USABLE_BLOCKED, 'BLOCKED restored as stored'
         return out

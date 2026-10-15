@@ -11,6 +11,7 @@
 #include "ExitStateFile.mqh"
 #include "ExitRestartFlow.mqh"
 #include "ExitTransport.mqh"
+#include "TradeGeometry.mqh"
 
 #define EX_AUTH_PHRASE "I_AUTHORISE_T011_DEMO_PARTIAL_CLOSE"
 
@@ -20,6 +21,13 @@ enum ENUM_EX_FILLING
    EX_FILL_FOK,
    EX_FILL_IOC,
    EX_FILL_RETURN
+  };
+
+enum ENUM_EX_R_POLICY
+  {
+   EX_RPOL_UNSET=0,           // blocks everywhere
+   EX_RPOL_TYPED,             // the diagnostic typed level of the demo harness (no E / S basis)
+   EX_RPOL_R_GEOM             // R_GEOM: level 2R = TG_Compute over the open price (read once) and the INITIAL SL asserted by the owner; not the client's final R (costs open, C3/C4)
   };
 
 enum ENUM_EX_FILTER_POLICY
@@ -67,6 +75,9 @@ struct SExConfig
    double tp_price;
    ENUM_EX_SAVE_FAULT test_save_fault;    // TEST ONLY
    int test_fault_save_no;                // TEST ONLY: 1 = the INTENT save, 2 = the MAP save
+   ENUM_EX_R_POLICY r_policy;             // mandatory, UNSET blocks
+   bool sl_initial_set;                   // R_GEOM: the initial stop ASSERTED by the owner (variant (a)): accepted at registration only while the live SL equals it
+   double sl_initial;
   };
 
 struct SExQuote
@@ -121,6 +132,9 @@ void EX_ConfigInit(SExConfig &c)
    c.tp_price=0.0;
    c.test_save_fault=EX_SAVE_NONE;
    c.test_fault_save_no=0;
+   c.r_policy=EX_RPOL_UNSET;
+   c.sl_initial_set=false;
+   c.sl_initial=0.0;
   }
 
 void EX_RuntimeInit(SExRuntime &rt)
@@ -140,6 +154,25 @@ bool EX_OnGrid(const double x,const double tick)
    double r=x/tick;
    if(!EX_Finite(r) || MathAbs(r)>1e12) return(false);
    return(MathAbs(r-MathRound(r))<=8.0*DBL_EPSILON*MathMax(1.0,MathAbs(r)));
+  }
+
+// The ONLY place where the 2R level is derived: TG_Compute over E and S (no 2R arithmetic in this module). stops_level 0: the stops check judges an order, not a risk basis.
+bool EX_Geometry(const SExSymbol &sym,const int direction,const double e,const double s,const double tp,STgResult &out)
+  {
+   return(TG_Compute(direction==1 ? TG_BUY : TG_SELL,e,s,true,tp,sym.tick_size,sym.digits,sym.point,0,false,0.0,0.0,out));
+  }
+
+// the grid / representation / TP-versus-2R checks of a plan whose level is already known (identical for the typed and the R_GEOM level); "" = acceptable
+string EX_PlanRefusal(const double level,const SExConfig &cfg,const SExSymbol &sym,const int direction,const bool with_volume,const double volume)
+  {
+   string exact;
+   if(!EX_OnGrid(level,sym.tick_size)) return("PLAN_NOT_ON_SYMBOL_GRID: level_2R is refused, not rounded");
+   if(!EX_OnGrid(cfg.tp_price,sym.tick_size)) return("PLAN_NOT_ON_SYMBOL_GRID: TP is refused, not rounded");
+   if(!ESC_Fnum(level,exact) || !ESC_Fnum(cfg.tp_price,exact) || (with_volume && !ESC_Fnum(volume,exact)))
+      return("PLAN_NOT_REPRESENTABLE_IN_RECORD: level_2R, TP or the initial volume does not round-trip through 12 decimals; nothing is rounded or persisted");
+   if(MathAbs(cfg.tp_price-level)<sym.tick_size/2.0) return("TP_EQUALS_2R: the interaction is an open decision");
+   if((direction==1 && cfg.tp_price<level) || (direction==-1 && cfg.tp_price>level)) return("TP_BEFORE_2R: inconsistent with the minimum of 2R");
+   return("");
   }
 
 // test hook aside, exactly ESF_Save: false does not mean "nothing was written"
@@ -172,7 +205,9 @@ bool EX_Process(const SExConfig &cfg,CExitTransport *tr,SExRuntime &rt,const str
    if((int)cfg.filter_state<(int)EX_FS_UNKNOWN || (int)cfg.filter_state>(int)EX_FS_BLOCKED) {res.reason="INVALID_INPUT: exit_filter_state is not a known value"; return(false);}
    if((int)cfg.test_save_fault<(int)EX_SAVE_NONE || (int)cfg.test_save_fault>(int)EX_SAVE_AFTER) {res.reason="INVALID_INPUT: test_save_fault is not a known value"; return(false);}
    if(q.direction!=1 && q.direction!=-1) {res.reason="INVALID_INPUT: direction must be 1 (BUY) or -1 (SELL)"; return(false);}
+   if((int)cfg.r_policy<(int)EX_RPOL_UNSET || (int)cfg.r_policy>(int)EX_RPOL_R_GEOM) {res.reason="INVALID_INPUT: r_policy is not a known value"; return(false);}
    if(cfg.ea_magic<=0) {res.reason="INPUT_UNSET: ea_magic"; return(false);}
+   if(cfg.r_policy==EX_RPOL_UNSET) {res.reason="INPUT_UNSET: r_policy"; return(false);}
    if(cfg.filling==EX_FILL_UNSET) {res.reason="INPUT_UNSET: filling"; return(false);}
    if(cfg.deviation<0) {res.reason="INPUT_UNSET: deviation"; return(false);}
    if(cfg.filter_policy==EX_POL_UNSET) {res.reason="INPUT_UNSET: exit_filter_policy"; return(false);}
@@ -194,12 +229,12 @@ bool EX_Process(const SExConfig &cfg,CExitTransport *tr,SExRuntime &rt,const str
    SExSymbol sym;
    tr.ReadSymbol(id.symbol,sym);
    if(!sym.read_ok || !sym.close_allowed || sym.tick_size<=0.0) {res.reason="SYMBOL_UNREADABLE_OR_NOT_TRADABLE"; return(false);}
-   if(!EX_OnGrid(q.level_2r,sym.tick_size)) {res.reason="PLAN_NOT_ON_SYMBOL_GRID: level_2R is refused, not rounded"; return(false);}
-   if(!EX_OnGrid(cfg.tp_price,sym.tick_size)) {res.reason="PLAN_NOT_ON_SYMBOL_GRID: TP is refused, not rounded"; return(false);}
-   string exact;
-   if(!ESC_Fnum(q.level_2r,exact) || !ESC_Fnum(cfg.tp_price,exact)) {res.reason="PLAN_NOT_REPRESENTABLE_IN_RECORD: level_2R or TP does not round-trip through 12 decimals; the plan is not rounded and nothing is persisted"; return(false);}
-   if(MathAbs(cfg.tp_price-q.level_2r)<sym.tick_size/2.0) {res.reason="TP_EQUALS_2R: the interaction is an open decision"; return(false);}
-   if((q.direction==1 && cfg.tp_price<q.level_2r) || (q.direction==-1 && cfg.tp_price>q.level_2r)) {res.reason="TP_BEFORE_2R: inconsistent with the minimum of 2R"; return(false);}
+   string why;
+   if(cfg.r_policy!=EX_RPOL_R_GEOM)                    // typed diagnostic level: judged now; R_GEOM: judged after the level is derived from the stored basis
+     {
+      why=EX_PlanRefusal(q.level_2r,cfg,sym,q.direction,false,0.0);
+      if(why!="") {res.reason=why; return(false);}
+     }
    SExPosition pos;
    tr.FindPosition(id.position_id,pos);
    if(!pos.found || pos.ticket==0 || pos.identifier!=id.position_id) {res.reason="POSITION_NOT_FOUND"; return(false);}
@@ -229,10 +264,29 @@ bool EX_Process(const SExConfig &cfg,CExitTransport *tr,SExRuntime &rt,const str
       res.reason="PLAN_MISSING: the IDLE record carries no authorised plan (an unregistered or old record); it is never filled in from the current inputs";
       return(false);
      }
+   if((int)o.plan_rpol!=(int)cfg.r_policy)
+     {
+      res.reason="PLAN_CHANGED: r_policy differs from the authorised plan; nothing is persisted or sent";
+      return(false);
+     }
+   double level=q.level_2r;
+   if(cfg.r_policy==EX_RPOL_R_GEOM)
+     {
+      // the level is DERIVED from the STORED E and S (never from the live SL, never from the quote's level input) and must equal the stored level
+      if(!cfg.sl_initial_set) {res.reason="INPUT_UNSET: initial_sl"; return(false);}
+      if(cfg.sl_initial!=o.plan_s_src) {res.reason="PLAN_CHANGED: initial_sl differs from the authorised plan; nothing is persisted or sent"; return(false);}
+      STgResult geo;
+      EX_Geometry(sym,q.direction,o.plan_e_src,o.plan_s_src,cfg.tp_price,geo);
+      if(geo.status!=TG_OK) {res.reason="GEOMETRY_REFUSED: "+TG_StatusName(geo.status)+": "+geo.reason; return(false);}
+      if(geo.e_out!=o.plan_e_out || geo.s_out!=o.plan_s_out) {res.reason="PLAN_CHANGED: normalized basis differs from the authorised plan; nothing is persisted or sent"; return(false);}
+      level=geo.level_2r;                         // compared with the stored level below, with the other plan fields
+      why=EX_PlanRefusal(level,cfg,sym,q.direction,false,0.0);
+      if(why!="") {res.reason=why; return(false);}
+     }
    string changed="";
    if(st.direction!=q.direction) changed="direction";
    else
-      if(st.level!=q.level_2r) changed="level_2R";
+      if(st.level!=level) changed="level_2R";
       else
          if(st.volume_initial!=q.volume_initial) changed="initial_volume";
          else
@@ -249,7 +303,7 @@ bool EX_Process(const SExConfig &cfg,CExitTransport *tr,SExRuntime &rt,const str
       return(false);
      }
    SEaResult r;
-   bool request=EA_OnQuote(st,id.position_id,q.direction,q.level_2r,q.bid,q.ask,q.volume_initial,pos.volume,sym.vol_min,sym.vol_step,sym.vol_max,r);
+   bool request=EA_OnQuote(st,id.position_id,q.direction,level,q.bid,q.ask,q.volume_initial,pos.volume,sym.vol_min,sym.vol_step,sym.vol_max,r);
    if(!request)
      {
       if(r.event==EA_EV_OK)
@@ -285,7 +339,11 @@ bool EX_Process(const SExConfig &cfg,CExitTransport *tr,SExRuntime &rt,const str
    rec.plan_vol_min=o.plan_vol_min;
    rec.plan_vol_step=o.plan_vol_step;
    rec.plan_vol_max=o.plan_vol_max;
-   string why;
+   rec.plan_rpol=o.plan_rpol;
+   rec.plan_e_src=o.plan_e_src;
+   rec.plan_s_src=o.plan_s_src;
+   rec.plan_e_out=o.plan_e_out;
+   rec.plan_s_out=o.plan_s_out;
    if(!EX_Save(cfg,rt,name,rec,why))
      {
       rt.latched=true;
@@ -337,6 +395,11 @@ bool EX_Process(const SExConfig &cfg,CExitTransport *tr,SExRuntime &rt,const str
    mapped.plan_vol_min=o.plan_vol_min;
    mapped.plan_vol_step=o.plan_vol_step;
    mapped.plan_vol_max=o.plan_vol_max;
+   mapped.plan_rpol=o.plan_rpol;
+   mapped.plan_e_src=o.plan_e_src;
+   mapped.plan_s_src=o.plan_s_src;
+   mapped.plan_e_out=o.plan_e_out;
+   mapped.plan_s_out=o.plan_s_out;
    if(!EX_Save(cfg,rt,name,mapped,why))
      {
       rt.latched=true;
@@ -364,7 +427,9 @@ bool EX_Register(const SExConfig &cfg,CExitTransport *tr,SExRuntime &rt,const st
    if((int)cfg.filter_state<(int)EX_FS_UNKNOWN || (int)cfg.filter_state>(int)EX_FS_BLOCKED) {res.reason="INVALID_INPUT: exit_filter_state is not a known value"; return(false);}
    if((int)cfg.test_save_fault<(int)EX_SAVE_NONE || (int)cfg.test_save_fault>(int)EX_SAVE_AFTER) {res.reason="INVALID_INPUT: test_save_fault is not a known value"; return(false);}
    if(q.direction!=1 && q.direction!=-1) {res.reason="INVALID_INPUT: direction must be 1 (BUY) or -1 (SELL)"; return(false);}
+   if((int)cfg.r_policy<(int)EX_RPOL_UNSET || (int)cfg.r_policy>(int)EX_RPOL_R_GEOM) {res.reason="INVALID_INPUT: r_policy is not a known value"; return(false);}
    if(cfg.ea_magic<=0) {res.reason="INPUT_UNSET: ea_magic"; return(false);}
+   if(cfg.r_policy==EX_RPOL_UNSET) {res.reason="INPUT_UNSET: r_policy"; return(false);}
    if(!cfg.tp_set) {res.reason="TP_UNKNOWN"; return(false);}
    if(rt.latched) {res.reason="LATCHED: an earlier uncertainty on this executor; restart and recover first"; return(false);}
    SExAccount acct;
@@ -380,16 +445,12 @@ bool EX_Register(const SExConfig &cfg,CExitTransport *tr,SExRuntime &rt,const st
    SExSymbol sym;
    tr.ReadSymbol(id.symbol,sym);
    if(!sym.read_ok || sym.tick_size<=0.0) {res.reason="SYMBOL_UNREADABLE"; return(false);}
-   if(!EX_OnGrid(q.level_2r,sym.tick_size)) {res.reason="PLAN_NOT_ON_SYMBOL_GRID: level_2R is refused, not rounded"; return(false);}
-   if(!EX_OnGrid(cfg.tp_price,sym.tick_size)) {res.reason="PLAN_NOT_ON_SYMBOL_GRID: TP is refused, not rounded"; return(false);}
-   string exact;
-   if(!ESC_Fnum(q.level_2r,exact) || !ESC_Fnum(cfg.tp_price,exact) || !ESC_Fnum(q.volume_initial,exact))
+   string why;
+   if(cfg.r_policy!=EX_RPOL_R_GEOM)
      {
-      res.reason="PLAN_NOT_REPRESENTABLE_IN_RECORD: level_2R, TP or the initial volume does not round-trip through 12 decimals; nothing is rounded or persisted";
-      return(false);
+      why=EX_PlanRefusal(q.level_2r,cfg,sym,q.direction,true,q.volume_initial);
+      if(why!="") {res.reason=why; return(false);}
      }
-   if(MathAbs(cfg.tp_price-q.level_2r)<sym.tick_size/2.0) {res.reason="TP_EQUALS_2R: the interaction is an open decision"; return(false);}
-   if((q.direction==1 && cfg.tp_price<q.level_2r) || (q.direction==-1 && cfg.tp_price>q.level_2r)) {res.reason="TP_BEFORE_2R: inconsistent with the minimum of 2R"; return(false);}
    SExPosition pos;
    tr.FindPosition(id.position_id,pos);
    if(!pos.found || pos.ticket==0 || pos.identifier!=id.position_id) {res.reason="POSITION_NOT_FOUND"; return(false);}
@@ -397,6 +458,35 @@ bool EX_Register(const SExConfig &cfg,CExitTransport *tr,SExRuntime &rt,const st
      {
       res.reason="OWNERSHIP_NOT_PROVEN: a manual or foreign position is never adopted (symbol, magic or direction differ)";
       return(false);
+     }
+   double level=q.level_2r;
+   double e_src=0.0,s_src=0.0,e_out=0.0,s_out=0.0;
+   if(cfg.r_policy==EX_RPOL_R_GEOM)
+     {
+      // E = the open price read ONCE now; S = the initial SL ASSERTED by the owner, accepted only while the live SL still equals it (variant (a)); nothing is read from history
+      if(!cfg.sl_initial_set) {res.reason="INPUT_UNSET: initial_sl"; return(false);}
+      if(!(EX_Finite(pos.price_open) && pos.price_open>0.0)) {res.reason="ENTRY_UNAVAILABLE: the open price of the position is not readable"; return(false);}
+      if(!(pos.sl>0.0 && MathAbs(pos.sl-cfg.sl_initial)<sym.tick_size/2.0))
+        {
+         res.reason="INITIAL_SL_NOT_PROVEN: the live SL differs from the asserted initial SL (or is absent); it may have been moved, so the initial SL is unproven";
+         return(false);
+        }
+      if(!(EX_OnGrid(pos.price_open,sym.tick_size) && EX_OnGrid(cfg.sl_initial,sym.tick_size))) {res.reason="BASE_NOT_ON_SYMBOL_GRID: the open price or the asserted SL is refused, not rounded"; return(false);}
+      STgResult geo;
+      EX_Geometry(sym,q.direction,pos.price_open,cfg.sl_initial,cfg.tp_price,geo);
+      if(geo.status!=TG_OK) {res.reason="GEOMETRY_REFUSED: "+TG_StatusName(geo.status)+": "+geo.reason; return(false);}
+      if(MathAbs(geo.e_out-pos.price_open)>ESC_BASIS_TOL*MathMax(1.0,pos.price_open) || MathAbs(geo.s_out-cfg.sl_initial)>ESC_BASIS_TOL*MathMax(1.0,cfg.sl_initial))
+        {
+         res.reason="BASE_CHANGED_BY_NORMALIZATION: the normalized entry / stop differs from the declared one; nothing is rounded or persisted";
+         return(false);
+        }
+      level=geo.level_2r;
+      e_src=pos.price_open;
+      s_src=cfg.sl_initial;
+      e_out=geo.e_out;
+      s_out=geo.s_out;
+      why=EX_PlanRefusal(level,cfg,sym,q.direction,true,q.volume_initial);
+      if(why!="") {res.reason=why; return(false);}
      }
    if(pos.volume!=q.volume_initial) {res.reason="POSITION_VOLUME_DIFFERS_FROM_THE_PLAN: the initial volume must equal the volume of the position"; return(false);}
    SEsResult sp;
@@ -414,14 +504,18 @@ bool EX_Register(const SExConfig &cfg,CExitTransport *tr,SExRuntime &rt,const st
    rec.state.bound=true;
    rec.state.position_id=id.position_id;
    rec.state.direction=q.direction;
-   rec.state.level=q.level_2r;
+   rec.state.level=level;
    rec.state.volume_initial=q.volume_initial;
    rec.plan_set=true;
    rec.plan_tp=cfg.tp_price;
    rec.plan_vol_min=sym.vol_min;
    rec.plan_vol_step=sym.vol_step;
    rec.plan_vol_max=sym.vol_max;
-   string why;
+   rec.plan_rpol=(int)cfg.r_policy;
+   rec.plan_e_src=e_src;
+   rec.plan_s_src=s_src;
+   rec.plan_e_out=e_out;
+   rec.plan_s_out=s_out;
    if(!EX_Save(cfg,rt,name,rec,why))
      {
       rt.latched=true;
@@ -432,7 +526,8 @@ bool EX_Register(const SExConfig &cfg,CExitTransport *tr,SExRuntime &rt,const st
    SEaState st2;
    SEsRestore o2;
    ESF_Load(name,id,st2,o2);
-   if(!(o2.verdict==ESC_USABLE_IDLE && o2.generation==1 && o2.plan_set && o2.plan_tp==cfg.tp_price && st2.direction==q.direction && st2.level==q.level_2r &&
+   if(!(o2.verdict==ESC_USABLE_IDLE && o2.generation==1 && o2.plan_set && o2.plan_tp==cfg.tp_price && st2.direction==q.direction && st2.level==level && o2.plan_rpol==(int)cfg.r_policy &&
+        o2.plan_e_src==e_src && o2.plan_s_src==s_src && o2.plan_e_out==e_out && o2.plan_s_out==s_out &&
         st2.volume_initial==q.volume_initial && o2.plan_vol_min==sym.vol_min && o2.plan_vol_step==sym.vol_step && o2.plan_vol_max==sym.vol_max))
      {
       rt.latched=true;

@@ -38,7 +38,7 @@ string X_REASON[]={"INVALID_INPUT: filling","INVALID_INPUT: exit_filter_policy",
 #define K_DONE_MAP 4
 #define K_IDLE_NO_PLAN 5
 #define K_OLD_V1 6
-#define PZ "PLAN_SET=0\nPLAN_TP=0.000000000000\nPLAN_VOL_MIN=0.000000000000\nPLAN_VOL_STEP=0.000000000000\nPLAN_VOL_MAX=0.000000000000\n"
+#define PZ "PLAN_SET=0\nPLAN_TP=0.000000000000\nPLAN_VOL_MIN=0.000000000000\nPLAN_VOL_STEP=0.000000000000\nPLAN_VOL_MAX=0.000000000000\nPLAN_RPOL=0\nPLAN_E_SRC=0.000000000000\nPLAN_S_SRC=0.000000000000\nPLAN_E_OUT=0.000000000000\nPLAN_S_OUT=0.000000000000\n"
 SEsIdentity Ident()
   {
    SEsIdentity i;
@@ -89,6 +89,7 @@ void Prepare(const int kind,const SExConfig &cfg,CFakeTransport &t,const SExQuot
          rec.state.level=(from_inputs ? q.level_2r : 2000.0);
          rec.state.volume_initial=(from_inputs ? q.volume_initial : 0.5);
          rec.plan_set=true;
+         rec.plan_rpol=ESC_RPOL_TYPED;
          rec.plan_tp=(from_inputs ? cfg.tp_price : 2010.0);
          rec.plan_vol_min=(from_inputs ? t.symbol.vol_min : 0.01);
          rec.plan_vol_step=(from_inputs ? t.symbol.vol_step : 0.01);
@@ -108,6 +109,7 @@ void Prepare(const int kind,const SExConfig &cfg,CFakeTransport &t,const SExQuot
         {
          PendingState(rec.state);
          rec.plan_set=true;
+         rec.plan_rpol=ESC_RPOL_TYPED;
          rec.plan_tp=2010.0;
          rec.plan_vol_min=0.01;
          rec.plan_vol_step=0.01;
@@ -129,7 +131,7 @@ void Prepare(const int kind,const SExConfig &cfg,CFakeTransport &t,const SExQuot
      {
       string body=StringSubstr(text,0,StringFind(text,"CRC="));
       StringReplace(body,PZ,"");
-      StringReplace(body,"VERSION=2","VERSION=1");
+      StringReplace(body,"VERSION=3","VERSION=1");
       text=body+"CRC="+StringFormat("%08X",ESC_Crc32(body))+"\n";
      }
    ESF_WriteAll(FN,text);
@@ -158,6 +160,7 @@ void Setup(const int tweak,const int resp,SExConfig &cfg,CFakeTransport &t,SExQu
   {
    EX_ConfigInit(cfg);
    cfg.enabled=true;
+   cfg.r_policy=EX_RPOL_TYPED;                  // the legacy rows use the typed diagnostic level; UNSET would block them all
    cfg.ea_magic=777;
    cfg.filling=EX_FILL_IOC;
    cfg.deviation=20;

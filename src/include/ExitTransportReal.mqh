@@ -61,9 +61,11 @@ public:
       s.vol_step=SymbolInfoDouble(symbol,SYMBOL_VOLUME_STEP);
       s.vol_max=SymbolInfoDouble(symbol,SYMBOL_VOLUME_MAX);
       s.tick_size=SymbolInfoDouble(symbol,SYMBOL_TRADE_TICK_SIZE);
+      s.digits=(int)SymbolInfoInteger(symbol,SYMBOL_DIGITS);
+      s.point=SymbolInfoDouble(symbol,SYMBOL_POINT);
       long tm=SymbolInfoInteger(symbol,SYMBOL_TRADE_MODE);
       s.close_allowed=(tm==SYMBOL_TRADE_MODE_FULL || tm==SYMBOL_TRADE_MODE_CLOSEONLY);
-      s.read_ok=(GetLastError()==0 && s.vol_min>0.0 && s.vol_step>0.0 && s.vol_max>0.0 && s.tick_size>0.0);
+      s.read_ok=(GetLastError()==0 && s.vol_min>0.0 && s.vol_step>0.0 && s.vol_max>0.0 && s.tick_size>0.0 && s.digits>=0 && s.point>0.0);
      }
    virtual void FindPosition(const ulong identifier,SExPosition &p)
      {
@@ -74,6 +76,8 @@ public:
       p.magic=0;
       p.type=-1;
       p.volume=0.0;
+      p.price_open=0.0;
+      p.sl=0.0;
       int matches=0;
       for(int i=PositionsTotal()-1;i>=0;i--)
         {
@@ -87,6 +91,8 @@ public:
          p.magic=PositionGetInteger(POSITION_MAGIC);
          p.type=(PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY ? 0 : 1);
          p.volume=PositionGetDouble(POSITION_VOLUME);
+         p.price_open=PositionGetDouble(POSITION_PRICE_OPEN);
+         p.sl=PositionGetDouble(POSITION_SL);
         }
       p.found=(matches==1);                  // zero or ambiguous = not found
      }

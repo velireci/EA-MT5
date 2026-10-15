@@ -38,6 +38,11 @@ def run_rows(mod):
         reason_ok = r['reason'] in o.reason or r['reason'] in o.state.reason
         if got != exp or not reason_ok:
             bad.append((r['name'], got, exp, o.reason))
+        if r['verdict'] != p.RECOVERY_REQUIRED or r['status'] != 'BLOCKED':
+            if (o.plan_rpol if o.plan_set else 0) != r['plan']:
+                bad.append((r['name'], 'plan code', o.plan_rpol, r['plan']))
+            if r['plan'] == 2 and (o.plan_e_src, o.plan_s_src, o.plan_e_out, o.plan_s_out) not in ((4300.0, 4295.0, 4300.0, 4295.0), (4300.0, 4305.0, 4300.0, 4305.0)):
+                bad.append((r['name'], 'basis not restored', o.plan_e_src, o.plan_s_src, o.plan_e_out, o.plan_s_out))
         if r['canon']:
             ok, rc = mod.decode(r['text'])
             ok2, again = mod.encode(rc)
@@ -333,6 +338,13 @@ class Mutants(unittest.TestCase):
             ('existing damaged file overwritten', "            if cur is None:\n                return False, 'EXISTING_FILE_UNUSABLE: recover first'", "            if False:\n                pass"),
             ('read back skipped', "        if self.read(tmp) != text:", "        if False:"),
             ('init overwrites', "        if self.exists(name) or self.exists(name + '.tmp'):", "        if False:"),
+            ('R_GEOM basis not required', "            if any(getattr(rec, n) <= 0 for n in basis):", "            if False:"),
+            ('normalized basis not compared with the source', "            if abs(rec.plan_e_src - rec.plan_e_out) >", "            if False and abs(rec.plan_e_src - rec.plan_e_out) >"),
+            ('BUY ordering not checked', "            if st.direction == 1 and not rec.plan_s_out < rec.plan_e_out < st.level:", "            if False:"),
+            ('SELL ordering not checked', "            if st.direction == -1 and not st.level < rec.plan_e_out < rec.plan_s_out:", "            if False:"),
+            ('plan without an R policy accepted', "        if rec.plan_rpol == RPOL_NONE:\n            return", "        if False:\n            return"),
+            ('typed level may carry a basis', "        if rec.plan_rpol == RPOL_TYPED and any(getattr(rec, n) for n in basis):", "        if False:"),
+            ('basis without plan_set accepted', " or rec.plan_rpol or any(getattr(rec, n) for n in basis)):", "):"),
             ('rounding accepted', "    return t if float(t) == x else None", "    return t"),
         ]
         for name, old, new in cases:

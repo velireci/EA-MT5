@@ -94,6 +94,11 @@ void ERF_FillRecord(SEsRecord &rec,const int generation,const SEsIdentity &id,co
    rec.plan_vol_min=o.plan_vol_min;
    rec.plan_vol_step=o.plan_vol_step;
    rec.plan_vol_max=o.plan_vol_max;
+   rec.plan_rpol=o.plan_rpol;
+   rec.plan_e_src=o.plan_e_src;
+   rec.plan_s_src=o.plan_s_src;
+   rec.plan_e_out=o.plan_e_out;
+   rec.plan_s_out=o.plan_s_out;
    rec.n_orders=o.n_orders;
    for(int i=0;i<o.n_orders;i++)
       rec.orders[i]=o.orders[i];

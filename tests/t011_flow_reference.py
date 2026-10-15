@@ -45,7 +45,8 @@ class FlowResult:
 
 def _rec(o, generation, identity, st):
     """the record of a request-bearing state with its order map AND the authorised plan carried over unchanged from the restore"""
-    return p.Record(generation, identity, st, p.SEND_MAPPED, bool(o.map_complete), list(o.orders), o.plan_set, o.plan_tp, o.plan_vol_min, o.plan_vol_step, o.plan_vol_max)
+    return p.Record(generation, identity, st, p.SEND_MAPPED, bool(o.map_complete), list(o.orders), o.plan_set, o.plan_tp, o.plan_vol_min, o.plan_vol_step, o.plan_vol_max,
+                    o.plan_rpol, o.plan_e_src, o.plan_s_src, o.plan_e_out, o.plan_s_out)
 
 
 def run(store, name, identity, raw_a=None, raw_b=None, fail_save=False):

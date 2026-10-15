@@ -142,6 +142,30 @@ class Flow(unittest.TestCase):
                 self.assertNotEqual(res.state.status, act.IDLE) if r['start'] not in (fx.IDLE,) else None
 
 
+class BasisCarryOver(unittest.TestCase):
+    """the declared R basis (policy, E and S, source and normalized) and the plan survive the flow's SAVE unchanged (Part 14)"""
+
+    def test_the_geometry_basis_is_carried_into_the_saved_record(self):
+        for plan in (dict(plan_set=True, plan_tp=2010.0, plan_vol_min=0.01, plan_vol_step=0.01, plan_vol_max=100.0, plan_rpol=p.RPOL_R_GEOM,
+                          plan_e_src=1990.0, plan_s_src=1985.0, plan_e_out=1990.0, plan_s_out=1985.0),
+                     dict(plan_set=True, plan_tp=2010.0, plan_vol_min=0.01, plan_vol_step=0.01, plan_vol_max=100.0, plan_rpol=p.RPOL_TYPED)):
+            with tempfile.TemporaryDirectory() as d:
+                store = p.FileStore(d)
+                base = fx.start_record(fx.PEND_MAP)
+                rec = p.Record(base.generation, base.identity, base.state, base.send_phase, base.map_complete, list(base.orders), **plan)
+                ok, text = p.encode(rec)
+                self.assertTrue(ok, text)
+                with open(store.path(NAME), 'wb') as f:
+                    f.write(text.encode('latin-1'))
+                full = fx.PROFILES[0][1]
+                res = fl.run(store, NAME, fx.IDENT, full, full, False)
+                self.assertEqual((res.final, res.saved), ('DONE', True))
+                ok, after = p.decode(store.read(NAME))
+                self.assertTrue(ok, after)
+                for k, v in plan.items():
+                    self.assertEqual(getattr(after, k), v, k)
+
+
 class Mutants(unittest.TestCase):
     def test_mutants_are_caught(self):
         src = _read('tests', 't011_flow_reference.py')

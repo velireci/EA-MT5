@@ -24,6 +24,7 @@ import math
 import sys
 from dataclasses import dataclass, field
 
+import t005_geometry_reference as tg
 import t011_activation_reference as act
 import t011_persist_reference as p
 import t011_split_reference as es
@@ -35,6 +36,7 @@ FS_UNKNOWN, FS_CLEAR, FS_BLOCKED = 0, 1, 2
 SAVE_NONE, SAVE_BEFORE, SAVE_AFTER = 0, 1, 2
 BLOCKED, RECOVERY_REQUIRED, NOT_IDLE, NO_REQUEST, SENT_MAPPED, REGISTERED = 'BLOCKED', 'RECOVERY_REQUIRED', 'NOT_IDLE', 'NO_REQUEST', 'SENT_MAPPED', 'REGISTERED'
 ACCEPT_RETCODES = (10008, 10009, 10010)
+RPOL_UNSET, RPOL_TYPED, RPOL_R_GEOM = 0, 1, 2     # UNSET blocks; TYPED = the diagnostic typed level of the demo harness; R_GEOM = R_GEOM from the stored E and the asserted initial SL (Part 14)
 
 
 @dataclass
@@ -51,6 +53,9 @@ class Config:
     tp_price: float = 0.0
     test_save_fault: int = SAVE_NONE
     test_fault_save_no: int = 0
+    r_policy: int = RPOL_UNSET
+    sl_initial_set: bool = False     # R_GEOM: the initial stop ASSERTED by the owner (variant (a)); accepted at registration only while the live SL equals it
+    sl_initial: float = 0.0
 
 
 @dataclass
@@ -86,6 +91,8 @@ class SymbolW:
     vol_step: float = 0.01
     vol_max: float = 100.0
     tick_size: float = 0.01
+    digits: int = 2
+    point: float = 0.01
     close_allowed: bool = True
 
 
@@ -98,6 +105,8 @@ class PositionW:
     magic: int = 777
     type: int = 0
     volume: float = 0.5
+    price_open: float = 0.0
+    sl: float = 0.0
 
 
 @dataclass
@@ -185,6 +194,26 @@ def _on_grid(x, tick):
     return abs(r - round(r)) <= 8 * sys.float_info.epsilon * max(1.0, abs(r))
 
 
+def _geometry(sym, direction, e_src, s_src, tp):
+    """the ONLY place where the 2R level is derived: TG_Compute (here the T005 reference) over E and S; this module contains no 2R arithmetic. stops_level 0: the stops check judges an order, not a risk basis."""
+    return tg.compute(tg.BUY if direction == 1 else tg.SELL, e_src, s_src, sym.tick_size, sym.digits, sym.point, 0, t_raw=tp)
+
+
+def _plan_refusal(level, cfg, sym, direction, volume=None):
+    """the grid / representation / TP-versus-2R checks of a plan whose level is already known; returns the reason or None (identical for the typed and the R_GEOM level)"""
+    if not _on_grid(level, sym.tick_size):
+        return 'PLAN_NOT_ON_SYMBOL_GRID: level_2R is refused, not rounded'
+    if not _on_grid(cfg.tp_price, sym.tick_size):
+        return 'PLAN_NOT_ON_SYMBOL_GRID: TP is refused, not rounded'
+    if p.fnum(level) is None or p.fnum(cfg.tp_price) is None or (volume is not None and p.fnum(volume) is None):
+        return 'PLAN_NOT_REPRESENTABLE_IN_RECORD: level_2R, TP or the initial volume does not round-trip through 12 decimals; nothing is rounded or persisted'
+    if abs(cfg.tp_price - level) < sym.tick_size / 2:
+        return 'TP_EQUALS_2R: the interaction is an open decision'
+    if (direction == 1 and cfg.tp_price < level) or (direction == -1 and cfg.tp_price > level):
+        return 'TP_BEFORE_2R: inconsistent with the minimum of 2R'
+    return None
+
+
 def _save(cfg, rt, store, name, rec):
     rt.save_calls += 1
     if cfg.test_save_fault != SAVE_NONE and cfg.test_fault_save_no == rt.save_calls:
@@ -196,7 +225,8 @@ def _save(cfg, rt, store, name, rec):
 
 def _rec(gen, identity, st, phase, o, complete=False, orders=()):
     """a record that carries the authorised plan unchanged from the loaded one"""
-    return p.Record(gen, identity, st, phase, complete, list(orders), o.plan_set, o.plan_tp, o.plan_vol_min, o.plan_vol_step, o.plan_vol_max)
+    return p.Record(gen, identity, st, phase, complete, list(orders), o.plan_set, o.plan_tp, o.plan_vol_min, o.plan_vol_step, o.plan_vol_max, o.plan_rpol, o.plan_e_src, o.plan_s_src,
+                    o.plan_e_out, o.plan_s_out)
 
 
 def process(cfg, tr, rt, store, name, identity, q):
@@ -225,8 +255,12 @@ def process(cfg, tr, rt, store, name, identity, q):
         return block('INVALID_INPUT: test_save_fault is not a known value')
     if not _int(q.direction) or q.direction not in (1, -1):
         return block('INVALID_INPUT: direction must be 1 (BUY) or -1 (SELL)')
+    if not _int(cfg.r_policy) or cfg.r_policy not in (RPOL_UNSET, RPOL_TYPED, RPOL_R_GEOM):
+        return block('INVALID_INPUT: r_policy is not a known value')
     if cfg.ea_magic <= 0:
         return block('INPUT_UNSET: ea_magic')
+    if cfg.r_policy == RPOL_UNSET:
+        return block('INPUT_UNSET: r_policy')
     if cfg.filling == FILL_UNSET:
         return block('INPUT_UNSET: filling')
     if cfg.deviation < 0:
@@ -258,16 +292,10 @@ def process(cfg, tr, rt, store, name, identity, q):
     sym = tr.read_symbol(identity.symbol)
     if not sym.read_ok or not sym.close_allowed or sym.tick_size <= 0:
         return block('SYMBOL_UNREADABLE_OR_NOT_TRADABLE')
-    if not _on_grid(q.level_2r, sym.tick_size):
-        return block('PLAN_NOT_ON_SYMBOL_GRID: level_2R is refused, not rounded')
-    if not _on_grid(cfg.tp_price, sym.tick_size):
-        return block('PLAN_NOT_ON_SYMBOL_GRID: TP is refused, not rounded')
-    if p.fnum(q.level_2r) is None or p.fnum(cfg.tp_price) is None:
-        return block('PLAN_NOT_REPRESENTABLE_IN_RECORD: level_2R or TP does not round-trip through 12 decimals; the plan is not rounded and nothing is persisted')
-    if abs(cfg.tp_price - q.level_2r) < sym.tick_size / 2:
-        return block('TP_EQUALS_2R: the interaction is an open decision')
-    if (q.direction == 1 and cfg.tp_price < q.level_2r) or (q.direction == -1 and cfg.tp_price > q.level_2r):
-        return block('TP_BEFORE_2R: inconsistent with the minimum of 2R')
+    if cfg.r_policy != RPOL_R_GEOM:                    # typed diagnostic level: judged now; R_GEOM: judged after the level is derived from the stored basis
+        why = _plan_refusal(q.level_2r, cfg, sym, q.direction)
+        if why:
+            return block(why)
     pos = tr.find_position(identity.position_id)
     if not pos.found or pos.ticket <= 0 or pos.identifier != identity.position_id:
         return block('POSITION_NOT_FOUND')
@@ -282,12 +310,30 @@ def process(cfg, tr, rt, store, name, identity, q):
     if not o.plan_set:
         return recovery('PLAN_MISSING: the IDLE record carries no authorised plan (an unregistered or old record); it is never filled in from the current inputs', latch=False)
     st = o.state
-    for field_, stored, now in (('direction', st.direction, q.direction), ('level_2R', st.level, q.level_2r), ('initial_volume', st.volume_initial, q.volume_initial),
+    if o.plan_rpol != cfg.r_policy:
+        return block('PLAN_CHANGED: r_policy differs from the authorised plan (stored %r, now %r); nothing is persisted or sent' % (o.plan_rpol, cfg.r_policy))
+    level = q.level_2r
+    if cfg.r_policy == RPOL_R_GEOM:
+        # the level is DERIVED from the STORED E and S (never from the live SL, never from the quote's level input) and must equal the stored level
+        if not cfg.sl_initial_set:
+            return block('INPUT_UNSET: initial_sl')
+        if cfg.sl_initial != o.plan_s_src:
+            return block('PLAN_CHANGED: initial_sl differs from the authorised plan (stored %r, now %r); nothing is persisted or sent' % (o.plan_s_src, cfg.sl_initial))
+        geo = _geometry(sym, q.direction, o.plan_e_src, o.plan_s_src, cfg.tp_price)
+        if geo.status != tg.OK:
+            return block('GEOMETRY_REFUSED: %s: %s' % (geo.status, geo.reason))
+        if geo.e_out != o.plan_e_out or geo.s_out != o.plan_s_out:
+            return block('PLAN_CHANGED: normalized basis differs from the authorised plan; nothing is persisted or sent')
+        level = geo.level_2r                         # compared with the stored level below, with the other plan fields
+        why = _plan_refusal(level, cfg, sym, q.direction)
+        if why:
+            return block(why)
+    for field_, stored, now in (('direction', st.direction, q.direction), ('level_2R', st.level, level), ('initial_volume', st.volume_initial, q.volume_initial),
                                 ('tp', o.plan_tp, cfg.tp_price), ('volume_min', o.plan_vol_min, sym.vol_min), ('volume_step', o.plan_vol_step, sym.vol_step),
                                 ('volume_max', o.plan_vol_max, sym.vol_max)):
         if stored != now:
             return block('PLAN_CHANGED: %s differs from the authorised plan (stored %r, now %r); nothing is persisted or sent' % (field_, stored, now))
-    r = act.on_quote(st, identity.position_id, q.direction, q.level_2r, q.bid, q.ask, q.volume_initial, pos.volume, sym.vol_min, sym.vol_step, sym.vol_max)
+    r = act.on_quote(st, identity.position_id, q.direction, level, q.bid, q.ask, q.volume_initial, pos.volume, sym.vol_min, sym.vol_step, sym.vol_max)
     if r.action != act.REQUEST_ACTION:
         if r.event == 'OK':
             res.final, res.reason = NO_REQUEST, 'the 2R level is not reached'
@@ -343,8 +389,12 @@ def register(cfg, tr, rt, store, name, identity, q):
         return block('INVALID_INPUT: test_save_fault is not a known value')
     if not _int(q.direction) or q.direction not in (1, -1):
         return block('INVALID_INPUT: direction must be 1 (BUY) or -1 (SELL)')
+    if not _int(cfg.r_policy) or cfg.r_policy not in (RPOL_UNSET, RPOL_TYPED, RPOL_R_GEOM):
+        return block('INVALID_INPUT: r_policy is not a known value')
     if cfg.ea_magic <= 0:
         return block('INPUT_UNSET: ea_magic')
+    if cfg.r_policy == RPOL_UNSET:
+        return block('INPUT_UNSET: r_policy')
     if not cfg.tp_set:
         return block('TP_UNKNOWN')
     if rt.latched:
@@ -364,21 +414,35 @@ def register(cfg, tr, rt, store, name, identity, q):
     sym = tr.read_symbol(identity.symbol)
     if not sym.read_ok or sym.tick_size <= 0:
         return block('SYMBOL_UNREADABLE')
-    if not _on_grid(q.level_2r, sym.tick_size):
-        return block('PLAN_NOT_ON_SYMBOL_GRID: level_2R is refused, not rounded')
-    if not _on_grid(cfg.tp_price, sym.tick_size):
-        return block('PLAN_NOT_ON_SYMBOL_GRID: TP is refused, not rounded')
-    if p.fnum(q.level_2r) is None or p.fnum(cfg.tp_price) is None or p.fnum(q.volume_initial) is None:
-        return block('PLAN_NOT_REPRESENTABLE_IN_RECORD: level_2R, TP or the initial volume does not round-trip through 12 decimals; nothing is rounded or persisted')
-    if abs(cfg.tp_price - q.level_2r) < sym.tick_size / 2:
-        return block('TP_EQUALS_2R: the interaction is an open decision')
-    if (q.direction == 1 and cfg.tp_price < q.level_2r) or (q.direction == -1 and cfg.tp_price > q.level_2r):
-        return block('TP_BEFORE_2R: inconsistent with the minimum of 2R')
+    if cfg.r_policy != RPOL_R_GEOM:
+        why = _plan_refusal(q.level_2r, cfg, sym, q.direction, q.volume_initial)
+        if why:
+            return block(why)
     pos = tr.find_position(identity.position_id)
     if not pos.found or pos.ticket <= 0 or pos.identifier != identity.position_id:
         return block('POSITION_NOT_FOUND')
     if pos.symbol != identity.symbol or pos.magic != cfg.ea_magic or pos.type != (0 if q.direction == 1 else 1):
         return block('OWNERSHIP_NOT_PROVEN: a manual or foreign position is never adopted (symbol, magic or direction differ)')
+    level, basis = q.level_2r, (0.0, 0.0, 0.0, 0.0)
+    if cfg.r_policy == RPOL_R_GEOM:
+        # E = the open price read ONCE now; S = the initial SL ASSERTED by the owner, accepted only while the live SL still equals it (variant (a)); nothing is read from history
+        if not cfg.sl_initial_set:
+            return block('INPUT_UNSET: initial_sl')
+        if not (_finite(pos.price_open) and pos.price_open > 0):
+            return block('ENTRY_UNAVAILABLE: the open price of the position is not readable')
+        if not (pos.sl > 0 and abs(pos.sl - cfg.sl_initial) < sym.tick_size / 2):
+            return block('INITIAL_SL_NOT_PROVEN: the live SL differs from the asserted initial SL (or is absent); it may have been moved, so the initial SL is unproven')
+        if not (_on_grid(pos.price_open, sym.tick_size) and _on_grid(cfg.sl_initial, sym.tick_size)):
+            return block('BASE_NOT_ON_SYMBOL_GRID: the open price or the asserted SL is refused, not rounded')
+        geo = _geometry(sym, q.direction, pos.price_open, cfg.sl_initial, cfg.tp_price)
+        if geo.status != tg.OK:
+            return block('GEOMETRY_REFUSED: %s: %s' % (geo.status, geo.reason))
+        if abs(geo.e_out - pos.price_open) > p.BASIS_TOL * max(1.0, pos.price_open) or abs(geo.s_out - cfg.sl_initial) > p.BASIS_TOL * max(1.0, cfg.sl_initial):
+            return block('BASE_CHANGED_BY_NORMALIZATION: the normalized entry / stop differs from the declared one; nothing is rounded or persisted')
+        level, basis = geo.level_2r, (pos.price_open, cfg.sl_initial, geo.e_out, geo.s_out)
+        why = _plan_refusal(level, cfg, sym, q.direction, q.volume_initial)
+        if why:
+            return block(why)
     if pos.volume != q.volume_initial:
         return block('POSITION_VOLUME_DIFFERS_FROM_THE_PLAN: the initial volume must equal the volume of the position')
     sp = es.split(q.volume_initial, sym.vol_min, sym.vol_step, sym.vol_max)
@@ -387,15 +451,16 @@ def register(cfg, tr, rt, store, name, identity, q):
     if store.exists(name) or store.exists(name + '.tmp'):
         return block('ALREADY_EXISTS: a state file exists; registration never overwrites')
     st = act.State()
-    st.bound, st.position_id, st.direction, st.level, st.volume_initial = True, identity.position_id, q.direction, q.level_2r, q.volume_initial
-    rec = p.Record(1, identity, st, p.SEND_NONE, False, [], True, cfg.tp_price, sym.vol_min, sym.vol_step, sym.vol_max)
+    st.bound, st.position_id, st.direction, st.level, st.volume_initial = True, identity.position_id, q.direction, level, q.volume_initial
+    rec = p.Record(1, identity, st, p.SEND_NONE, False, [], True, cfg.tp_price, sym.vol_min, sym.vol_step, sym.vol_max, cfg.r_policy, *basis)
     ok, why = _save(cfg, rt, store, name, rec)
     if not ok:
         rt.latched = True
         res.final, res.reason = RECOVERY_REQUIRED, 'REGISTRATION_SAVE_FAILED: %s; the file may or may not exist; nothing else is done' % why
         return res
     chk = store.load(name, identity)
-    if not (chk.verdict == p.USABLE_IDLE and chk.generation == 1 and chk.plan_set and chk.plan_tp == cfg.tp_price and chk.state.direction == q.direction and chk.state.level == q.level_2r
+    if not (chk.verdict == p.USABLE_IDLE and chk.generation == 1 and chk.plan_set and chk.plan_tp == cfg.tp_price and chk.state.direction == q.direction and chk.state.level == level
+            and chk.plan_rpol == cfg.r_policy and (chk.plan_e_src, chk.plan_s_src, chk.plan_e_out, chk.plan_s_out) == basis
             and chk.state.volume_initial == q.volume_initial and (chk.plan_vol_min, chk.plan_vol_step, chk.plan_vol_max) == (sym.vol_min, sym.vol_step, sym.vol_max)):
         rt.latched = True
         res.final, res.reason = RECOVERY_REQUIRED, 'REGISTRATION_NOT_VERIFIED: the re-load does not show the registered plan'
