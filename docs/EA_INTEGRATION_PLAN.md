@@ -43,38 +43,68 @@ Pyetje për pronarin vetëm për këtë hap: të autorizohet ndërtimi i ekzekut
 
 **Ndërtuar dhe në EA-në `XauUsdEntryOrchestrator.mq5` (transport FAKE i fiksuar):** H4/M15 → SetupPlanBridge → EntryGate → EntryExecutor (T014–T016), rekordet e hyrjeve në disk (T017), ekspozimi i llogarisë vetëm-lexim (T018), cikli i jetës (T019): indeks + flamur ndalese të ruajtur, reconcile në nisje dhe në çdo timer, anulim i pending-it të provuar vetëm për ngjarje të dalë E të aktivizuar nga pronari, mbushje e raportuar FILLED_UNMANAGED. Baseline rindërtohet në çdo nisje.
 
-**Lidhja mbushje → T011 (15.10.2026, mbi f349aae):** mbushja raportohet tani me inputet e sakta të skriptit të regjistrimit eksplicit T011 (`FILLED_UNMANAGED ... T011_REGISTRATION_INPUTS ...`), me diagnostikë vetëm për gjeometrinë e planit (`PLANNED_GEOMETRY`) dhe `LIVE_CHECK_REQUIRED`; çmimi real i mbushjes mund ta ndryshojë nivelin 2R; raporti është at-least-once dhe nuk shkruan asgjë të T011. Regjistrimi AUTOMATIK nuk është ndërtuar: kërkon ndryshimet K1–K8 më poshtë dhe vendimet 17–21 të listës. Transporti real mbetet i çaktivizuar. Tiketat FAKE nuk lidhen kurrë me pozicione reale.
+**Lidhja mbushje → T011 (15.10.2026, mbi f349aae):** mbushja raportohet tani me inputet e sakta të skriptit të regjistrimit eksplicit T011 (`FILLED_UNMANAGED ... T011_REGISTRATION_INPUTS ...`), me diagnostikë vetëm për gjeometrinë e planit (`PLANNED_GEOMETRY`) dhe `LIVE_CHECK_REQUIRED`; çmimi real i mbushjes mund ta ndryshojë nivelin 2R; raporti është at-least-once dhe nuk shkruan asgjë të T011. Regjistrimi AUTOMATIK nuk është ndërtuar: kërkon ndryshimet K1–K8 më poshtë dhe vendimet D8–D9 të listës. Transporti real mbetet i çaktivizuar. Tiketat FAKE nuk lidhen kurrë me pozicione reale.
 
-**Vendimet që bllokojnë (çdo rresht = një input që sot është UNSET dhe bllokon; asnjë nuk është zgjedhur nga Claude):**
+**Burimet e përgjigjeve:** `S:n` = `inputs/client-E27N93/specifikimi.txt` rreshti n; `J:n` = `pergjigjet.json` rreshti n; `SPEC §n` = `docs/STRATEGY_SPEC.md`; `DEC` = `docs/DECISIONS.md` (S1–S5, E1–E6, N1–N7 të klientit). Asnjë përgjigje më poshtë nuk është e re: çdo "E MBYLLUR" ka referencë; "HAPUR" do të thotë se burimet nuk japin përgjigje (ose japin dy që kundërshtohen).
 
-| # | Vendimi | Input / vendi | Pyetja |
+### A. Të 22 pikat: çfarë është dokumentuar tashmë
+
+| # | Pika | Përgjigja e dokumentuar | Statusi |
 |---|---|---|---|
-| 1 | Burimi i kontekstit H4 dhe politika kur kundërshtohen | `InpContextSource` | Q01–Q03 |
-| 2 | Swing-u M15 për MSS | `InpM15Level` | Q04 |
-| 3 | Kohëzimi i FVG M15 (forming/mbyllur) | `InpFvgTiming` | Q04 |
-| 4 | Cili FVG kur ka disa | `InpCandidate` | Q04 |
-| 5 | Skaji i FVG si hyrje (afër/larg) | `InpEntryEdge` | Q05 |
-| 6 | SL: ekstremi i strukturës së thyer + buffer | `InpSlRule`, `InpSlBuffer` | Q05 |
-| 7 | Targeti përtej minimumit 2R | `InpTargetRule` | Q05, Q07 |
-| 8 | Baza e 1% (balancë/equity/fillim dite), kostot, kapaku i lotit | `InpRiskBudget`, `InpLotCap` | Q08 |
-| 9 | Kufijtë: 2 apo 3 trade, kufiri i kombinuar i riskut, pozicione maksimale | `InpMaxPositions`, `InpMaxTrades`, `InpCombinedRiskCap` | Q08 |
-| 10 | A rezervon një pending pozicion; a hyn risku i tij në riskun ekzistues | `InpPendingPolicy`, `InpPendingRiskPolicy` | Q11 |
-| 11 | Orari i seancës, mbyllja e së Premtes, veprimi në fund të orarit | `InpSessionClock` + minutat | Q11 |
-| 12 | Dritarja e lajmeve dhe veprimi mbi pending/pozicion | `InpNewsCalendar` | Q11 |
-| 13 | Pragu i spread-it dhe refuzimi | `InpMaxSpreadPoints` | Q09 |
-| 14 | Rezultati ditor: formula, klasifikimi trade/win/loss, humbje radhazi, rivendosja | `InpDailyResultFormula`, `InpDailyClassification`, `InpTradesToday`, `InpDailyWins`, `InpDailyConsecutiveLosses` | Q10 |
-| 15 | Skadimi i pending-it, ri-hyrja, cooldown, sinjal i kundërt | `InpExpiryMode`, `InpExpirySeconds` (+ asgjë tjetër ende) | Q09 |
-| 16 | Cilat ngjarje anulojnë pending-in: fund seance, lajm, kufi ditor; si dhe zhvlerësimi i FVG / ndryshimi i drejtimit (nuk ka ende ngjarje) | `InpCancelOnSessionEnd`, `InpCancelOnNewsBlock`, `InpCancelOnDailyLimit` | Q09, Q11 |
-| 17 | Menaxhimi pas mbushjes: 80% në 2R kundrejt niveleve, kuptimi i +0.2%/break-even, TP | T011 (jashtë EA-së së hyrjes) | Q07 |
-| 18 | **TP dhe 2R:** rregulli i targetit `NONE_2R_MINIMUM` jep TP = nivelit 2R (TG_Compute); T011 refuzon TP = 2R të llogaritur nga çmimi REAL i hapjes. Barazia me 2R të planit nuk provon barazi pas mbushjes; kërkohet kontroll live. Ose një algoritëm targeti PËRTEJ 2R (vendim 7), ose rregull T011 për 20% e mbetur kur TP = 2R | `InpTargetRule` / T011 | Q05, Q07 |
-| 19 | Marrëveshja K1–K3: burimi i SL-së fillestare (rekordi i planit në vend të pronarit), regjistruesi (orkestruesi, jo skripti), autorizimi i qëndrueshëm (fraza si input i EA-së) | kontrata T011 e regjistrimit | Q07 |
-| 20 | K7: niveli 2R i menaxhuar del nga çmimi REAL i hapjes (mund të jetë më i mirë se limiti i planit); cili qeveris: plani apo hapja reale | T011 R_GEOM | Q07 |
-| 21 | K8: çfarë ndodh kur regjistrimi refuzohet ose mungon (pozicion pa menaxhim): vetëm alarm, apo ndalim i hyrjeve të reja | politikë | Q07, Q11 |
-| 22 | Aktivizimi i transportit real / prova demo me tregti | vendim i veçantë i pronarit | - |
+| 1 | Burimi i kontekstit H4 | Drejtimi nga HH/HL ose LH/LL në H4 (DEC N1; SPEC §4); vetëm setup-e në drejtimin e trendit, IRL→ERL, IRL = FVG H4, prekje me wick lejohet, pritet mbyllja e H4 prekëse (DEC N4, S5; SPEC §5); pas wick-ut kërkohet FVG H4 e RE (DEC S3, S4); candle H4 vetëm të mbyllura (S:16). Mekanizmi: dy burime të dallueshme T002-prekje / T003-rikonfirmim, përparësia "nuk është zgjidhur" (SPEC §12) | HAPUR → D4 |
+| 2 | Swing M15 për MSS | Konfirmimi është vetëm M15, M5 hiqet (DEC N5; SPEC §6). Cili swing është "struktura" nuk jepet (SPEC §6 H/P; S:120 "vijë e vogël e kuqe") | HAPUR → D5 |
+| 3 | Kohëzimi i FVG M15 | Klienti: sinjali vlerësohet në candle "forming" (S:22, J:185); njëkohësisht "mos përdor candle të ardhshme, pa repaint" (S:172); SPEC §6 e lë të hapur | HAPUR → D5 |
+| 4 | Cili FVG kur ka disa | H4: më e afërta në rrugën e kthimit e para (DEC 2026-10-07). M15: nuk jepet | HAPUR → D5 |
+| 5 | Skaji i FVG si hyrje | "Entry eshte te fillimi i FVG ne M15" (S:24, S:26; SPEC §6 K); LIMIT (S:25); lexim vizual BUY=skaji i sipërm, SELL=i poshtëm (SPEC §6 I, foto B3) = `NEAR_SIDE` | E MBYLLUR (default) |
+| 6 | SL: ekstremi i strukturës së thyer + buffer | SL te pika më e lartë (SELL) / më e ulët (BUY) e strukturës së thyer M15 (S:26; SPEC §7 K). Nuk jepet: identifikimi mekanik i "gjithë strukturës" dhe buffer-i (SPEC §7 H: nuk supozohet zero, nuk supozohet niveli i thyer) | HAPUR → D6 |
+| 7 | Targeti | Likuiditeti i radhës / thyerja e strukturës së radhës (S:47; SPEC §7 K); minimumi 2R, target më i largët nuk shkurtohet (DEC N6); kufi SL 50 USD lëvizje çmimi, skip nëse tejkalohet (S:44-45, J:283). Nuk jepet: zgjedhja mes disa niveleve (SPEC §7 H) | HAPUR → D7 |
+| 8 | Baza e 1% | 1% risk për trade (S:132, fakt i konfirmuar); lot max 10 (S:66-67), konflikt madhësie → skip (S:68). Baza/metoda/kostot: "UNKNOWN" (S:62-65, J:223-227) | HAPUR → D2 |
+| 9 | Kufijtë | Max 2 pozicione (S:70), 2% risk i kombinuar (S:71), partial = një trade (S:72). Max trade/ditë: 2 (S:69) kundrejt 3 (S:133) — konflikt i shënuar (S:161-162; SPEC §9) | max pozicione dhe 2% E MBYLLUR; trade/ditë HAPUR → D1 |
+| 10 | Pending: rezervim pozicioni dhe risku | Nuk jepet (Q11; SPEC §9 kolona "mbetet hapur") | HAPUR → D3 |
+| 11 | Seanca | Hën–Pre 00:00–20:30 Europe/Tirane, DST (S:86-90); e premte mbyllje 21:00, pending anulohet (S:92-94). Pozicionet në fund të orarit: "UNKNOWN" (S:91) | orari E MBYLLUR; pozicionet HAPUR → D10 |
+| 12 | Lajmet | Të gjitha lajmet USD me ndikim të lartë, 30 min para / 30 pas (S:95-98); pending anulohet para lajmit (S:32). Pozicionet para lajmit: "UNKNOWN" (S:99) | dritarja E MBYLLUR; pozicionet HAPUR → D10 |
+| 13 | Spread | Zhvilluesi cakton pragun nga spread-et e matura (S:39, S:176) = i deleguar, jo pyetje klienti; veprimi pas bllokimit "UNKNOWN" (S:40) | pragu: matje teknike (default më poshtë); veprimi E MBYLLUR (default) |
+| 14 | Rezultati ditor | Ndalon pas fitores (S:73); pas 2 humbjeve radhazi (S:74-75); breakeven as fitore as humbje (S:76); humbje ditore 2% e balancës në fillim të ditës, vetëm të mbyllura, vetëm ky EA (S:77-81); veprim: ndal hyrjet + anulo pending (S:82); reset mesnatë Tirane (S:83). Klasifikimi me kosto/partial (Q10) nuk jepet | rregullat E MBYLLUR; klasifikimi HAPUR → D12 |
+| 15 | Skadimi / ri-hyrja / cooldown / sinjal i kundërt | Një hyrje për sinjal (S:34); sinjal i ri = çdo candle e re që plotëson kushtet (S:33). Skadimi, cooldown, sinjali i kundërt me pozicion të hapur: "UNKNOWN" (S:28, S:35, S:36) | skadimi dhe cooldown E MBYLLUR (default); sinjali i kundërt HAPUR → D11 |
+| 16 | Ngjarjet e anulimit | Pending anulohet në ndryshim drejtimi, sinjal të kundërt, fund orari, para lajmit (S:29-32), në premte (S:94), në limit ditor (S:82) | E MBYLLUR: `InpCancelOnSessionEnd/NewsBlock/DailyLimit` = ON sipas klientit; ngjarjet drejtim/sinjal i kundërt = punë teknike |
+| 17 | Menaxhimi pas mbushjes | 80% e volumit FILLESTAR në 2R, 20% deri te TP/SL, pa trailing, partial = një trade (S:52-57, S:72); renditja: 80%, pastaj SL, pastaj pritja (S:58); BE në 2R me SL = hyrja + kostot (S:49-51). Konflikt: "stop loss tek +0.2%" (S:58) (SPEC §8 H) | HAPUR → D8 |
+| 18 | TP dhe 2R | Minimumi 2R (DEC N6) bën TP = 2R kur targeti është nën 2R; SPEC §8 H: bashkëveprimi 80%/TP=2R i hapur; T011 e refuzon TP = 2R (`ExitExecutor.mqh` EX_PlanRefusal) | HAPUR → D8 |
+| 19 | Marrëveshja K1–K3 (regjistrimi automatik T011) | Nuk është pyetje klienti: është leja e pronarit për të ndryshuar kontratën e regjistrimit (seksioni më poshtë) | HAPUR → D9 |
+| 20 | K7 çmimi real i hapjes | T011 e nxjerr R_GEOM nga çmimi real i hapjes (kontrata ekzistuese); raporti i mbushjes pret verifikim LIVE (Codex e172af8) | E MBYLLUR (kontrata ekzistuese) |
+| 21 | K8 regjistrimi mungon/refuzohet | Rregulli i projektit: i panjohur/i paprovuar = bllokim (AGENTS.md; `ETD_PositionProof`) | E MBYLLUR (default) |
+| 22 | Transporti real / tregti demo | Vendim i veçantë i pronarit (AGENTS.md; STATE); demo-only build (S:174) | JASHTË këtij blloku |
 
-Pa 1–9 EA-ja nuk prodhon plan; pa 10–14 porta bllokon; 15 dhe 16 nuk ndalojnë hyrjen, por pa to një pending mbetet pa skadim dhe pa anulim automatik; 17–22 janë të ndara nga hyrja (18 është vendimi që bllokon edhe regjistrimin automatik).
+### B. Vendimet që mungojnë realisht (13) — alternativa, ndikim, rekomandim
 
-## Mbushje → T011: çfarë ndryshon saktësisht (nuk është ndërtuar; pret vendimet 17–21)
+Rekomandimi është propozim i Claude, jo përgjigje; pa përgjigje shkon default-i i shënuar vetëm për inputet UNSET që bllokojnë (EA-ja nuk hap pa to).
+
+| ID | Çfarë mungon | Alternativat | Ndikimi | Rekomandim |
+|---|---|---|---|---|
+| D1 | Trade/ditë: 2 (S:69) apo 3 (S:133) | (a) 2 · (b) 3 | `InpMaxTrades` (T012); me 2 ndalimi pas 2 humbjeve nuk ka efekt (S:162), me 3 po | (a) 2: përgjigjja e pyetësorit, më e kujdesshmja |
+| D2 | Baza e 1%: balanca aktuale, balanca e fillimit të ditës (e njëjta bazë si limiti ditor, S:79), apo equity; kostot (komision+spread) brenda riskut apo vetëm distanca e çmimit | baza: (a) fillim dite · (b) aktuale · (c) equity; kosto: (x) brenda · (y) jashtë | `InpRiskBudget` = 1% × bazë; madhësia e lotit; pa kostot lotët janë pak më të mëdhenj | (a) + (y) për demo (ripërdor `DailyBalanceStore`); kostot kur të matet komisioni |
+| D3 | Pending: a rezervon pozicion dhe a hyn risku i tij | (a) të dyja: pending numërohet te max 2 pozicione dhe risku te 2% · (b) asnjëra · (c) vetëm njëra | `InpPendingPolicy`, `InpPendingRiskPolicy`; me (b) dy pending + dy pozicione mund të kalojnë 2% | (a) |
+| D4 | Burimi i kontekstit: T002-prekje dhe T003-rikonfirmim janë dy rrugë të tekstit të klientit, jo alternativa; mungon përparësia | (a) T002 derisa ndodh wick/sweep, pastaj vetëm T003 (leximi i DEC S3/S4) · (b) vetëm T003 · (c) vetëm T002 | `InpContextSource` (sot zgjidhet një); cilat setup-e prodhojnë sinjal | (a) kur të ndërtohet kombinimi; për demo (c) ose (b) me etiketë |
+| D5 | Përkufizimi M15: (i) swing-u MSS, (ii) FVG në candle të mbyllur apo forming, (iii) cili FVG kur ka disa | (i) fractal 2/2 i fundit i pathyer, close rreptësisht përtej (prototipi) · (ii) të mbyllura (prototipi, vonesë ≤ 1 candle) / forming (S:22, rrezik repaint) · (iii) vetëm një i pranueshëm, përndryshe skip (prototipi) / më i hershmi pas BOS / më i afërti me çmimin | `InpM15Level`, `InpFvgTiming`, `InpCandidate`; është vetë sinjali | Autorizo prototipin T004 si konfigurim pune të etiketuar "propozim, jo i validuar nga klienti" për demo; validimi me shembuj më vonë |
+| D6 | SL: ekstremi i "gjithë strukturës së thyer" dhe buffer | (a) çmimi i nivelit të thyer ± buffer (zbatimi sot) · (b) ekstremi i këmbës: max high (SELL) / min low (BUY) midis swing-ut të kundërt që nisi këmbën dhe barit të thyerjes · (c) klienti shënon shembuj; buffer: 0 / vlerë e shprehur (p.sh. ≥ spread tipik) | `InpSlRule`, `InpSlBuffer`; distanca e SL, lotët, skip-i i kufirit 50 USD | (b) me buffer të shprehur nga ju (SPEC §7: zero nuk supozohet) |
+| D7 | Targeti: burimi i nivelit | (a) ERL H4: ekstremi i pathyer më i afërt përtej hyrjes (shembulli BUY E6) · (b) thyerja e radhës M15 · (c) më i largëti i të dyve; pastaj minimumi 2R (N6) | `InpTargetRule` (sot vetëm minimumi 2R, TP = 2R); gjatësia e trade-it | (a); deri atëherë TP = 2R (D8) |
+| D8 | Pas partial: (i) kuptimi i "+0.2%" (S:58) kundrejt "hyrja + kostot" (S:51); (ii) kur TP = 2R | (i) (a) hyrja + kostot · (b) hyrja +0.2% e çmimit (~8 USD) · (c) +0.2% e balancës; (ii) (a) TP-ja e brokerit mbyll 100% në 2R, pa partial · (b) 80% në 2R dhe 20% me TP të veçantë përtej 2R | vendos nëse T011 regjistrohet fare për TP = 2R; niveli i SL pas partial | (i)(a) (S:51 është përgjigje e strukturuar); (ii)(a) (e vetmja pa trailing) |
+| D9 | Leja e pronarit për regjistrimin automatik T011 (K1–K3, seksioni më poshtë) | (a) miraton: SL nga rekordi i planit, regjistron orkestruesi me transport vetëm-lexim `IsReal()=true`, fraza si input i qëndrueshëm · (b) mbetet skripti eksplicit | pa (a) mbushja raportohet por menaxhimi 80/20 bëhet me dorë | (a) pasi D8 zgjidhet; është kontrata juaj |
+| D10 | Pozicionet e hapura në fund të orarit (Hën–Enj) dhe para lajmit | (a) lihen deri te TP/SL · (b) mbyllen në 20:30 / para lajmit (si e premtja 21:00, S:92-93) | veprim mbi pozicione = kod i ri; ekspozim gjatë natës/lajmit | (a) deri sa klienti të thotë; e premtja mbyllet sipas S:92-93 |
+| D11 | Sinjal i kundërt ndërsa ka pozicion të hapur | (a) injorohet (asnjë hyrje e kundërt) · (b) lejohet brenda max 2 pozicione (hedging) | `InpMaxPositions`; mbulim vs hedging | (a) |
+| D12 | Klasifikimi i trade-it (Q10): baza e rezultatit dhe "ndal pas fitores" | rezultati: (a) neto e gjithë trade-it (të gjitha deals, komision, swap) kur mbyllet plotësisht · (b) deri te partial; BE: |neto| ≤ prag (cila vlerë?); ndalimi: (x) pas partial 2R · (y) pas mbylljes së plotë | `InpDailyResultFormula`, `InpDailyClassification`, `InpDailyWins` | (a) + (y) me prag BE të shprehur nga ju |
+| D13 | Filtri i range (Q06): "duket me sy, pa indikator" (S:38-39) | (a) nuk implementohet (devijim i dokumentuar) · (b) filtër objektiv i propozuar (p.sh. bazuar në ATR), vetëm me shembuj të pranuar/refuzuar nga klienti · (c) klienti jep shembuj së pari | pa filtër EA hyn edhe në range | (a) për demo |
+
+### C. Default-et e zbatuara pa pyetje (nga teksti i dokumentuar; mund të ndryshohen nëse kundërshtoni)
+- Anulimi i pending-it: fund seance, bllokim lajmesh, limit ditor ON (S:31-32, S:82, S:94); ngjarjet drejtim/sinjal i kundërt implementohen nga faktet e observer-it (S:29-30).
+- Hyrja `NEAR_SIDE` (pika 5); kufi SL 50 USD si distancë çmimi, skip nëse tejkalohet (S:44-45, J:283); lot max 10, skip në konflikt (S:66-68); max 2 pozicione, 2% i kombinuar (S:70-71); një hyrje për sinjal (S:34); simboli = simboli i grafikut, p.sh. XAUUSD.fx (S:166).
+- Skadimi i pending-it: pa afat kohor përtej ngjarjeve të anulimit (seanca përfundon çdo ditë 20:30, S:31); cooldown: asnjë (kufijtë ditorë e kufizojnë); pas bllokimit nga spread-i: provohet përsëri në barin tjetër ndërsa kandidati vlen (sjellja ekzistuese).
+- Pragu i spread-it: nga matje e llogarisë (S:176) — matja është detyrë teknike (preview/regjistër), jo pyetje klienti.
+- Mbushje pa menaxhim ose regjistrim i refuzuar: ndalon hyrjet e reja derisa pronari ta pranojë (rregulli i projektit: i paprovuar = bllokim).
+- Njoftimet push (S:100, S:173) dhe ndërtimi demo-only (S:174): punë teknike e radhës, përgjigje e dokumentuar.
+
+Pa D4–D7 EA-ja nuk prodhon plan me përkufizime të klientit (prototipi mund të shërbejë si konfigurim pune, D5); pa D1–D3 dhe D12 porta bllokon; D8–D9 vendosin vetëm menaxhimin pas mbushjes; D10, D11, D13 nuk ndalojnë hyrjen.
+
+## Mbushje → T011: çfarë ndryshon saktësisht (nuk është ndërtuar; pret D8 dhe D9)
 
 **Kontrata sot (e paprekur):** regjistrimi është skripti eksplicit `XauUsdT011ExitRegister.mq5` (çaktivizuar si parazgjedhje; EA-ja e menaxhimit nuk regjistron kurrë). Pronari ASSERTON SL-në fillestare; `EX_Register` e pranon vetëm ndërsa SL-ja LIVE e pozicionit është e barabartë me të; çmimi i hapjes lexohet një herë; pozicioni gjendet sipas POSITION_IDENTIFIER, magic = i konfiguruari (>0), simbol, drejtim, volum = volumi i planit; llogari hedging; për çdo transport "real" kërkohet fraza e autorizimit + llogari demo; rekordi nuk mbishkruhet kurrë; një kyçje për pozicion (`EL_Key`, vetëm brenda një terminali); EA-ja e menaxhimit e armos vetëm pas `ETD_PositionProof`.
 
@@ -84,11 +114,11 @@ Pa 1–9 EA-ja nuk prodhon plan; pa 10–14 porta bllokon; 15 dhe 16 nuk ndalojn
 - **K3 – autorizimi:** fraza `EX_AUTH_PHRASE` bëhet input i qëndrueshëm i orkestruesit në vend të shkrimit për çdo regjistrim.
 - **K4 – qëndrueshmëria (teknike, rrjedh nga K1–K3):** hyrja e indeksit të lifecycle mbahet derisa rekordi T011 të lexohet mbrapsht dhe të përputhet fushë për fushë (regjistrim idempotent: një rekord ekzistues pranohet vetëm nëse përputhet, nuk mbishkruhet); prova e ndërprerjes: mbushja e ruajtur pa regjistrim rimerret në nisje (si raporti sot).
 - **K5 – konkurrenca (teknike):** rendi i kyçjeve indeks → pozicion; i njëjti kufizim "vetëm një terminal"; EA-ja e menaxhimit duhet të ekzekutohet në grafik veçmas.
-- **K6 – TP/2R:** shih vendimin 18 (sot çdo plan `NONE_2R_MINIMUM` do të dështonte në regjistrim).
+- **K6 – TP/2R:** shih D8 (plani `NONE_2R_MINIMUM` ka TP = 2R sipas çmimit të planifikuar; T011 e refuzon TP = 2R të çmimit real të hapjes, ndaj regjistrimi do të dështonte kur mbushja është në limit).
 - **K7 – çmimi i hapjes:** T011 e nxjerr R_GEOM nga çmimi real i hapjes; plani e llogariti nga limiti.
-- **K8 – dështimi i regjistrimit:** pozicioni mbetet me SL/TP të brokerit por pa 80/20; politika e reagimit është vendim (vendimi 21).
+- **K8 – dështimi i regjistrimit:** pozicioni mbetet me SL/TP të brokerit por pa 80/20; politika e reagimit është vendim (default i seksionit C: ndalim i hyrjeve të reja).
 
-Deri te vendimet: mbushja raportohet me inputet e sakta dhe regjistrimi bëhet nga pronari me skriptin eksplicit; asgjë tjetër nuk ndryshon.
+Deri te D8 dhe D9: mbushja raportohet me inputet e sakta dhe regjistrimi bëhet nga pronari me skriptin eksplicit; asgjë tjetër nuk ndryshon.
 
 
 **Codex correction, 15.10.2026 (on 6ef9533):** planned TP/2R diagnostics require live verification, without definitive T011 refusal. BUY/SELL improved-fill regressions failed before the correction. Targeted Python: 74 passed. Lifecycle test and orchestrator EA: each compiled with 0 errors / 0 warnings. Lifecycle static checks and the new negative control passed; Git-base comparisons skipped in this source export. Owner MT5 rerun pending; automatic T011 registration remains unimplemented.
