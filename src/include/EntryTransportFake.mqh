@@ -40,6 +40,9 @@ public:
    ulong next_ticket;
    ulong hidden[8];
    int n_hidden;
+   long precheck_advance;       // seconds the fake clock moves during the pre-check
+   double precheck_bid;         // the quote becomes (precheck_bid, precheck_ask) during the pre-check when precheck_ask > 0
+   double precheck_ask;
    CEnFakeTransport(void)
      {
       real=false;
@@ -72,6 +75,9 @@ public:
       cancels=0;
       next_ticket=9000;
       n_hidden=0;
+      precheck_advance=0;
+      precheck_bid=0.0;
+      precheck_ask=0.0;
      }
    void Hide(const ulong t) {if(n_hidden<8) {hidden[n_hidden]=t; n_hidden++;}}
    void Unhide(void) {n_hidden=0;}
@@ -126,7 +132,17 @@ public:
       o.expiration=0;
       o.position_id=0;
      }
-   virtual bool PreCheck(const SEnRequest &req) {return(precheck_ok);}
+   virtual bool PreCheck(const SEnRequest &req)
+     {
+      now+=precheck_advance;
+      if(precheck_ask>0.0)
+        {
+         quote.bid=precheck_bid;
+         quote.ask=precheck_ask;
+         quote.time=now;
+        }
+      return(precheck_ok);
+     }
    virtual void Send(const SEnRequest &req,SEnSendResult &res)
      {
       sends++;

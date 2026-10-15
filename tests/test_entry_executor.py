@@ -333,6 +333,7 @@ class Outcomes(unittest.TestCase):
         w.place()
         r = w.reconcile()
         self.assertEqual((r.final, w.rec().linked), (en.R_RECOVERY, 0))
+        self.assertIn('NO_CANDIDATE', r.reason)                      # not even tried: the snapshot excludes it before any save is attempted
 
     def test_two_candidates_are_blocked_and_none_is_chosen(self):
         w = World(1)
@@ -488,6 +489,15 @@ class Cancel(unittest.TestCase):
                 r = self.cancel(w)
                 self.assertEqual((r.final, w.tr.cancels), (en.R_REFUSED, 0), r.reason)
 
+    def test_a_recovery_record_with_a_linked_ticket_is_not_cancelled_even_when_the_order_is_active_again(self):
+        w, t = self.placed()
+        w.tr.hide.add(t)
+        self.assertEqual(w.reconcile().final, en.R_RECOVERY)
+        w.tr.hide.clear()
+        self.assertEqual((w.rec().state, w.rec().linked), (en.ST_RECOVERY, 1))
+        r = self.cancel(w)
+        self.assertEqual((r.final, w.tr.cancels), (en.R_REFUSED, 0))
+
     def test_a_foreign_pending_order_of_another_ea_is_never_touched(self):
         w, t = self.placed()
         w.tr.orders.append(en.Order(True, 77, 'XAUUSD', en.TYPE_BUY_LIMIT, en.OS_ACTIVE, 1990.0, 1985.0, 2000.0, 0.1, 999, 'manual', w.tr.now))
@@ -538,6 +548,109 @@ class Cancel(unittest.TestCase):
         w.store.deny_lock = False
         w.cfg.enabled = False
         self.assertEqual((self.cancel(w).final, w.tr.cancels), (en.R_REFUSED, 0))
+
+
+class Review4de81f5(unittest.TestCase):
+    """regressions reproduced by the Codex review of 4de81f5: stored cancel attempts, every state save checked in recovery, time / permit / quote re-checked right before Send, PENDING needs RETURN filling"""
+
+    def placed(self, direction):
+        w = World(direction)
+        r = w.place()
+        self.assertEqual(r.final, en.R_PLACED)
+        return w, r.order_ticket
+
+    def order(self, w, ticket):
+        return next(o for o in w.tr.orders if o.ticket == ticket)
+
+    def test_a_stored_cancel_attempt_blocks_a_second_cancel_after_a_restart(self):
+        for direction in (1, -1):
+            with self.subTest(direction):
+                w, t = self.placed(direction)
+                w.tr.cancel_mode = 'not_effective'
+                dec = cancel_decision()
+                first = en.cancel(w.cfg, w.tr, w.store, en.Runtime(), SIGNAL, dec)
+                self.assertEqual((first.final, w.rec().cancel_attempts), (en.R_CANCEL_UNCERTAIN, 1))
+                self.assertEqual((w.reconcile().final, w.rec().state, w.rec().cancel_attempts), (en.R_PLACED, en.ST_PLACED, 1))
+                again = en.cancel(w.cfg, w.tr, w.store, en.Runtime(), SIGNAL, dec)         # a NEW runtime: only the stored attempt can stop it
+                self.assertEqual((again.final, w.tr.cancels), (en.R_REFUSED, 1), again.reason)
+                self.assertIn('CANCEL_ALREADY_ATTEMPTED', again.reason)
+
+    def test_every_state_save_in_recovery_is_checked_and_a_failed_save_never_claims_the_new_state(self):
+        def to_filled(w, t): (lambda o: (setattr(o, 'state', en.OS_FILLED), setattr(o, 'position_id', 7)))(self.order(w, t))
+        def to_canceled(w, t): self.order(w, t).state = en.OS_CANCELED
+        def to_expired(w, t): self.order(w, t).state = en.OS_EXPIRED
+        def to_hidden(w, t): w.tr.hide.add(t)
+        def to_modified(w, t): self.order(w, t).sl = 1.0
+        def to_identity(w, t): self.order(w, t).magic = 5
+        for direction in (1, -1):
+            for name, mutate in (('filled', to_filled), ('canceled', to_canceled), ('expired', to_expired), ('missing', to_hidden), ('modified', to_modified), ('identity', to_identity)):
+                for fault in ('fail', 'differs'):
+                    with self.subTest('%s %s dir %d' % (name, fault, direction)):
+                        w, t = self.placed(direction)
+                        mutate(w, t)
+                        n = w.store.writes + 1
+                        if fault == 'fail':
+                            w.store.fail_write = {n}
+                        else:
+                            w.store.readback_differs = {n}
+                        r = w.reconcile()
+                        self.assertEqual(r.final, en.R_RECOVERY, r.reason)
+                        self.assertIn('STATE_NOT_SAVED', r.reason)
+                        self.assertEqual(r.state, en.ST_PLACED if fault == 'fail' else 'UNUSABLE')
+                        self.assertEqual((w.tr.sends, w.tr.cancels), (1, 0))
+                        if fault == 'fail':
+                            self.assertEqual((w.rec().state, w.rec().generation), (en.ST_PLACED, 2))
+
+    def test_the_recovery_scan_and_the_cancel_confirmation_also_check_their_saves(self):
+        for direction in (1, -1):
+            for mode in ('uncertain_created',):
+                w = World(direction)
+                w.tr.send_mode = mode
+                w.place()
+                w.store.fail_write = {w.store.writes + 1}
+                r = w.reconcile()
+                self.assertEqual((r.final, w.rec().state), (en.R_RECOVERY, en.ST_RECOVERY), r.reason)
+                self.assertIn('STATE_NOT_SAVED', r.reason)
+            w, t = self.placed(direction)
+            w.store.fail_write = {w.store.writes + 2}                    # the cancel intent is saved, the CANCELLED state is not
+            r = en.cancel(w.cfg, w.tr, w.store, en.Runtime(), SIGNAL, cancel_decision())
+            self.assertEqual((r.final, w.tr.cancels), (en.R_CANCEL_UNCERTAIN, 1))
+            self.assertEqual(w.rec().state, en.ST_CANCEL_UNCERTAIN)
+
+    def test_time_permit_and_quote_are_rechecked_right_before_the_send(self):
+        for direction in (1, -1):
+            for name, setup in (('permit expires', lambda w: setattr(w.tr, 'precheck_advance', 1000)),
+                                ('permit alone expires', lambda w: (setattr(w.cfg, 'quote_max_age', 5000), setattr(w.tr, 'precheck_advance', 100))),
+                                ('quote goes stale', lambda w: (setattr(w.cfg, 'permit_max_age', 5000), setattr(w.tr, 'precheck_advance', 100))),
+                                ('market moves to the wrong side', lambda w: setattr(w.tr, 'precheck_quote', (1989.0, 1989.3) if direction == 1 else (2012.0, 2012.3))),
+                                ('expiration already passed', lambda w: (setattr(w.cfg, 'expiry_mode', en.EXP_SECONDS), setattr(w.cfg, 'expiry_seconds', 50), setattr(w.cfg, 'permit_max_age', 5000),
+                                                                       setattr(w.cfg, 'quote_max_age', 5000), setattr(w.tr, 'precheck_advance', 100)))):
+                with self.subTest('%s dir %d' % (name, direction)):
+                    w = World(direction)
+                    setup(w)
+                    r = w.place()
+                    self.assertEqual((r.final, r.sends, w.tr.sends, w.rt.send_calls), (en.R_REFUSED, 0, 0, 0), r.reason)
+                    self.assertIn('ABORTED_BEFORE_SEND', r.reason)
+                    self.assertEqual(w.rec().state, en.ST_PRECHECK_REFUSED)
+                    self.assertTrue(w.clean())
+                    w.permit = permit_for(w.plan, w.tr)                      # a fresh permit and quote: the record, not the clock, now blocks the signal
+                    w.tr.quote = en.Quote(True, 2000.0, 2000.3, w.tr.now)
+                    w.tr.precheck_advance, w.tr.precheck_quote = 0, None
+                    self.assertEqual(w.place(rt=en.Runtime()).final, en.R_DUPLICATE)
+
+    def test_a_pending_limit_needs_return_filling(self):
+        for direction in (1, -1):
+            for filling in (en.FILL_IOC, en.FILL_FOK):
+                w = World(direction, filling=filling)
+                r = w.place()
+                self.assertEqual((r.final, r.sends, w.tr.sends, w.has_file(), w.store.lock_calls), (en.R_REFUSED, 0, 0, False, 0), r.reason)
+                self.assertIn('FILLING_NOT_ALLOWED_FOR_PENDING', r.reason)
+            self.assertEqual(World(direction, filling=en.FILL_RETURN).place().final, en.R_PLACED)
+        w = World(1)
+        w.place()
+        rec = w.rec()
+        rec.filling = en.FILL_IOC
+        self.assertNotEqual(en.validate(rec), '')
 
 
 class Codec(unittest.TestCase):
@@ -602,7 +715,7 @@ class Mutants(unittest.TestCase):
                 en.__dict__[k] = v
         try:
             suite = unittest.TestSuite()
-            for cls in (Placement, IntentAndDuplicates, Outcomes, Reconcile, Cancel):
+            for cls in (Placement, IntentAndDuplicates, Outcomes, Reconcile, Cancel, Review4de81f5):
                 suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(cls))
             r = unittest.TestResult()
             suite.run(r)
@@ -629,15 +742,21 @@ class Mutants(unittest.TestCase):
                                                         "return o.found and o.comment == rec.req_id and o.magic == rec.magic and _close(o.volume, rec.volume)")]),
             ('recovery scan ignores the snapshot', [("cands = [o for o in lst.orders if o.ticket not in rec.snap and ", "cands = [o for o in lst.orders if ")]),
             ('recovery scan ignores the time', [("and o.time_setup >= rec.t_intent - TIME_TOL and tuple_matches(o, rec)]", "and tuple_matches(o, rec)]")]),
-            ('ambiguous candidates are chosen', [("    if len(cands) > 1:\n        ok, r2 = _save(store, rec, state=ST_BLOCKED, reason='AMBIGUOUS_CANDIDATES", "    if False:\n        ok, r2 = _save(store, rec, state=ST_BLOCKED, reason='AMBIGUOUS_CANDIDATES")]),
+            ('ambiguous candidates are chosen', [("    if len(cands) > 1:\n        return _transition(store, rec, R_BLOCKED, 'AMBIGUOUS_CANDIDATES", "    if False:\n        return _transition(store, rec, R_BLOCKED, 'AMBIGUOUS_CANDIDATES")]),
             ('reconcile resends', [("    lst = tr.list_orders(rec.symbol, rec.t_intent - TIME_TOL)\n    if not lst.complete:", "    tr.send(None)\n    lst = tr.list_orders(rec.symbol, rec.t_intent - TIME_TOL)\n    if not lst.complete:")]),
-            ('a modified order is accepted in reconcile', [("            if not tuple_matches(o, rec):\n                ok, r2 = _save(store, rec, state=ST_BLOCKED, reason='ORDER_MODIFIED')", "            if False:\n                ok, r2 = _save(store, rec, state=ST_BLOCKED, reason='ORDER_MODIFIED')")]),
+            ('a modified order is accepted in reconcile', [("            if not tuple_matches(o, rec):\n                return _transition(store, rec, R_BLOCKED, 'ORDER_MODIFIED", "            if False:\n                return _transition(store, rec, R_BLOCKED, 'ORDER_MODIFIED")]),
             ('filled without a position id is trusted', [("if o.position_id <= 0 or not tuple_matches(o, rec):", "if False:")]),
             ('cancel without the tuple proof', [("o.state == OS_ACTIVE and tuple_matches(o, rec) and o.magic == cfg.ea_magic):", "o.state == OS_ACTIVE and o.magic == cfg.ea_magic):")]),
             ('cancel of a non placed record', [("        if rec.state != ST_PLACED or rec.linked != 1:\n            return _res(R_REFUSED, 'NOT_A_PROVEN_PENDING_ORDER", "        if False:\n            return _res(R_REFUSED, 'NOT_A_PROVEN_PENDING_ORDER")]),
             ('cancel decision not checked', [("    if decision.status != tp.CANCEL_REQUEST or not decision.cancel_pending or decision.pending_signal_id != signal_id:", "    if False:")]),
             ('cancel intent not saved first', [("        ok, r2 = _save(store, rec, state=ST_CANCEL_UNCERTAIN, cancel_attempts=1, reason='CANCEL_INTENT')\n        if not ok:", "        ok, r2 = True, rec\n        if not ok:")]),
             ('cancel confirmed without the read-back', [("            if o2.found and o2.ticket == rec.order_ticket and o2.state == OS_CANCELED:", "            if True:")]),
+            ('stored cancel attempt ignored', [("        if rec.cancel_attempts >= 1:\n            return _res(R_REFUSED, 'CANCEL_ALREADY_ATTEMPTED", "        if False:\n            return _res(R_REFUSED, 'CANCEL_ALREADY_ATTEMPTED")]),
+            ('a failed state save is reported as success', [("    ok, r2 = _save(store, rec, **chg)\n    if ok:\n        return _res(final, msg, 0, r2.state, ticket, pos)", "    ok, r2 = _save(store, rec, **chg)\n    if True:\n        return _res(final, msg, 0, chg.get('state', ''), ticket, pos)")]),
+            ('no permit re-check before the send', [("        if not bad:\n            bad = permit_refusal(cfg, plan, permit, now2)\n", "")]),
+            ('no quote re-check before the send', [("            bad = market_refusal(cfg, plan, sym, tr.read_quote(cfg.symbol), now2)", "            bad = ''")]),
+            ('no expiration re-check before the send', [("if not bad and cfg.expiry_mode == EXP_SECONDS and exp <= now2:", "if False:")]),
+            ('IOC accepted for a pending order', [("    if cfg.filling != FILL_RETURN:\n        return 'FILLING_NOT_ALLOWED_FOR_PENDING", "    if False:\n        return 'FILLING_NOT_ALLOWED_FOR_PENDING")]),
             ('unset permit age does not block', [("    if cfg.permit_max_age <= 0:\n        return 'INPUT_UNSET: permit_max_age'", "    if False:\n        return 'INPUT_UNSET: permit_max_age'")]),
             ('unset expiry does not block', [("    if cfg.expiry_mode not in (EXP_GTC, EXP_SECONDS):\n        return 'INPUT_UNSET: expiry_mode'", "    if False:\n        return 'INPUT_UNSET: expiry_mode'")]),
             ('stale quote accepted', [("or now - quote.time > cfg.quote_max_age:", "or False:")]),
@@ -659,6 +778,7 @@ SCENARIOS = [
     'buy_limit_placed', 'sell_limit_placed', 'unset_inputs_block', 'plan_refusals', 'permit_binding', 'terminal_reads', 'lock_failure', 'intent_failures', 'precheck_refusal',
     'duplicates', 'definite_reject', 'uncertain_answer', 'unproven_link', 'recovery_by_tuple', 'comment_magic_volume_not_proof', 'ambiguous_candidates', 'reconcile_states',
     'cancel_proven_only', 'cancel_uncertain', 'codec',
+    'review_cancel_attempt_survives_restart', 'review_state_saves_checked', 'review_recheck_before_send', 'review_pending_needs_return_filling',
 ]
 
 
@@ -681,6 +801,10 @@ class Sources(unittest.TestCase):
         pos = [place.index(o) for o in order]
         self.assertEqual(pos, sorted(pos))
         self.assertEqual(place.count('tr.send('), 1)
+        self.assertGreater(place.rindex('permit_refusal('), place.index('tr.pre_check(req)'))
+        self.assertLess(place.rindex('permit_refusal('), place.index('tr.send(req)'))
+        self.assertGreater(place.rindex('market_refusal('), place.index('tr.pre_check(req)'))
+        self.assertLess(place.rindex('market_refusal('), place.index('tr.send(req)'))
         rec = src[src.index('def reconcile('):src.index('# ----', src.index('def reconcile('))]
         self.assertNotIn('tr.send(', rec)
         self.assertNotIn('tr.cancel(', rec)

@@ -54,7 +54,16 @@ pos = [pub.index(o) for o in order2]
 assert pos == sorted(pos), pos
 rec = body('void EN_ScanForOrder(', 'void EN_CancelLocked(')
 assert 'Send(' not in rec and 'Cancel(' not in rec and 'send_calls' not in rec and 'cancel_calls' not in rec, 'reconcile must neither send nor cancel'
+assert 'EN_PermitRefusal(' in place and 'EN_MarketRefusal(' in place, 'no re-check inside the locked placement'
+assert place.rindex('EN_PermitRefusal(') > place.index('tr.PreCheck(req)') and place.rindex('EN_PermitRefusal(') < place.index('tr.Send(req,sr)'), 'permit not re-checked right before the send'
+assert place.rindex('EN_MarketRefusal(') > place.index('tr.PreCheck(req)') and place.rindex('EN_MarketRefusal(') < place.index('tr.Send(req,sr)'), 'quote not re-checked right before the send'
+recon = body('string EN_DiskState(', 'void EN_Reconcile(')
+assert recon.count('EN_Commit(') == 1, 'every state save in recovery must go through EN_Transition (checked result)'
+assert recon.index('EN_Commit(') < recon.index('void EN_ScanForOrder(')
 canc = body('void EN_CancelLocked(', 'void EN_Cancel(')
+assert 'rec.cancel_attempts>=1' in canc and canc.index('rec.cancel_attempts>=1') < canc.index('tr.Cancel(ticket,cr)'), 'the stored cancel attempt is not checked'
+assert 'EN_FILL_RETURN' in t[t.index('string EN_ConfigUnset('):t.index('string EN_PlanRefusal(')], 'filling rule'
+
 order3 = ['EN_Load(', 'tr.ReadOrder(rec.order_ticket,o)', 'EN_Commit(store,rec,nx)', 'rt.cancel_calls++', 'tr.Cancel(ticket,cr)']
 pos = [canc.index(o) for o in order3]
 assert pos == sorted(pos), pos
@@ -116,6 +125,16 @@ t = t.replace('   SEnRequest req;\n   req.type=EN_OType(plan.direction);', a + '
 open(sys.argv[1], 'w').write(t)
 PYEOF
 expect_assert "$NEG/e3.py" "$NEG/C.mqh" "an intent that is not saved before the pre-check and the send"
+cp $EX "$NEG/H.mqh"; sed -i 's/   EN_Transition(store,rec,nx,EN_R_PLACED,"RECOVERED_ACTIVE",tk,0,res);/   EN_Commit(store,rec,nx);/' "$NEG/H.mqh"
+expect_assert "$NEG/e3.py" "$NEG/H.mqh" "an unchecked state save in recovery"
+cp $EX "$NEG/J.mqh"; python3 - "$NEG/J.mqh" <<'PYEOF'
+import sys
+t = open(sys.argv[1]).read()
+a = '   if(bad=="") bad=EN_PermitRefusal(cfg,plan,permit,now2);\n'
+assert a in t
+open(sys.argv[1], 'w').write(t.replace(a, ''))
+PYEOF
+expect_assert "$NEG/e3.py" "$NEG/J.mqh" "a missing permit re-check right before the send"
 cp $EX "$NEG/D.mqh"; sed -i 's/TP_CANCEL_REQUEST/TP_CANCEL_NO_EVENT/' "$NEG/D.mqh"
 expect_assert "$NEG/e4.py" "$NEG/D.mqh" "a changed cancel decision status pin"
 cp $EX "$NEG/E.mqh"; sed -i 's/ESC_Fnum(r.e,e);/ESC_Fnum(r.e,e); TP_BuildPlan("a","b",1,1.0,1.0,false,0.0,1.0,1.0,0.01,2,0.01,0,false,1.0,1.0,0.01,0.01,1.0,1.0,*(STpPlan*)0);/' "$NEG/E.mqh"

@@ -134,12 +134,8 @@ private:
             r.expiration=(datetime)req.expiration;
            }
          else return(false);
-      if(req.filling==EN_FILL_RETURN) r.type_filling=ORDER_FILLING_RETURN;
-      else
-         if(req.filling==EN_FILL_IOC) r.type_filling=ORDER_FILLING_IOC;
-         else
-            if(req.filling==EN_FILL_FOK) r.type_filling=ORDER_FILLING_FOK;
-            else return(false);
+      if(req.filling==EN_FILL_RETURN) r.type_filling=ORDER_FILLING_RETURN;   // the documented rule for pending orders; IOC / FOK are refused by the executor and never mapped here
+      else return(false);
       return(true);
      }
 public:

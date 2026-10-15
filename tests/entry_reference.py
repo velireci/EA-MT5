@@ -249,7 +249,7 @@ def validate(r):
         return 'INVALID_GEOMETRY'
     if r.direction == -1 and not (r.tp < r.e < r.s):
         return 'INVALID_GEOMETRY'
-    if r.magic <= 0 or r.filling not in (FILL_RETURN, FILL_IOC, FILL_FOK) or r.expiry_mode not in (EXP_GTC, EXP_SECONDS):
+    if r.magic <= 0 or r.filling != FILL_RETURN or r.expiry_mode not in (EXP_GTC, EXP_SECONDS):
         return 'INVALID_CONFIG'
     if (r.expiry_mode == EXP_GTC and r.expiration != 0) or (r.expiry_mode == EXP_SECONDS and r.expiration <= r.t_intent):
         return 'INVALID_EXPIRATION'
@@ -378,6 +378,8 @@ def config_unset(cfg):
         return bad
     if cfg.filling not in (FILL_RETURN, FILL_IOC, FILL_FOK):
         return 'INPUT_UNSET: filling'
+    if cfg.filling != FILL_RETURN:
+        return 'FILLING_NOT_ALLOWED_FOR_PENDING: the documented rule for pending orders is ORDER_FILLING_RETURN'
     if cfg.expiry_mode not in (EXP_GTC, EXP_SECONDS):
         return 'INPUT_UNSET: expiry_mode'
     if cfg.expiry_mode == EXP_SECONDS and not 0 < cfg.expiry_seconds <= 31536000:
@@ -541,6 +543,17 @@ def place(cfg, tr, store, rt, plan, permit):
         if not tr.pre_check(req):
             ok, rec2 = _save(store, new, state=ST_PRECHECK_REFUSED, reason='PRECHECK_REFUSED')
             return _res(R_PRECHECK_REFUSED, 'PRECHECK_REFUSED: zero sends' + ('' if ok else '; the state could not be saved (record stays INTENT)'), 0, rec2.state)
+        now2 = tr.server_time()                              # time passed during the pre-check: permit, expiry and quote are judged AGAIN right before the send
+        bad = '' if now2 > 0 else 'SERVER_TIME_UNREADABLE'
+        if not bad:
+            bad = permit_refusal(cfg, plan, permit, now2)
+        if not bad and cfg.expiry_mode == EXP_SECONDS and exp <= now2:
+            bad = 'EXPIRATION_ALREADY_PASSED'
+        if not bad:
+            bad = market_refusal(cfg, plan, sym, tr.read_quote(cfg.symbol), now2)
+        if bad:
+            ok, rec2 = _save(store, new, state=ST_PRECHECK_REFUSED, reason='ABORTED_BEFORE_SEND')
+            return _res(R_REFUSED, 'ABORTED_BEFORE_SEND: ' + bad + '; zero sends' + ('' if ok else '; the state could not be saved (record stays INTENT)'), 0, rec2.state)
         rt.send_calls += 1
         sr = tr.send(req)
         if sr.have_result and sr.retcode in RC_DEFINITE_REJECT and sr.order == 0:
@@ -569,6 +582,21 @@ def place(cfg, tr, store, rt, plan, permit):
 
 
 # ------------------------------------------------------------------------------------------------ RECONCILE (never sends, never cancels)
+def _disk_state(store, rec):
+    """what the disk really holds now (a false write does not prove the old record is still there)"""
+    kind, r = _load(store, file_name(rec.login, rec.signal_id))
+    return r.state if kind == 'OK' else ('NONE' if kind == 'NONE' else 'UNUSABLE')
+
+
+def _transition(store, rec, final, msg, ticket=0, pos=0, **chg):
+    """saves the new state; the result claims it only when the save was verified, otherwise RECOVERY_REQUIRED with the state the disk really holds"""
+    ok, r2 = _save(store, rec, **chg)
+    if ok:
+        return _res(final, msg, 0, r2.state, ticket, pos)
+    disk = _disk_state(store, rec)
+    return _res(R_RECOVERY, 'STATE_NOT_SAVED: %s (%s); the disk holds %s; nothing is resent' % (chg.get('state', ''), msg, disk), 0, disk, ticket)
+
+
 def reconcile(cfg, tr, store, signal_id):
     bad = core_unset(cfg)
     if bad:
@@ -589,46 +617,36 @@ def reconcile(cfg, tr, store, signal_id):
             return _res(R_BLOCKED, 'RECORD_UNUSABLE: ' + rec)
         if not _identity_ok(rec, acct, cfg, signal_id):
             return _res(R_BLOCKED, 'IDENTITY_MISMATCH: the record belongs to another account, signal or magic')
-        base = (rec.state, rec.order_ticket, rec.position_id)
         if rec.state in (ST_PRECHECK_REFUSED, ST_REJECTED, ST_CANCELLED, ST_EXPIRED, ST_BLOCKED, ST_FILLED):
             return _res(R_NOCHANGE, 'TERMINAL_STATE %s' % rec.state, 0, rec.state, rec.order_ticket, rec.position_id)
         if rec.state in (ST_INTENT, ST_RECOVERY) and rec.linked == 0:
             return _scan_for_order(cfg, tr, store, rec)
         # PLACED / CANCEL_UNCERTAIN / RECOVERY with a linked ticket
         o = tr.read_order(rec.order_ticket)
+        tk = rec.order_ticket
         if not o.found:
             if rec.state == ST_RECOVERY:
-                return _res(R_RECOVERY, 'ORDER_NOT_FOUND: cannot prove what happened to the order', 0, rec.state, rec.order_ticket)
-            ok, r2 = _save(store, rec, state=ST_RECOVERY, reason='ORDER_NOT_FOUND')
-            return _res(R_RECOVERY, 'ORDER_NOT_FOUND: cannot prove what happened to the order', 0, r2.state, rec.order_ticket)
+                return _res(R_RECOVERY, 'ORDER_NOT_FOUND: cannot prove what happened to the order', 0, rec.state, tk)
+            return _transition(store, rec, R_RECOVERY, 'ORDER_NOT_FOUND: cannot prove what happened to the order', tk, state=ST_RECOVERY, reason='ORDER_NOT_FOUND')
         if o.ticket != rec.order_ticket or not (o.symbol == rec.symbol and o.type == _otype(rec.direction) and o.magic == rec.magic):
-            ok, r2 = _save(store, rec, state=ST_BLOCKED, reason='ORDER_IDENTITY_CHANGED')
-            return _res(R_BLOCKED, 'ORDER_IDENTITY_CHANGED', 0, r2.state, rec.order_ticket)
+            return _transition(store, rec, R_BLOCKED, 'ORDER_IDENTITY_CHANGED', tk, state=ST_BLOCKED, reason='ORDER_IDENTITY_CHANGED')
         if o.state == OS_ACTIVE:
             if not tuple_matches(o, rec):
-                ok, r2 = _save(store, rec, state=ST_BLOCKED, reason='ORDER_MODIFIED')
-                return _res(R_BLOCKED, 'ORDER_MODIFIED: the pending order no longer matches the plan; it is not touched', 0, r2.state, rec.order_ticket)
+                return _transition(store, rec, R_BLOCKED, 'ORDER_MODIFIED: the pending order no longer matches the plan; it is not touched', tk, state=ST_BLOCKED, reason='ORDER_MODIFIED')
             if rec.state == ST_CANCEL_UNCERTAIN:
-                ok, r2 = _save(store, rec, state=ST_PLACED, reason='CANCEL_NOT_EFFECTIVE')
-                return _res(R_PLACED, 'STILL_ACTIVE: the cancellation did not take effect', 0, r2.state, rec.order_ticket)
+                return _transition(store, rec, R_PLACED, 'STILL_ACTIVE: the cancellation did not take effect', tk, state=ST_PLACED, reason='CANCEL_NOT_EFFECTIVE')
             if rec.state == ST_RECOVERY:
-                ok, r2 = _save(store, rec, state=ST_PLACED, reason='RECOVERED_ACTIVE')
-                return _res(R_PLACED, 'RECOVERED_ACTIVE', 0, r2.state, rec.order_ticket)
-            return _res(R_NOCHANGE, 'ACTIVE', 0, rec.state, rec.order_ticket)
+                return _transition(store, rec, R_PLACED, 'RECOVERED_ACTIVE', tk, state=ST_PLACED, reason='RECOVERED_ACTIVE')
+            return _res(R_NOCHANGE, 'ACTIVE', 0, rec.state, tk)
         if o.state == OS_FILLED:
             if o.position_id <= 0 or not tuple_matches(o, rec):
-                ok, r2 = _save(store, rec, state=ST_RECOVERY, reason='FILLED_WITHOUT_PROOF')
-                return _res(R_RECOVERY, 'FILLED_WITHOUT_PROOF', 0, r2.state, rec.order_ticket)
-            ok, r2 = _save(store, rec, state=ST_FILLED, position_id=o.position_id, reason='FILLED')
-            return _res(R_FILLED, 'FILLED: position id from the order history', 0, r2.state, rec.order_ticket, o.position_id)
+                return _transition(store, rec, R_RECOVERY, 'FILLED_WITHOUT_PROOF', tk, state=ST_RECOVERY, reason='FILLED_WITHOUT_PROOF')
+            return _transition(store, rec, R_FILLED, 'FILLED: position id from the order history', tk, o.position_id, state=ST_FILLED, position_id=o.position_id, reason='FILLED')
         if o.state in (OS_CANCELED, OS_REJECTED):
-            ok, r2 = _save(store, rec, state=ST_CANCELLED, reason='ORDER_' + o.state)
-            return _res(R_CANCELLED, 'ORDER_' + o.state, 0, r2.state, rec.order_ticket)
+            return _transition(store, rec, R_CANCELLED, 'ORDER_' + o.state, tk, state=ST_CANCELLED, reason='ORDER_' + o.state)
         if o.state == OS_EXPIRED:
-            ok, r2 = _save(store, rec, state=ST_EXPIRED, reason='ORDER_EXPIRED')
-            return _res(R_EXPIRED, 'ORDER_EXPIRED', 0, r2.state, rec.order_ticket)
-        ok, r2 = _save(store, rec, state=ST_RECOVERY, reason='ORDER_STATE_UNKNOWN')
-        return _res(R_RECOVERY, 'ORDER_STATE_UNKNOWN', 0, r2.state, rec.order_ticket)
+            return _transition(store, rec, R_EXPIRED, 'ORDER_EXPIRED', tk, state=ST_EXPIRED, reason='ORDER_EXPIRED')
+        return _transition(store, rec, R_RECOVERY, 'ORDER_STATE_UNKNOWN', tk, state=ST_RECOVERY, reason='ORDER_STATE_UNKNOWN')
     finally:
         store.unlock(key)
 
@@ -641,26 +659,21 @@ def _scan_for_order(cfg, tr, store, rec):
         return _res(R_RECOVERY, 'ORDER_LIST_INCOMPLETE: nothing can be concluded', 0, rec.state)
     cands = [o for o in lst.orders if o.ticket not in rec.snap and o.time_setup >= rec.t_intent - TIME_TOL and tuple_matches(o, rec)]
     if len(cands) > 1:
-        ok, r2 = _save(store, rec, state=ST_BLOCKED, reason='AMBIGUOUS_CANDIDATES %d' % len(cands))
-        return _res(R_BLOCKED, 'AMBIGUOUS_CANDIDATES: more than one order fits; none is chosen', 0, r2.state)
+        return _transition(store, rec, R_BLOCKED, 'AMBIGUOUS_CANDIDATES: more than one order fits; none is chosen', 0, state=ST_BLOCKED, reason='AMBIGUOUS_CANDIDATES %d' % len(cands))
     if not cands:
         if rec.state == ST_INTENT:
-            ok, r2 = _save(store, rec, state=ST_RECOVERY, attempts=1, reason='INTENT_WITHOUT_ORDER')
-            return _res(R_RECOVERY, 'INTENT_WITHOUT_PROOF: the send may or may not have happened; nothing is resent', 0, r2.state)
+            return _transition(store, rec, R_RECOVERY, 'INTENT_WITHOUT_PROOF: the send may or may not have happened; nothing is resent', 0, state=ST_RECOVERY, attempts=1, reason='INTENT_WITHOUT_ORDER')
         return _res(R_RECOVERY, 'NO_CANDIDATE: nothing is resent', 0, rec.state)
     o = cands[0]
     if o.state == OS_ACTIVE:
-        ok, r2 = _save(store, rec, state=ST_PLACED, attempts=1, order_ticket=o.ticket, linked=1, reason='LINKED_BY_RECOVERY')
-        return _res(R_PLACED, 'LINKED_BY_RECOVERY: unique tuple match outside the snapshot', 0, r2.state, o.ticket)
+        return _transition(store, rec, R_PLACED, 'LINKED_BY_RECOVERY: unique tuple match outside the snapshot', o.ticket, state=ST_PLACED, attempts=1, order_ticket=o.ticket, linked=1, reason='LINKED_BY_RECOVERY')
     if o.state == OS_FILLED and o.position_id > 0:
-        ok, r2 = _save(store, rec, state=ST_FILLED, attempts=1, order_ticket=o.ticket, linked=1, position_id=o.position_id, reason='LINKED_BY_RECOVERY_FILLED')
-        return _res(R_FILLED, 'LINKED_BY_RECOVERY_FILLED', 0, r2.state, o.ticket, o.position_id)
+        return _transition(store, rec, R_FILLED, 'LINKED_BY_RECOVERY_FILLED', o.ticket, o.position_id, state=ST_FILLED, attempts=1, order_ticket=o.ticket, linked=1, position_id=o.position_id,
+                           reason='LINKED_BY_RECOVERY_FILLED')
     if o.state in (OS_CANCELED, OS_REJECTED):
-        ok, r2 = _save(store, rec, state=ST_CANCELLED, attempts=1, order_ticket=o.ticket, linked=1, reason='LINKED_BY_RECOVERY_ENDED')
-        return _res(R_CANCELLED, 'LINKED_BY_RECOVERY_ENDED', 0, r2.state, o.ticket)
+        return _transition(store, rec, R_CANCELLED, 'LINKED_BY_RECOVERY_ENDED', o.ticket, state=ST_CANCELLED, attempts=1, order_ticket=o.ticket, linked=1, reason='LINKED_BY_RECOVERY_ENDED')
     if o.state == OS_EXPIRED:
-        ok, r2 = _save(store, rec, state=ST_EXPIRED, attempts=1, order_ticket=o.ticket, linked=1, reason='LINKED_BY_RECOVERY_EXPIRED')
-        return _res(R_EXPIRED, 'LINKED_BY_RECOVERY_EXPIRED', 0, r2.state, o.ticket)
+        return _transition(store, rec, R_EXPIRED, 'LINKED_BY_RECOVERY_EXPIRED', o.ticket, state=ST_EXPIRED, attempts=1, order_ticket=o.ticket, linked=1, reason='LINKED_BY_RECOVERY_EXPIRED')
     return _res(R_RECOVERY, 'CANDIDATE_STATE_UNUSABLE', 0, rec.state)
 
 
@@ -694,6 +707,8 @@ def cancel(cfg, tr, store, rt, signal_id, decision):
             return _res(R_BLOCKED, 'IDENTITY_MISMATCH')
         if rec.state != ST_PLACED or rec.linked != 1:
             return _res(R_REFUSED, 'NOT_A_PROVEN_PENDING_ORDER: state %s; reconcile first' % rec.state, 0, rec.state, rec.order_ticket)
+        if rec.cancel_attempts >= 1:
+            return _res(R_REFUSED, 'CANCEL_ALREADY_ATTEMPTED: the record stores one cancellation; there is no automatic second one', 0, rec.state, rec.order_ticket)
         o = tr.read_order(rec.order_ticket)
         if not (o.found and o.ticket == rec.order_ticket and o.state == OS_ACTIVE and tuple_matches(o, rec) and o.magic == cfg.ea_magic):
             return _res(R_REFUSED, 'ORDER_NOT_PROVEN_AS_THE_EAS_ACTIVE_PENDING: nothing is cancelled', 0, rec.state, rec.order_ticket)
@@ -773,6 +788,8 @@ class FakeTransport:
         self.next_ticket = 9000
         self.hide = set()
         self.reads = 0
+        self.precheck_advance = 0        # seconds the fake clock moves during the pre-check (time passes between the checks and the send)
+        self.precheck_quote = None       # (bid, ask) the quote becomes during the pre-check
 
     def is_real(self):
         return self.real
@@ -800,6 +817,9 @@ class FakeTransport:
         return Order(found=False, ticket=ticket)
 
     def pre_check(self, req):
+        self.now += self.precheck_advance
+        if self.precheck_quote is not None:
+            self.quote = Quote(True, self.precheck_quote[0], self.precheck_quote[1], self.now)
         return self.precheck_ok
 
     def send(self, req):

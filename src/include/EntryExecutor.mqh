@@ -265,7 +265,7 @@ string EN_Validate(const SEnRecord &r)
    if(!ESC_Fnum(r.e,t) || !(r.e>0.0) || !ESC_Fnum(r.s,t) || !(r.s>0.0) || !ESC_Fnum(r.tp,t) || !(r.tp>0.0) || !ESC_Fnum(r.volume,t) || !(r.volume>0.0)) return("INVALID_PRICE_OR_VOLUME");
    if(r.direction==1 && !(r.s<r.e && r.e<r.tp)) return("INVALID_GEOMETRY");
    if(r.direction==-1 && !(r.tp<r.e && r.e<r.s)) return("INVALID_GEOMETRY");
-   if(r.magic<=0 || (r.filling!=EN_FILL_RETURN && r.filling!=EN_FILL_IOC && r.filling!=EN_FILL_FOK) || (r.expiry_mode!=EN_EXP_GTC && r.expiry_mode!=EN_EXP_SECONDS)) return("INVALID_CONFIG");
+   if(r.magic<=0 || r.filling!=EN_FILL_RETURN || (r.expiry_mode!=EN_EXP_GTC && r.expiry_mode!=EN_EXP_SECONDS)) return("INVALID_CONFIG");
    if((r.expiry_mode==EN_EXP_GTC && r.expiration!=0) || (r.expiry_mode==EN_EXP_SECONDS && r.expiration<=r.t_intent)) return("INVALID_EXPIRATION");
    if(r.t_intent<=0 || r.req_id!=EN_ReqId(r.signal_id)) return("INVALID_INTENT");
    bool known=(r.state==EN_ST_INTENT || r.state==EN_ST_PRECHECK_REFUSED || r.state==EN_ST_REJECTED || r.state==EN_ST_PLACED || r.state==EN_ST_FILLED || r.state==EN_ST_CANCEL_UNCERTAIN ||
@@ -429,6 +429,7 @@ string EN_ConfigUnset(const SEnConfig &c)
    string bad=EN_CoreUnset(c);
    if(bad!="") return(bad);
    if(c.filling!=EN_FILL_RETURN && c.filling!=EN_FILL_IOC && c.filling!=EN_FILL_FOK) return("INPUT_UNSET: filling");
+   if(c.filling!=EN_FILL_RETURN) return("FILLING_NOT_ALLOWED_FOR_PENDING: the documented rule for pending orders is ORDER_FILLING_RETURN");
    if(c.expiry_mode!=EN_EXP_GTC && c.expiry_mode!=EN_EXP_SECONDS) return("INPUT_UNSET: expiry_mode");
    if(c.expiry_mode==EN_EXP_SECONDS && !(c.expiry_seconds>0 && c.expiry_seconds<=31536000)) return("INPUT_UNSET: expiry_seconds");
    if(c.permit_max_age<=0) return("INPUT_UNSET: permit_max_age");
@@ -511,7 +512,7 @@ int EN_Load(CEnStore *store,const string name,SEnRecord &rec,string &reason)
   }
 
 // ------------------------------------------------------------------------------------------------ PLACE
-void EN_PlaceLocked(const SEnConfig &cfg,CEnTransport *tr,CEnStore *store,SEnRuntime &rt,const STpPlan &plan,const SEnAccount &acct,const long now,SEnResult &res)
+void EN_PlaceLocked(const SEnConfig &cfg,CEnTransport *tr,CEnStore *store,SEnRuntime &rt,const STpPlan &plan,const SEnPermit &permit,const SEnAccount &acct,const long now,SEnResult &res)
   {
    string name=EN_FileName(acct.login,plan.signal_id);
    SEnRecord ex;
@@ -580,6 +581,26 @@ void EN_PlaceLocked(const SEnConfig &cfg,CEnTransport *tr,CEnStore *store,SEnRun
       nx.reason="PRECHECK_REFUSED";
       bool ok=EN_Commit(store,nw,nx);
       EN_Res(res,EN_R_PRECHECK_REFUSED,"PRECHECK_REFUSED: zero sends"+(ok ? "" : "; the state could not be saved (record stays INTENT)"),0,nw.state);
+      return;
+     }
+   // time passed during the pre-check: permit, expiry and quote are judged AGAIN right before the send
+   long now2=tr.ServerTime();
+   bad=(now2>0 ? "" : "SERVER_TIME_UNREADABLE");
+   if(bad=="") bad=EN_PermitRefusal(cfg,plan,permit,now2);
+   if(bad=="" && cfg.expiry_mode==EN_EXP_SECONDS && expiry<=now2) bad="EXPIRATION_ALREADY_PASSED";
+   if(bad=="")
+     {
+      SEnQuote quote2;
+      tr.ReadQuote(cfg.symbol,quote2);
+      bad=EN_MarketRefusal(cfg,plan,sym,quote2,now2);
+     }
+   if(bad!="")
+     {
+      SEnRecord nx=nw;
+      nx.state=EN_ST_PRECHECK_REFUSED;
+      nx.reason="ABORTED_BEFORE_SEND";
+      bool ok=EN_Commit(store,nw,nx);
+      EN_Res(res,EN_R_REFUSED,"ABORTED_BEFORE_SEND: "+bad+"; zero sends"+(ok ? "" : "; the state could not be saved (record stays INTENT)"),0,nw.state);
       return;
      }
    rt.send_calls++;
@@ -672,11 +693,30 @@ void EN_Place(const SEnConfig &cfg,CEnTransport *tr,CEnStore *store,SEnRuntime &
    if(acct.margin_mode!=2) {EN_Res(res,EN_R_REFUSED,"UNSUPPORTED_ACCOUNT_MODE: only HEDGING"); return;}
    string key=EN_LockKey(acct.login,plan.signal_id);
    if(!store.Lock(key)) {EN_Res(res,EN_R_LOCK_FAILED,"INSTANCE_LOCK_HELD_OR_UNAVAILABLE: zero sends"); return;}
-   EN_PlaceLocked(cfg,tr,store,rt,plan,acct,now,res);
+   EN_PlaceLocked(cfg,tr,store,rt,plan,permit,acct,now,res);
    store.Unlock(key);
   }
 
 // ------------------------------------------------------------------------------------------------ RECONCILE (never sends, never cancels)
+// what the disk really holds now (a false write does not prove the old record is still there)
+string EN_DiskState(CEnStore *store,const SEnRecord &rec)
+  {
+   SEnRecord tmp;
+   string why;
+   int kind=EN_Load(store,EN_FileName(rec.login,rec.signal_id),tmp,why);
+   if(kind==1) return(tmp.state);
+   return(kind==0 ? "NONE" : "UNUSABLE");
+  }
+
+// saves `nx` as the successor of `rec`; the result claims the new state ONLY when the save was verified, otherwise RECOVERY_REQUIRED with the state the disk really holds
+void EN_Transition(CEnStore *store,SEnRecord &rec,SEnRecord &nx,const ENUM_EN_RESULT outcome,const string msg,const ulong ticket,const ulong pos,SEnResult &res)
+  {
+   string wanted=nx.state;
+   if(EN_Commit(store,rec,nx)) {EN_Res(res,outcome,msg,0,rec.state,ticket,pos); return;}
+   string disk=EN_DiskState(store,rec);
+   EN_Res(res,EN_R_RECOVERY,"STATE_NOT_SAVED: "+wanted+" ("+msg+"); the disk holds "+disk+"; nothing is resent",0,disk,ticket,0);
+  }
+
 void EN_ScanForOrder(const SEnConfig &cfg,CEnTransport *tr,CEnStore *store,SEnRecord &rec,SEnResult &res)
   {
    SEnOrderList lst;
@@ -695,32 +735,28 @@ void EN_ScanForOrder(const SEnConfig &cfg,CEnTransport *tr,CEnStore *store,SEnRe
          nc++;
         }
      }
+   SEnRecord nx=rec;
    if(nc>1)
      {
-      SEnRecord nx=rec;
       nx.state=EN_ST_BLOCKED;
       nx.reason="AMBIGUOUS_CANDIDATES "+IntegerToString(nc);
-      EN_Commit(store,rec,nx);
-      EN_Res(res,EN_R_BLOCKED,"AMBIGUOUS_CANDIDATES: more than one order fits; none is chosen",0,rec.state);
+      EN_Transition(store,rec,nx,EN_R_BLOCKED,"AMBIGUOUS_CANDIDATES: more than one order fits; none is chosen",0,0,res);
       return;
      }
    if(nc==0)
      {
       if(rec.state==EN_ST_INTENT)
         {
-         SEnRecord nx=rec;
          nx.state=EN_ST_RECOVERY;
          nx.attempts=1;
          nx.reason="INTENT_WITHOUT_ORDER";
-         EN_Commit(store,rec,nx);
-         EN_Res(res,EN_R_RECOVERY,"INTENT_WITHOUT_PROOF: the send may or may not have happened; nothing is resent",0,rec.state);
+         EN_Transition(store,rec,nx,EN_R_RECOVERY,"INTENT_WITHOUT_PROOF: the send may or may not have happened; nothing is resent",0,0,res);
          return;
         }
       EN_Res(res,EN_R_RECOVERY,"NO_CANDIDATE: nothing is resent",0,rec.state);
       return;
      }
    SEnOrder o=lst.o[cand[0]];
-   SEnRecord nx=rec;
    nx.attempts=1;
    nx.order_ticket=o.ticket;
    nx.linked=1;
@@ -728,8 +764,7 @@ void EN_ScanForOrder(const SEnConfig &cfg,CEnTransport *tr,CEnStore *store,SEnRe
      {
       nx.state=EN_ST_PLACED;
       nx.reason="LINKED_BY_RECOVERY";
-      EN_Commit(store,rec,nx);
-      EN_Res(res,EN_R_PLACED,"LINKED_BY_RECOVERY: unique tuple match outside the snapshot",0,rec.state,o.ticket);
+      EN_Transition(store,rec,nx,EN_R_PLACED,"LINKED_BY_RECOVERY: unique tuple match outside the snapshot",o.ticket,0,res);
       return;
      }
    if(o.state==EN_OS_FILLED && o.position_id>0)
@@ -737,24 +772,21 @@ void EN_ScanForOrder(const SEnConfig &cfg,CEnTransport *tr,CEnStore *store,SEnRe
       nx.state=EN_ST_FILLED;
       nx.position_id=o.position_id;
       nx.reason="LINKED_BY_RECOVERY_FILLED";
-      EN_Commit(store,rec,nx);
-      EN_Res(res,EN_R_FILLED,"LINKED_BY_RECOVERY_FILLED",0,rec.state,o.ticket,o.position_id);
+      EN_Transition(store,rec,nx,EN_R_FILLED,"LINKED_BY_RECOVERY_FILLED",o.ticket,o.position_id,res);
       return;
      }
    if(o.state==EN_OS_CANCELED || o.state==EN_OS_REJECTED)
      {
       nx.state=EN_ST_CANCELLED;
       nx.reason="LINKED_BY_RECOVERY_ENDED";
-      EN_Commit(store,rec,nx);
-      EN_Res(res,EN_R_CANCELLED,"LINKED_BY_RECOVERY_ENDED",0,rec.state,o.ticket);
+      EN_Transition(store,rec,nx,EN_R_CANCELLED,"LINKED_BY_RECOVERY_ENDED",o.ticket,0,res);
       return;
      }
    if(o.state==EN_OS_EXPIRED)
      {
       nx.state=EN_ST_EXPIRED;
       nx.reason="LINKED_BY_RECOVERY_EXPIRED";
-      EN_Commit(store,rec,nx);
-      EN_Res(res,EN_R_EXPIRED,"LINKED_BY_RECOVERY_EXPIRED",0,rec.state,o.ticket);
+      EN_Transition(store,rec,nx,EN_R_EXPIRED,"LINKED_BY_RECOVERY_EXPIRED",o.ticket,0,res);
       return;
      }
    EN_Res(res,EN_R_RECOVERY,"CANDIDATE_STATE_UNUSABLE",0,rec.state);
@@ -781,22 +813,21 @@ void EN_ReconcileLocked(const SEnConfig &cfg,CEnTransport *tr,CEnStore *store,co
      }
    SEnOrder o;
    tr.ReadOrder(rec.order_ticket,o);
+   ulong tk=rec.order_ticket;
    SEnRecord nx=rec;
    if(!o.found)
      {
-      if(st==EN_ST_RECOVERY) {EN_Res(res,EN_R_RECOVERY,"ORDER_NOT_FOUND: cannot prove what happened to the order",0,st,rec.order_ticket); return;}
+      if(st==EN_ST_RECOVERY) {EN_Res(res,EN_R_RECOVERY,"ORDER_NOT_FOUND: cannot prove what happened to the order",0,st,tk); return;}
       nx.state=EN_ST_RECOVERY;
       nx.reason="ORDER_NOT_FOUND";
-      EN_Commit(store,rec,nx);
-      EN_Res(res,EN_R_RECOVERY,"ORDER_NOT_FOUND: cannot prove what happened to the order",0,rec.state,rec.order_ticket);
+      EN_Transition(store,rec,nx,EN_R_RECOVERY,"ORDER_NOT_FOUND: cannot prove what happened to the order",tk,0,res);
       return;
      }
    if(o.ticket!=rec.order_ticket || !(o.symbol==rec.symbol && o.type==EN_OType(rec.direction) && o.magic==rec.magic))
      {
       nx.state=EN_ST_BLOCKED;
       nx.reason="ORDER_IDENTITY_CHANGED";
-      EN_Commit(store,rec,nx);
-      EN_Res(res,EN_R_BLOCKED,"ORDER_IDENTITY_CHANGED",0,rec.state,rec.order_ticket);
+      EN_Transition(store,rec,nx,EN_R_BLOCKED,"ORDER_IDENTITY_CHANGED",tk,0,res);
       return;
      }
    if(o.state==EN_OS_ACTIVE)
@@ -805,27 +836,24 @@ void EN_ReconcileLocked(const SEnConfig &cfg,CEnTransport *tr,CEnStore *store,co
         {
          nx.state=EN_ST_BLOCKED;
          nx.reason="ORDER_MODIFIED";
-         EN_Commit(store,rec,nx);
-         EN_Res(res,EN_R_BLOCKED,"ORDER_MODIFIED: the pending order no longer matches the plan; it is not touched",0,rec.state,rec.order_ticket);
+         EN_Transition(store,rec,nx,EN_R_BLOCKED,"ORDER_MODIFIED: the pending order no longer matches the plan; it is not touched",tk,0,res);
          return;
         }
       if(st==EN_ST_CANCEL_UNCERTAIN)
         {
          nx.state=EN_ST_PLACED;
          nx.reason="CANCEL_NOT_EFFECTIVE";
-         EN_Commit(store,rec,nx);
-         EN_Res(res,EN_R_PLACED,"STILL_ACTIVE: the cancellation did not take effect",0,rec.state,rec.order_ticket);
+         EN_Transition(store,rec,nx,EN_R_PLACED,"STILL_ACTIVE: the cancellation did not take effect",tk,0,res);
          return;
         }
       if(st==EN_ST_RECOVERY)
         {
          nx.state=EN_ST_PLACED;
          nx.reason="RECOVERED_ACTIVE";
-         EN_Commit(store,rec,nx);
-         EN_Res(res,EN_R_PLACED,"RECOVERED_ACTIVE",0,rec.state,rec.order_ticket);
+         EN_Transition(store,rec,nx,EN_R_PLACED,"RECOVERED_ACTIVE",tk,0,res);
          return;
         }
-      EN_Res(res,EN_R_NOCHANGE,"ACTIVE",0,st,rec.order_ticket);
+      EN_Res(res,EN_R_NOCHANGE,"ACTIVE",0,st,tk);
       return;
      }
    if(o.state==EN_OS_FILLED)
@@ -834,37 +862,32 @@ void EN_ReconcileLocked(const SEnConfig &cfg,CEnTransport *tr,CEnStore *store,co
         {
          nx.state=EN_ST_RECOVERY;
          nx.reason="FILLED_WITHOUT_PROOF";
-         EN_Commit(store,rec,nx);
-         EN_Res(res,EN_R_RECOVERY,"FILLED_WITHOUT_PROOF",0,rec.state,rec.order_ticket);
+         EN_Transition(store,rec,nx,EN_R_RECOVERY,"FILLED_WITHOUT_PROOF",tk,0,res);
          return;
         }
       nx.state=EN_ST_FILLED;
       nx.position_id=o.position_id;
       nx.reason="FILLED";
-      EN_Commit(store,rec,nx);
-      EN_Res(res,EN_R_FILLED,"FILLED: position id from the order history",0,rec.state,rec.order_ticket,o.position_id);
+      EN_Transition(store,rec,nx,EN_R_FILLED,"FILLED: position id from the order history",tk,o.position_id,res);
       return;
      }
    if(o.state==EN_OS_CANCELED || o.state==EN_OS_REJECTED)
      {
       nx.state=EN_ST_CANCELLED;
       nx.reason=(o.state==EN_OS_CANCELED ? "ORDER_CANCELED" : "ORDER_REJECTED");
-      EN_Commit(store,rec,nx);
-      EN_Res(res,EN_R_CANCELLED,nx.reason,0,rec.state,rec.order_ticket);
+      EN_Transition(store,rec,nx,EN_R_CANCELLED,nx.reason,tk,0,res);
       return;
      }
    if(o.state==EN_OS_EXPIRED)
      {
       nx.state=EN_ST_EXPIRED;
       nx.reason="ORDER_EXPIRED";
-      EN_Commit(store,rec,nx);
-      EN_Res(res,EN_R_EXPIRED,"ORDER_EXPIRED",0,rec.state,rec.order_ticket);
+      EN_Transition(store,rec,nx,EN_R_EXPIRED,"ORDER_EXPIRED",tk,0,res);
       return;
      }
    nx.state=EN_ST_RECOVERY;
    nx.reason="ORDER_STATE_UNKNOWN";
-   EN_Commit(store,rec,nx);
-   EN_Res(res,EN_R_RECOVERY,"ORDER_STATE_UNKNOWN",0,rec.state,rec.order_ticket);
+   EN_Transition(store,rec,nx,EN_R_RECOVERY,"ORDER_STATE_UNKNOWN",tk,0,res);
   }
 
 void EN_Reconcile(const SEnConfig &cfg,CEnTransport *tr,CEnStore *store,const string signal_id,SEnResult &res)
@@ -892,6 +915,7 @@ void EN_CancelLocked(const SEnConfig &cfg,CEnTransport *tr,CEnStore *store,SEnRu
    if(kind==2) {EN_Res(res,EN_R_BLOCKED,"RECORD_UNUSABLE: "+why); return;}
    if(!EN_IdentityOk(rec,acct,cfg,signal_id)) {EN_Res(res,EN_R_BLOCKED,"IDENTITY_MISMATCH"); return;}
    if(rec.state!=EN_ST_PLACED || rec.linked!=1) {EN_Res(res,EN_R_REFUSED,"NOT_A_PROVEN_PENDING_ORDER: state "+rec.state+"; reconcile first",0,rec.state,rec.order_ticket); return;}
+   if(rec.cancel_attempts>=1) {EN_Res(res,EN_R_REFUSED,"CANCEL_ALREADY_ATTEMPTED: the record stores one cancellation; there is no automatic second one",0,rec.state,rec.order_ticket); return;}
    SEnOrder o;
    tr.ReadOrder(rec.order_ticket,o);
    if(!(o.found && o.ticket==rec.order_ticket && o.state==EN_OS_ACTIVE && EN_TupleMatches(o,rec) && o.magic==cfg.ea_magic))

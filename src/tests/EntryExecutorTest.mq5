@@ -806,6 +806,138 @@ void Scenario_codec(void)
    Check(dg && EN_PlanDigest(p3)!=base && EN_PlanDigest(p4)=="","the digest binds every order field");
   }
 
+// ---- regressions reproduced by the Codex review of 4de81f5 (BUY and SELL where the case allows)
+void Scenario_review_cancel_attempt_survives_restart(void)
+  {
+   for(int d=0;d<2;d++)
+     {
+      int dir=(d==0 ? 1 : -1);
+      CWorld w;
+      w.Init(dir);
+      w.Place();
+      w.t.cancel_mode=EN_CM_NOT_EFFECTIVE;
+      STpCancel dec;
+      TP_CancelDecision(true,SIG,false,TP_EV_SESSION_END,dec);
+      SEnRuntime r1;
+      EN_RuntimeInit(r1);
+      EN_Cancel(w.cfg,GetPointer(w.t),GetPointer(w.s),r1,SIG,dec,w.r);
+      SEnRecord rec;
+      w.Rec(rec);
+      bool a=(w.r.outcome==EN_R_CANCEL_UNCERTAIN && rec.cancel_attempts==1);
+      w.Reconcile();
+      w.Rec(rec);
+      bool b=(w.r.outcome==EN_R_PLACED && rec.state==EN_ST_PLACED && rec.cancel_attempts==1);
+      SEnRuntime r2;
+      EN_RuntimeInit(r2);
+      EN_Cancel(w.cfg,GetPointer(w.t),GetPointer(w.s),r2,SIG,dec,w.r);
+      Check(a && b && w.r.outcome==EN_R_REFUSED && w.t.cancels==1 && StringFind(w.r.reason,"CANCEL_ALREADY_ATTEMPTED")>=0,StringFormat("direction %d: the stored cancel attempt stops a second cancel from a NEW runtime",dir));
+     }
+  }
+
+void Scenario_review_state_saves_checked(void)
+  {
+   for(int d=0;d<2;d++)
+     {
+      int dir=(d==0 ? 1 : -1);
+      for(int m=0;m<6;m++)
+         for(int fault=0;fault<2;fault++)
+           {
+            CWorld w;
+            w.Init(dir);
+            w.Place();
+            int ix=w.t.IndexOf(w.r.order_ticket);
+            if(m==0) {w.t.orders[ix].state=EN_OS_FILLED; w.t.orders[ix].position_id=7;}
+            if(m==1) w.t.orders[ix].state=EN_OS_CANCELED;
+            if(m==2) w.t.orders[ix].state=EN_OS_EXPIRED;
+            if(m==3) w.t.Hide(w.r.order_ticket);
+            if(m==4) w.t.orders[ix].sl=1.0;
+            if(m==5) w.t.orders[ix].magic=5;
+            if(fault==0) w.s.fail_write_at=w.s.writes+1;
+            else w.s.readback_differs_at=w.s.writes+1;
+            w.Reconcile();
+            SEnRecord rec;
+            bool have=w.Rec(rec);
+            bool state_ok=(fault==0 ? (w.r.state==EN_ST_PLACED && have && rec.state==EN_ST_PLACED && rec.generation==2) : (w.r.state=="UNUSABLE" && !have));
+            Check(w.r.outcome==EN_R_RECOVERY && StringFind(w.r.reason,"STATE_NOT_SAVED")>=0 && state_ok && w.t.sends==1 && w.t.cancels==0,
+                  StringFormat("dir %d case %d fault %d: a failed save is RECOVERY_REQUIRED and never claims the new state",dir,m,fault));
+           }
+      CWorld x;
+      x.Init(dir);
+      x.t.send_mode=EN_SM_UNCERTAIN_CREATED;
+      x.Place();
+      x.s.fail_write_at=x.s.writes+1;
+      x.Reconcile();
+      Check(x.r.outcome==EN_R_RECOVERY && StringFind(x.r.reason,"STATE_NOT_SAVED")>=0 && x.State()==EN_ST_RECOVERY,StringFormat("dir %d: the recovery scan also checks its save",dir));
+      CWorld y;
+      y.Init(dir);
+      y.Place();
+      y.s.fail_write_at=y.s.writes+2;
+      STpCancel dec;
+      TP_CancelDecision(true,SIG,false,TP_EV_SESSION_END,dec);
+      SEnRuntime rt;
+      EN_RuntimeInit(rt);
+      EN_Cancel(y.cfg,GetPointer(y.t),GetPointer(y.s),rt,SIG,dec,y.r);
+      Check(y.r.outcome==EN_R_CANCEL_UNCERTAIN && y.t.cancels==1 && y.State()==EN_ST_CANCEL_UNCERTAIN,StringFormat("dir %d: a cancel whose CANCELLED state is not saved stays CANCEL_UNCERTAIN",dir));
+     }
+  }
+
+void Scenario_review_recheck_before_send(void)
+  {
+   for(int d=0;d<2;d++)
+     {
+      int dir=(d==0 ? 1 : -1);
+      for(int k=0;k<5;k++)
+        {
+         CWorld w;
+         w.Init(dir);
+         if(k==0) w.t.precheck_advance=1000;
+         if(k==1) {w.cfg.quote_max_age=5000; w.t.precheck_advance=100;}
+         if(k==2) {w.cfg.permit_max_age=5000; w.t.precheck_advance=100;}
+         if(k==3) {w.t.precheck_bid=(dir==1 ? 1989.0 : 2012.0); w.t.precheck_ask=(dir==1 ? 1989.3 : 2012.3);}
+         if(k==4) {w.cfg.expiry_mode=EN_EXP_SECONDS; w.cfg.expiry_seconds=50; w.cfg.permit_max_age=5000; w.cfg.quote_max_age=5000; w.t.precheck_advance=100;}
+         w.Place();
+         bool refused=(w.r.outcome==EN_R_REFUSED && w.r.sends==0 && w.t.sends==0 && w.rt.send_calls==0 && StringFind(w.r.reason,"ABORTED_BEFORE_SEND")>=0);
+         bool rec_ok=(w.State()==EN_ST_PRECHECK_REFUSED && w.Clean());
+         w.pm.issued=w.t.now;
+         w.t.quote.bid=2000.0;
+         w.t.quote.ask=2000.3;
+         w.t.quote.time=w.t.now;
+         w.t.precheck_advance=0;
+         w.t.precheck_ask=0.0;
+         SEnRuntime fresh;
+         EN_RuntimeInit(fresh);
+         w.PlaceWith(w.plan,w.pm,fresh);
+         Check(refused && rec_ok && w.r.outcome==EN_R_DUPLICATE,StringFormat("dir %d case %d: permit / expiry / quote re-checked right before the send: zero sends, the signal is consumed",dir,k));
+        }
+     }
+  }
+
+void Scenario_review_pending_needs_return_filling(void)
+  {
+   for(int d=0;d<2;d++)
+     {
+      int dir=(d==0 ? 1 : -1);
+      for(int f=EN_FILL_IOC;f<=EN_FILL_FOK;f++)
+        {
+         CWorld w;
+         w.Init(dir);
+         w.cfg.filling=f;
+         w.Place();
+         Check(w.r.outcome==EN_R_REFUSED && w.r.sends==0 && w.t.sends==0 && !w.Has() && w.s.lock_calls==0 && StringFind(w.r.reason,"FILLING_NOT_ALLOWED_FOR_PENDING")>=0,StringFormat("dir %d filling %d: refused for a pending order",dir,f));
+        }
+      CWorld ok;
+      ok.Init(dir);
+      ok.Place();
+      Check(ok.r.outcome==EN_R_PLACED,StringFormat("dir %d: RETURN filling places",dir));
+     }
+   CWorld w2;
+   w2.Place();
+   SEnRecord rec;
+   w2.Rec(rec);
+   rec.filling=EN_FILL_IOC;
+   Check(EN_Validate(rec)!="","a record with IOC filling is invalid");
+  }
+
 void OnStart()
   {
    Print("T013 ENTRY EXECUTOR TEST: fake transport and fake store only; no file, no terminal read, no order, no trade.");
@@ -829,5 +961,9 @@ void OnStart()
    Scenario_cancel_proven_only();
    Scenario_cancel_uncertain();
    Scenario_codec();
+   Scenario_review_cancel_attempt_survives_restart();
+   Scenario_review_state_saves_checked();
+   Scenario_review_recheck_before_send();
+   Scenario_review_pending_needs_return_filling();
    PrintFormat("T013 ENTRY EXECUTOR TEST finished: %d passed, %d failed",g_pass,g_fail);
   }
