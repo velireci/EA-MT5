@@ -139,6 +139,44 @@ class Codec(unittest.TestCase):
             self.assertFalse(b.decode(t[:cut])[0], cut)
 
 
+class Actions(unittest.TestCase):
+    def test_only_the_three_declared_actions_are_known(self):
+        for a in (0, 1, 2):
+            self.assertTrue(b.action_known(a))
+        for a in (99, -1, 3, 2147483647, -2147483647, 4294967297, True, None, 1.0):
+            self.assertFalse(b.action_known(a), a)
+
+    def test_the_script_checks_the_tester_and_the_action_before_any_read_and_has_no_default_branch_to_owner_asserted(self):
+        s = strip(_read('src', 'XauUsdT012BalanceStore.mq5'))
+        h = strip(_read('src', 'include', 'DailyBalanceStore.mqh'))
+        body = s[s.index('void OnStart()'):]
+        self.assertLess(body.index('MQL_TESTER'), body.index('DBS_ActionKnown('))
+        self.assertLess(body.index('DBS_ActionKnown('), body.index('CDbsRealPort port('))
+        self.assertLess(body.index('CDbsRealPort port('), body.index('DBS_Load('))
+        self.assertIn('DBS_ACT_CAPTURE_OWNER_ASSERTED)', body)
+        self.assertEqual(body.count('DBS_Capture('), 2)
+        self.assertEqual(body.count('DBS_SRC_OA'), 1)                               # only reachable through the explicit OWNER_ASSERTED branch
+        self.assertNotRegex(body, r'\?\s*DBS_SRC_WE\s*:\s*DBS_SRC_OA')
+        self.assertIn('bool DBS_ActionKnown(const int action) {return(action>=0 && action<DBS_ACTIONS);}', h)
+        self.assertIn('#define DBS_ACTIONS 3', h)
+        enum = s[s.index('enum ENUM_DBS_ACTION'):s.index('input ENUM_DBS_ACTION')]
+        self.assertEqual(len(re.findall(r'DBS_ACT_\w+', enum)), 3)
+
+    def test_the_decoder_checks_the_flag_before_narrowing_it(self):
+        h = strip(_read('src', 'include', 'DailyBalanceStore.mqh'))
+        dec = h[h.index('bool DBS_Decode('):h.index('string DBS_CheckAgainst(')]
+        self.assertLess(dec.index('comp!=0 && comp!=1'), dec.index('rec.complete_asserted=(int)comp'))
+        self.assertLess(dec.index('day>2147483647'), dec.index('rec.day=(int)day'))
+        self.assertLess(dec.index('off>2147483647'), dec.index('rec.offset=(int)off'))
+
+    def test_wide_values_with_a_valid_crc_are_refused_like_in_the_mql_decoder(self):
+        for kind in (fx.K_COMPLETE_BIG, fx.K_OFFSET_BIG, fx.K_DAY_BIG):
+            text = fx.start_text(kind)
+            self.assertFalse(b.decode(text)[0], kind)
+            body = text[:text.index('CRC=')]
+            self.assertEqual(text[len(body):], 'CRC=%08X\n' % p.crc32(body))        # the CRC is valid: the value itself must be refused
+
+
 class Sources(unittest.TestCase):
     def test_header_calls_no_trading_no_deletion_no_policy_no_profit_fields_and_only_the_needed_primitives(self):
         h = strip(_read('src', 'include', 'DailyBalanceStore.mqh'))

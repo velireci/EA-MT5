@@ -21,6 +21,7 @@
 #define DBS_MAX_SPAN 120              // seconds between the first and the last instant of one acquisition (a technical limit, not a policy)
 #define DBS_OFFSET_UNSET 2147483647
 #define DBS_MAX_TEXT 2048
+#define DBS_ACTIONS 3                 // the actions of the script: 0 LOAD, 1 CAPTURE_WINDOW_EMPTY, 2 CAPTURE_OWNER_ASSERTED; anything else is refused
 #define DBS_SRC_NONE ""
 #define DBS_SRC_WE "WINDOW_EMPTY"
 #define DBS_SRC_OA "OWNER_ASSERTED"
@@ -94,6 +95,8 @@ public:
    virtual bool ReadFile(const string name,string &text)=0;
    virtual bool WriteFile(const string name,const string text)=0;
   };
+
+bool DBS_ActionKnown(const int action) {return(action>=0 && action<DBS_ACTIONS);}
 
 string DBS_StatusName(const ENUM_DBS_STATUS s)
   {
@@ -214,6 +217,7 @@ bool DBS_Decode(const string text,SDbsRecord &rec,string &reason)
    if(!ESC_ParseInt(v[1],login) || !ESC_ParseInt(v[4],day) || !ESC_ParseInt(v[7],comp) || !ESC_ParseInt(v[8],off) || !ESC_ParseInt(v[9],tf) || !ESC_ParseInt(v[10],tl) ||
       !ESC_ParseDouble(v[5],amount) || !ESC_Unescape(v[2],server) || !ESC_Unescape(v[3],currency)) {reason="BAD_NUMBER_OR_STRING"; return(false);}
    if(v[6]!=DBS_SRC_WE && v[6]!=DBS_SRC_OA) {reason="BAD_ENUM: SOURCE"; return(false);}
+   if(comp!=0 && comp!=1) {reason="BAD_NUMBER_OR_STRING: HISTORY_COMPLETE_ASSERTED must be exactly 0 or 1 (checked before any narrowing)"; return(false);}
    if(day<0 || day>2147483647 || off<-2147483647 || off>2147483647) {reason="BAD_NUMBER_OR_STRING"; return(false);}
    rec.login=login;
    rec.server=server;

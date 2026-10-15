@@ -57,8 +57,13 @@ assert after.count('port.Unlock(') >= after.count('return;') - 0, 'every exit af
 for need in ('input ENUM_DBS_ACTION InpAction=DBS_ACT_LOAD;', 'input bool InpConfirmCapture=false;', 'input long InpEaMagic=0;', 'input int InpServerOffsetSeconds=2147483647;', 'input bool InpHistoryComplete=false;',
              'input double InpOwnerAmount=0;', 'input int InpOwnerDay=0;'):
     assert need in scr, need
+body = scr[scr.index('void OnStart()'):]
+assert body.index('MQL_TESTER') < body.index('DBS_ActionKnown(') < body.index('CDbsRealPort port(')
 assert scr.index('!InpConfirmCapture') < scr.index('DBS_Capture(')
-assert 'DBS_Load(' in scr and scr.count('DBS_Capture(') == 1
+assert body.count('DBS_Capture(') == 2 and body.count('DBS_SRC_OA') == 1, 'OWNER_ASSERTED only through its explicit branch'
+dec = hdr[hdr.index('bool DBS_Decode('):hdr.index('string DBS_CheckAgainst(')]
+assert dec.index('comp!=0 && comp!=1') < dec.index('rec.complete_asserted=(int)comp'), 'the flag is checked before the narrowing cast'
+assert 'DBS_Load(' in scr
 PYEOF
 
 echo "=== S4: protected modules unchanged since $BASE ==="
@@ -146,6 +151,39 @@ import re, sys
 used = set(re.findall(r'\b(ESC_\w+|ESF_\w+)\s*\(', re.sub(r'//[^\n]*', '', open(sys.argv[1]).read())))
 allowed = {'ESC_Crc32', 'ESC_Escape', 'ESC_Unescape', 'ESC_Fnum', 'ESC_ParseInt', 'ESC_ParseDouble', 'ESC_Lines', 'ESC_Field', 'ESF_ReadAll', 'ESF_WriteAll', 'ESF_Exists'}
 sys.exit(1 if used - allowed else 0)
+PYEOF
+cp $SCR "$NEG/I.mq5"; sed -i 's/   if(MQLInfoInteger(MQL_TESTER)) {Print(/   if(false) {Print(/' "$NEG/I.mq5"
+python3 -I - "$NEG/I.mq5" <<'PYEOF' && { echo "  FAIL missing tester gate not detected"; FAIL=1; } || echo "  PASS a script without the Strategy Tester gate is detected"
+import re, sys
+code = re.sub(r'//[^\n]*', '', open(sys.argv[1]).read())
+sys.exit(0 if 'MQL_TESTER' in code else 1)
+PYEOF
+cp $SCR "$NEG/J.mq5"; python3 - "$NEG/J.mq5" <<'PYEOF'
+import sys
+t = open(sys.argv[1]).read()
+a = '   if(!DBS_ActionKnown((int)InpAction))'
+assert a in t, 'control could not be built'
+t = t.replace(a, '   if(false)', 1)
+open(sys.argv[1], 'w').write(t)
+PYEOF
+python3 -I - "$NEG/J.mq5" <<'PYEOF' && { echo "  FAIL missing action check not detected"; FAIL=1; } || echo "  PASS a script that does not refuse an unknown action is detected"
+import re, sys
+code = re.sub(r'//[^\n]*', '', open(sys.argv[1]).read())
+sys.exit(0 if 'DBS_ActionKnown(' in code else 1)
+PYEOF
+cp $HDR "$NEG/K.mqh"; python3 - "$NEG/K.mqh" <<'PYEOF'
+import sys
+t = open(sys.argv[1]).read()
+a = '   if(comp!=0 && comp!=1) {'
+assert a in t, 'control could not be built'
+t = t.replace(a, '   if(false) {', 1)
+open(sys.argv[1], 'w').write(t)
+PYEOF
+python3 -I - "$NEG/K.mqh" <<'PYEOF' && { echo "  FAIL narrowing before the check not detected"; FAIL=1; } || echo "  PASS a decoder that casts the flag without checking it first is detected"
+import re, sys
+code = re.sub(r'//[^\n]*', '', open(sys.argv[1]).read())
+dec = code[code.index('bool DBS_Decode('):code.index('string DBS_CheckAgainst(')]
+sys.exit(0 if ('comp!=0 && comp!=1' in dec and dec.index('comp!=0 && comp!=1') < dec.index('rec.complete_asserted=(int)comp')) else 1)
 PYEOF
 cp $HDR "$NEG/H.mqh"; echo "void x(){" >> "$NEG/H.mqh"
 python3 tools/t001-check-balance.py "$NEG/H.mqh" >/dev/null 2>&1 && { echo "  FAIL unbalanced brace"; FAIL=1; } || echo "  PASS unbalanced brace detected"

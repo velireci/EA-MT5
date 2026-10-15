@@ -73,6 +73,13 @@ class Result:
     existed: bool = False
 
 
+ACTIONS = 3        # 0 LOAD, 1 CAPTURE_WINDOW_EMPTY, 2 CAPTURE_OWNER_ASSERTED
+
+
+def action_known(action):
+    return _isint(action) and 0 <= action < ACTIONS
+
+
 def file_name(login, day):
     return 'VELO_T012_BALANCE_%d_%d.txt' % (login, day)
 

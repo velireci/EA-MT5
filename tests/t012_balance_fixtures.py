@@ -18,7 +18,7 @@ FI = {n: i for i, n in enumerate(FIELDS)}
 MAXSET = 6
 LOAD, CAP_WE, CAP_OA = 0, 1, 2
 (K_MISSING, K_VALID_WE, K_VALID_OA, K_CRC, K_TRUNC, K_EMPTY, K_BAD_VERSION, K_BAD_ENUM, K_AMOUNT_ZERO, K_OTHER_LOGIN, K_OTHER_SERVER, K_OTHER_CURRENCY, K_DAY_INSIDE_PREV,
- K_OUTSIDE_DAY, K_WE_NOT_COMPLETE) = range(15)
+ K_OUTSIDE_DAY, K_WE_NOT_COMPLETE, K_COMPLETE_BIG, K_OFFSET_BIG, K_DAY_BIG) = range(18)
 
 
 def base_account():
@@ -67,6 +67,12 @@ def start_text(kind):
         return reseal('T_FIRST_UTC=%d\nT_LAST_UTC=%d' % (START + 3600, START + 3602), 'T_FIRST_UTC=%d\nT_LAST_UTC=%d' % (END + 10, END + 12))
     if kind == K_WE_NOT_COMPLETE:
         return reseal('HISTORY_COMPLETE_ASSERTED=1', 'HISTORY_COMPLETE_ASSERTED=0')
+    if kind == K_COMPLETE_BIG:                    # valid CRC; 4294967297 = 2^32 + 1 would become 1 after a narrowing cast
+        return reseal('HISTORY_COMPLETE_ASSERTED=1', 'HISTORY_COMPLETE_ASSERTED=4294967297')
+    if kind == K_OFFSET_BIG:
+        return reseal('SERVER_OFFSET_SECONDS=7200', 'SERVER_OFFSET_SECONDS=%d' % (7200 + 2 ** 32))
+    if kind == K_DAY_BIG:
+        return reseal('DAY=%d' % DAY, 'DAY=%d' % (DAY + 2 ** 32))
     raise KeyError(kind)
 
 
@@ -175,6 +181,9 @@ row('LOAD_UNKNOWN_SOURCE', LOAD, K_BAD_ENUM, status=X, reason='BAD_ENUM', disk='
 row('LOAD_ZERO_AMOUNT', LOAD, K_AMOUNT_ZERO, status=X, reason='INVALID_AMOUNT', disk='SAME')
 row('LOAD_INSTANT_OUTSIDE_THE_DAY', LOAD, K_OUTSIDE_DAY, status=X, reason='INVALID_INSTANT', disk='SAME')
 row('LOAD_WINDOW_EMPTY_WITHOUT_THE_COMPLETE_ASSERTION', LOAD, K_WE_NOT_COMPLETE, status=X, reason='INVALID_WINDOW_EMPTY_EVIDENCE', disk='SAME')
+row('LOAD_COMPLETE_FLAG_4294967297_WITH_A_VALID_CRC_IS_REFUSED', LOAD, K_COMPLETE_BIG, status=X, reason='DAMAGED', disk='SAME')
+row('LOAD_OFFSET_ABOVE_32_BITS_WITH_A_VALID_CRC_IS_REFUSED', LOAD, K_OFFSET_BIG, status=X, reason='DAMAGED', disk='SAME')
+row('LOAD_DAY_ABOVE_32_BITS_WITH_A_VALID_CRC_IS_REFUSED', LOAD, K_DAY_BIG, status=X, reason='DAMAGED', disk='SAME')
 row('LOAD_OTHER_LOGIN', LOAD, K_OTHER_LOGIN, status=X, reason='WRONG_ACCOUNT', disk='SAME')
 row('LOAD_OTHER_SERVER', LOAD, K_OTHER_SERVER, status=X, reason='WRONG_ACCOUNT', disk='SAME')
 row('LOAD_OTHER_CURRENCY', LOAD, K_OTHER_CURRENCY, status=X, reason='WRONG_ACCOUNT', disk='SAME')
