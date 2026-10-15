@@ -111,7 +111,7 @@ class Orchestrator:
         """a data defect or a recovery: the next successful build starts a new baseline (an old signal is never revived)"""
         self.rebase = True
 
-    def step(self, cfg, mk, feed_ok, ob, broken, cut, tr, store):
+    def step(self, cfg, mk, feed_ok, ob, broken, cut, tr, store, pre_send=None):
         if not feed_ok or ob is None:
             self.defect()
             return Outcome('FEED_NOT_OK', 'no confirmed data; the baseline restarts with the next successful build')
@@ -168,10 +168,13 @@ class Orchestrator:
         present, daily = mk.daily(r2)
         checks = eg.Checks(snapshot=snap, snapshot_time=now, snapshot_digest=digest, limits=lim, registry=reg, calc_ok=ok, profit=profit, tolerance=cfg.model_tolerance,
                            risk_budget=cfg.risk_budget, loss_time=now, loss_digest=digest, daily_present=present, daily=daily, daily_time=now, daily_digest=digest)
-        res, dec = eg.submit(cfg.gate, cfg.exec, tr, store, en.Runtime(), r2, checks)
+        res, dec = eg.submit(cfg.gate, cfg.exec, tr, store, en.Runtime(), r2, checks, pre_send)
         out = Outcome('EXECUTOR', res.reason, False, res, dec, r2)
         if not dec.allow:
             out.status = 'GATE_BLOCKED'
+            return out
+        if res.reason.startswith('PRE_SEND_RESERVATION_FAILED'):
+            out.status = 'RESERVATION_FAILED'                # nothing was placed and the signal is NOT consumed
             return out
         if res.final in (en.R_PLACED, en.R_FILLED):
             out.request = True

@@ -170,6 +170,7 @@ public:
    int dir;
    void Init(const int direction)
      {
+      hook=NULL;
       dir=direction;
       mk.Setup(GetPointer(t),dir);
       t.quote.bid=mk.q.bid;
@@ -196,9 +197,10 @@ public:
       cfg.exec.permit_max_age=60;
       cfg.exec.quote_max_age=30;
      }
+   CEgPreSend *hook;
    void StepObs(CObs &ob,const bool feed_ok=true)
      {
-      o.Step(cfg,GetPointer(mk),feed_ok,ob.st,ob.f,ob.lvl,ob.Cut(),GetPointer(t),GetPointer(s),out);
+      o.Step(cfg,GetPointer(mk),feed_ok,ob.st,ob.f,ob.lvl,ob.Cut(),GetPointer(t),GetPointer(s),out,hook);
      }
    void StepWith(COrchestrator &orch,CObs &ob)
      {
@@ -528,6 +530,66 @@ void TestOffsetValidation(void)
      }
   }
 
+// scripted pre-send hook
+class CResHook : public CEgPreSend
+  {
+public:
+   CEnFakeTransport *tr;
+   CEnFakeStore *st;
+   bool ok;
+   int calls;
+   int settled;
+   long sends_at;
+   int writes_at;
+   int locks_at;
+   int files_at;
+   CResHook(void) {tr=NULL; st=NULL; ok=true; calls=0; settled=0; sends_at=-1; writes_at=-1; locks_at=-1; files_at=-1;}
+   virtual bool Reserve(const string signal_id,string &reason)
+     {
+      calls++;
+      sends_at=tr.sends;
+      writes_at=st.writes;
+      locks_at=st.lock_calls;
+      files_at=st.n_files;
+      reason=(ok ? "" : "INDEX_NOT_SAVED");
+      return(ok);
+     }
+   virtual void Settled(const string signal_id,const SEnResult &res) {settled++;}
+  };
+
+void Scenario_reservation_before_every_send(void)
+  {
+   for(int d=0;d<2;d++)
+     {
+      int dir=(d==0 ? 1 : -1);
+      CW w;
+      w.Init(dir);
+      CResHook h;
+      h.tr=GetPointer(w.t);
+      h.st=GetPointer(w.s);
+      h.ok=false;
+      w.hook=GetPointer(h);
+      w.Live();
+      string id=w.out.spb.signal_id;
+      Check(w.out.status=="RESERVATION_FAILED" && !w.out.request && h.calls==1 && h.sends_at==0 && h.writes_at==0 && h.locks_at==0 && h.files_at==0 && w.Untouched() && !w.o.Handled(id),
+            StringFormat("dir %d: a refused reservation places nothing and does not consume the signal",dir));
+      h.ok=true;
+      CObs b;
+      b.Make(dir,3);
+      w.StepObs(b);
+      Check(w.out.request && w.t.sends==1 && h.settled==1 && w.o.Handled(id),StringFormat("dir %d: the signal is retried at the next build and places once",dir));
+      CW x;
+      x.Init(dir);
+      x.mk.session=TP_SESSION_CLOSED;
+      CResHook hb;
+      hb.tr=GetPointer(x.t);
+      hb.st=GetPointer(x.s);
+      x.hook=GetPointer(hb);
+      x.Live();
+      Check(x.out.status=="GATE_BLOCKED" && hb.calls==0 && hb.settled==0 && x.Untouched(),StringFormat("dir %d: a gate block never reaches the hook",dir));
+     }
+  }
+
 void OnStart()
   {
    Print("T016 ENTRY ORCHESTRATOR TEST: fake transport, fake store and a scripted market; no file, no terminal read, no order, no trade.");
@@ -545,6 +607,7 @@ void OnStart()
    Scenario_market_recovery_rebases();
    Scenario_context_fields_rebase();
    Scenario_probe_independent_of_property();
+   Scenario_reservation_before_every_send();
    TestOffsetValidation();
    PrintFormat("T016 ENTRY ORCHESTRATOR TEST finished: %d passed, %d failed",g_pass,g_fail);
   }

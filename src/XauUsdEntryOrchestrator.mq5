@@ -5,7 +5,7 @@
 //   FAKE entry records and the T019 lifecycle index / halt flag persist in VELO_T016_FAKE_ files. The baseline is REBUILT at every start (a restart never revives a signal). The fake order book is in memory only, so after a
 //   restart a placed FAKE record cannot be proven and HALTS the layer until the owner acknowledges it. Filled orders are reported FILLED_UNMANAGED: the T011 registration is NOT connected. Not proof of broker execution.
 #property strict
-#property version "1.04"
+#property version "1.05"
 #include "include/EntryOrchestratorFeed.mqh"
 #include "include/EntryTransportFake.mqh"
 #include "include/ExposureReaderReal.mqh"
@@ -133,7 +133,8 @@ CEoTerminalFake g_tr;
 CEnFakeFileStore g_store;
 COrchestrator g_orch;
 SEoConfig g_cfg;
-SLcState g_lc;
+CLcGuard g_guard;                  // the gate's pre-send hook + the lifecycle state (g_guard.st)
+CEnFakeFileStore g_lockstore;      // dedicated store for the index lock: the file store above holds ONE lock at a time (the executor's per-signal lock)
 ulong g_lc_filters_ms=0;
 string g_last="";
 
@@ -217,11 +218,6 @@ bool Configure(void)
    return(true);
   }
 
-bool EntryTouched(const ENUM_EN_RESULT f)
-  {
-   return(f==EN_R_PLACED || f==EN_R_FILLED || f==EN_R_REJECTED || f==EN_R_RECOVERY || f==EN_R_BLOCKED || f==EN_R_PRECHECK_REFUSED || f==EN_R_CANCELLED || f==EN_R_CANCEL_UNCERTAIN || f==EN_R_EXPIRED);
-  }
-
 int EnabledCancelEvents(void)
   {
    return((InpCancelOnSessionEnd ? TP_EV_SESSION_END : 0)|(InpCancelOnNewsBlock ? TP_EV_NEWS_BLOCK : 0)|(InpCancelOnDailyLimit ? TP_EV_DAILY_LIMIT : 0));
@@ -232,18 +228,18 @@ void SyncHalts(void)
   {
    string notes="";
    // only a halt caused by an executor outcome is persisted (a full handled list, for instance, is cured by the restart itself)
-   if(g_lc.login>0 && StringFind(g_orch.halted,"HALTED after")==0 && g_lc.halted=="") LC_Halt(GetPointer(g_store),g_lc,g_orch.halted,notes);
-   if(g_lc.halted!="" && g_orch.halted=="") g_orch.halted="LIFECYCLE: "+g_lc.halted;
+   if(g_guard.st.login>0 && StringFind(g_orch.halted,"HALTED after")==0 && g_guard.st.halted=="") LC_Halt(GetPointer(g_store),g_guard.st,g_orch.halted,notes);
+   if(g_guard.st.halted!="" && g_orch.halted=="") g_orch.halted="LIFECYCLE: "+g_guard.st.halted;
    if(notes!="") Print("T019 ",notes);
   }
 
 // every timer tick: reconcile the indexed signals; cancel an open pending order only for an event that is due AND enabled by the owner (the filters are read at most every 10 s, only when an event is enabled and a signal is open)
 void Lifecycle()
   {
-   if(g_lc.login<=0) return;
+   if(g_guard.st.login<=0) return;
    int enabled=EnabledCancelEvents();
    int due=0;
-   if(enabled!=0 && g_lc.n>0 && (g_lc_filters_ms==0 || GetTickCount64()-g_lc_filters_ms>=10000))
+   if(enabled!=0 && g_guard.st.n>0 && (g_lc_filters_ms==0 || GetTickCount64()-g_lc_filters_ms>=10000))
      {
       g_lc_filters_ms=GetTickCount64();
       int session=TP_SESSION_UNKNOWN,news=TP_NEWS_UNKNOWN,spread=TP_SPREAD_UNKNOWN;
@@ -255,7 +251,7 @@ void Lifecycle()
       due=LC_DueEvents(session,news,present,(present && daily.cancel_pending_due));
      }
    string notes="";
-   LC_Tick(g_cfg.exec,GetPointer(g_tr),GetPointer(g_store),g_lc,due,enabled,notes);
+   LC_Tick(g_cfg.exec,GetPointer(g_tr),GetPointer(g_store),g_guard.st,due,enabled,notes);
    if(notes!="") Print("T019 LIFECYCLE | ",notes);
    SyncHalts();
   }
@@ -276,14 +272,11 @@ void Poll()
                   (int)ex.ok,ex.reason,ex.open_positions,ex.pending,ex.foreign_positions,ex.foreign_pending,(int)ex.risk_known,ex.existing_risk,ex.risk_reason);
      }
    SEoOutcome out;
-   g_orch.Step(g_cfg,GetPointer(g_market),feed_ok,g_feed.st,g_feed.f,g_feed.broken,g_feed.cut,GetPointer(g_tr),GetPointer(g_store),out);
-   string lnotes="";
-   if(out.status=="EXECUTOR" && g_lc.login>0 && EntryTouched(out.res.outcome) && !LC_Register(GetPointer(g_store),g_lc,out.spb.signal_id,lnotes))
-      LC_Halt(GetPointer(g_store),g_lc,"LIFECYCLE_INDEX_NOT_UPDATED after "+EN_ResultName(out.res.outcome),lnotes);
-   if(lnotes!="") Print("T019 ",lnotes);
+   g_orch.Step(g_cfg,GetPointer(g_market),feed_ok,g_feed.st,g_feed.f,g_feed.broken,g_feed.cut,GetPointer(g_tr),GetPointer(g_store),out,GetPointer(g_guard));      // the guard indexes the signal BEFORE the executor can send
+   if(g_guard.notes!="") {Print("T019 ",g_guard.notes); g_guard.notes="";}
    SyncHalts();
    string text=out.status+" | "+out.reason+" | cut "+TimeToString(g_feed.cut,TIME_DATE|TIME_MINUTES)+" | baseline "+TimeToString((datetime)g_orch.baseline,TIME_DATE|TIME_MINUTES)+
-               " | virtual requests "+IntegerToString(g_tr.sends)+" | lifecycle open "+IntegerToString(g_lc.n)+(g_lc.halted!="" ? " HALTED" : "");
+               " | virtual requests "+IntegerToString(g_tr.sends)+" | lifecycle open "+IntegerToString(g_guard.st.n)+(g_guard.st.halted!="" ? " HALTED" : "");
    if(out.request) text+=" | "+out.label+" | "+out.spb.signal_id;
    Status(text);
   }
@@ -294,17 +287,24 @@ int OnInit()
    if(!Configure()) {Print("T016 INIT FAILED: invalid or UNSET source / feed inputs (see docs/T016-entry-orchestrator.md)."); return(INIT_PARAMETERS_INCORRECT);}
    Print("T016 FAKE EXECUTION ONLY: this EA has no order-sending call, the real transport is not included. Symbol ",_Symbol);
    string startup_notes="";
-   if(!LC_Startup(g_cfg.exec,GetPointer(g_tr),GetPointer(g_store),InpAcknowledgeLifecycleHalt,g_lc,startup_notes))
+   g_guard.Bind(GetPointer(g_store));
+   // exclusive ownership of the index comes FIRST (the existing lock mechanism); an instance that does not get it neither reads nor writes the index and never sends or cancels (the layer stays halted)
+   if(!LC_Startup(g_cfg.exec,GetPointer(g_tr),GetPointer(g_store),GetPointer(g_lockstore),InpAcknowledgeLifecycleHalt,g_guard.st,startup_notes))
       Print("T019 LIFECYCLE startup: the account is not readable; the layer stays halted.");
    if(startup_notes!="") Print("T019 LIFECYCLE startup | ",startup_notes);
-   if(g_lc.halted!="") g_orch.halted="LIFECYCLE: "+g_lc.halted;
-   if(!EventSetTimer(InpPollSeconds)) return(INIT_FAILED);
+   if(g_guard.st.halted!="") g_orch.halted="LIFECYCLE: "+g_guard.st.halted;
+   if(!EventSetTimer(InpPollSeconds))
+     {
+      LC_Release(GetPointer(g_lockstore),g_guard.st);              // a failed start releases what this instance owns, and nothing else
+      return(INIT_FAILED);
+     }
    Poll();
    return(INIT_SUCCEEDED);
   }
 void OnDeinit(const int reason)
   {
    EventKillTimer();
+   LC_Release(GetPointer(g_lockstore),g_guard.st);                  // only the owner releases, and only its own key
    Comment("");
    PrintFormat("T016 stopped (reason %d). %d virtual request(s), nothing was sent to the terminal.",reason,g_tr.sends);
   }

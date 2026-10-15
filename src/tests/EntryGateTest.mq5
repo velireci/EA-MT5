@@ -108,6 +108,7 @@ public:
       c.daily_digest=dg;
      }
    void Submit(void) {EG_Submit(g,cfg,GetPointer(t),GetPointer(s),rt,spb,c,reg,reg_count,r,dec);}
+   void SubmitHook(CEgPreSend *hook) {EG_Submit(g,cfg,GetPointer(t),GetPointer(s),rt,spb,c,reg,reg_count,r,dec,hook);}
    void SubmitWith(SEnRuntime &runtime) {EG_Submit(g,cfg,GetPointer(t),GetPointer(s),runtime,spb,c,reg,reg_count,r,dec);}
    bool Untouched(const int reg0)
      {
@@ -454,6 +455,69 @@ void Scenario_evidence_expiry_during_precheck(void)
    Check(pm.valid_until==0,"a permit without a deadline keeps the old behaviour");
   }
 
+// scripted pre-send hook: records what the world looked like at Reserve
+class CHook : public CEgPreSend
+  {
+public:
+   CEnFakeTransport *tr;
+   CEnFakeStore *st;
+   bool ok;
+   int reserved;
+   int settled;
+   long sends_at;
+   int writes_at;
+   int locks_at;
+   int files_at;
+   ENUM_EN_RESULT last;
+   CHook(void) {tr=NULL; st=NULL; ok=true; reserved=0; settled=0; sends_at=-1; writes_at=-1; locks_at=-1; files_at=-1; last=EN_R_NONE;}
+   virtual bool Reserve(const string signal_id,string &reason)
+     {
+      reserved++;
+      sends_at=tr.sends;
+      writes_at=st.writes;
+      locks_at=st.lock_calls;
+      files_at=st.n_files;
+      reason=(ok ? "" : "INDEX_NOT_SAVED");
+      return(ok);
+     }
+   virtual void Settled(const string signal_id,const SEnResult &res) {settled++; last=res.outcome;}
+  };
+
+void Scenario_pre_send_hook(void)
+  {
+   for(int d=0;d<2;d++)
+     {
+      int dir=(d==0 ? 1 : -1);
+      CGw w;
+      w.Init(dir);
+      CHook h;
+      h.tr=GetPointer(w.t);
+      h.st=GetPointer(w.s);
+      w.SubmitHook(GetPointer(h));
+      Check(w.r.outcome==EN_R_PLACED && h.reserved==1 && h.sends_at==0 && h.writes_at==0 && h.locks_at==0 && h.files_at==0 && h.settled==1 && h.last==EN_R_PLACED && w.t.sends==1,
+            StringFormat("dir %d: the hook runs after the gate and before any lock, intent or send; Settled follows the executor",dir));
+      CGw x;
+      x.Init(dir);
+      CHook hr;
+      hr.tr=GetPointer(x.t);
+      hr.st=GetPointer(x.s);
+      hr.ok=false;
+      x.SubmitHook(GetPointer(hr));
+      bool refused=(x.r.outcome==EN_R_REFUSED && Starts(x.r.reason,"PRE_SEND_RESERVATION_FAILED") && x.t.sends==0 && x.rt.send_calls==0 && x.s.lock_calls==0 && x.s.writes==0 && x.s.n_files==0 && hr.settled==0);
+      hr.ok=true;
+      x.SubmitHook(GetPointer(hr));
+      Check(refused && x.r.outcome==EN_R_PLACED && x.t.sends==1,StringFormat("dir %d: a refused reservation places nothing and does not consume the signal",dir));
+      CGw y;
+      y.Init(dir);
+      y.c.daily_present=false;
+      CHook hb;
+      hb.tr=GetPointer(y.t);
+      hb.st=GetPointer(y.s);
+      y.SubmitHook(GetPointer(hb));
+      Check(y.Untouched(0) && hb.reserved==0 && hb.settled==0,StringFormat("dir %d: a gate block never calls the hook",dir));
+     }
+  }
+
 void OnStart()
   {
    Print("T015 ENTRY GATE TEST: fake transport and fake store only; no file, no terminal read, no order, no trade.");
@@ -466,5 +530,6 @@ void OnStart()
    Scenario_repeat_without_second_send();
    Scenario_blocks_leave_no_trace();
    Scenario_evidence_expiry_during_precheck();
+   Scenario_pre_send_hook();
    PrintFormat("T015 ENTRY GATE TEST finished: %d passed, %d failed",g_pass,g_fail);
   }

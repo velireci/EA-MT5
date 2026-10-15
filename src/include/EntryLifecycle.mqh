@@ -5,7 +5,7 @@
 #ifndef VELO_ENTRY_LIFECYCLE_MQH
 #define VELO_ENTRY_LIFECYCLE_MQH
 
-#include "EntryExecutor.mqh"
+#include "EntryGate.mqh"
 
 #define LC_MAX 32
 #define LC_HEADER "VELO_EO_LIFECYCLE"
@@ -23,6 +23,8 @@ struct SLcState
    string halted;
    string ids[LC_MAX];
    int n;
+   bool lock_owned;             // exclusive ownership of the index (the existing store lock); every index access needs it
+   string lock_key;
   };
 
 void LC_StateInit(SLcState &s,const long login)
@@ -30,7 +32,40 @@ void LC_StateInit(SLcState &s,const long login)
    s.login=login;
    s.halted="";
    s.n=0;
+   s.lock_owned=false;
+   s.lock_key="";
    for(int i=0;i<LC_MAX;i++) s.ids[i]="";
+  }
+
+string LC_LockKey(const long login) {return("VELO_T013_LOCK_INDEX_"+IntegerToString(login));}
+
+bool LC_Acquire(CEnStore *lockstore,const long login,SLcState &s)
+  {
+   string key=LC_LockKey(login);
+   if(!lockstore.Lock(key)) return(false);
+   s.lock_owned=true;
+   s.lock_key=key;
+   return(true);
+  }
+
+// only the owner releases, and only its own key; a refused instance, a forged key or a second release do nothing
+void LC_Release(CEnStore *lockstore,SLcState &s)
+  {
+   if(s.lock_owned && s.lock_key!="")
+     {
+      lockstore.Unlock(s.lock_key);
+      s.lock_owned=false;
+     }
+  }
+
+bool LC_Owned(SLcState &s)
+  {
+   if(!s.lock_owned)
+     {
+      if(s.halted=="") s.halted="LIFECYCLE_LOCK_NOT_OWNED";
+      return(false);
+     }
+   return(true);
   }
 
 string LC_FileName(const long login) {return("VELO_T013_ENTRY_INDEX_"+IntegerToString(login)+".state");}
@@ -109,6 +144,7 @@ bool LC_Save(CEnStore *store,const SLcState &s)
 
 bool LC_Persist(CEnStore *store,SLcState &s,string &notes)
   {
+   if(!LC_Owned(s)) return(false);
    if(LC_Save(store,s)) return(true);
    if(s.halted=="") s.halted="LIFECYCLE_STATE_NOT_SAVED";
    LC_Note(notes,"LIFECYCLE_STATE_NOT_SAVED");
@@ -129,9 +165,10 @@ void LC_Remove(SLcState &s,const int i)
    s.ids[s.n]="";
   }
 
-// called after the executor reached the intent for a signal: the id must be indexed or the layer halts
+// the id must be indexed (saved and read back) BEFORE the executor can send; any failure halts
 bool LC_Register(CEnStore *store,SLcState &s,const string id,string &notes)
   {
+   if(!LC_Owned(s)) return(false);
    string t=id;
    StringTrimLeft(t);
    StringTrimRight(t);
@@ -192,14 +229,27 @@ void LC_Sweep(const SEnConfig &cfg,CEnTransport *tr,CEnStore *store,SLcState &s,
      }
   }
 
-// returns false when the account is unreadable (s.halted is set); a damaged state file is never overwritten
-bool LC_Startup(const SEnConfig &cfg,CEnTransport *tr,CEnStore *store,const bool acknowledge,SLcState &s,string &notes)
+// The instance lock comes first: without it the index is neither read nor written and nothing is sent or cancelled. Returns false when the account is unreadable (nothing acquired).
+// A damaged state file is never overwritten. The lock is kept for every run that continues (halted or not) and released by LC_Release.
+bool LC_Startup(const SEnConfig &cfg,CEnTransport *tr,CEnStore *store,CEnStore *lockstore,const bool acknowledge,SLcState &s,string &notes)
   {
    notes="";
    SEnAccount acct;
    tr.ReadAccount(acct);
    if(!acct.read_ok || acct.login<=0) {LC_StateInit(s,0); s.halted="ACCOUNT_UNREADABLE"; LC_Note(notes,"ACCOUNT_UNREADABLE"); return(false);}
-   int kind=LC_Load(store,acct.login,s);
+   LC_StateInit(s,acct.login);
+   if(!LC_Acquire(lockstore,acct.login,s))
+     {
+      s.halted="LIFECYCLE_INSTANCE_LOCK_NOT_ACQUIRED";
+      LC_Note(notes,s.halted);
+      return(true);
+     }
+   string key=s.lock_key;
+   SLcState loaded;
+   int kind=LC_Load(store,acct.login,loaded);
+   loaded.lock_owned=true;
+   loaded.lock_key=key;
+   s=loaded;
    if(kind==LC_DAMAGED) {LC_Note(notes,s.halted); return(true);}
    string was=s.halted;
    string open_ids[];
@@ -233,6 +283,7 @@ void LC_Tick(const SEnConfig &cfg,CEnTransport *tr,CEnStore *store,SLcState &s,c
   {
    notes="";
    if(s.login<=0) return;
+   if(!s.lock_owned) return;                                // without the instance lock: no index access, no reconcile, no cancel
    string before_halt=s.halted;
    int before_n=s.n;
    string open_ids[];
@@ -269,4 +320,46 @@ void LC_Tick(const SEnConfig &cfg,CEnTransport *tr,CEnStore *store,SLcState &s,c
      }
    if(changed) LC_Persist(store,s,notes);
   }
+
+// the gate's pre-send hook: the index entry is saved and read back BEFORE the executor can create an intent or send
+class CLcGuard : public CEgPreSend
+  {
+public:
+   SLcState st;
+   CEnStore *store;
+   bool is_new;
+   int calls;
+   string notes;
+   CLcGuard(void) {store=NULL; is_new=false; calls=0; notes=""; LC_StateInit(st,0);}
+   void Bind(CEnStore *s) {store=s;}
+   virtual bool Reserve(const string signal_id,string &reason)
+     {
+      calls++;
+      if(store==NULL) {reason="LIFECYCLE_NOT_BOUND"; return(false);}
+      if(!st.lock_owned)
+        {
+         if(st.halted=="") st.halted="LIFECYCLE_LOCK_NOT_OWNED";
+         reason="LIFECYCLE_LOCK_NOT_OWNED";
+         return(false);
+        }
+      if(st.halted!="") {reason="LIFECYCLE_HALTED: "+st.halted; return(false);}
+      bool had=(LC_IndexOf(st,signal_id)>=0);
+      if(!LC_Register(store,st,signal_id,notes)) {reason="INDEX_NOT_SAVED: "+(st.halted!="" ? st.halted : "unknown"); return(false);}
+      is_new=!had;
+      return(true);
+     }
+   // a reservation the executor did not turn into a record (refused before the intent) is released again; a signal with a record stays indexed
+   virtual void Settled(const string signal_id,const SEnResult &res)
+     {
+      if(store==NULL) return;
+      bool record=store.Exists(EN_FileName(st.login,signal_id));
+      int k=LC_IndexOf(st,signal_id);
+      if(!record && is_new && k>=0)
+        {
+         LC_Remove(st,k);
+         LC_Persist(store,st,notes);
+        }
+      is_new=false;
+     }
+  };
 #endif

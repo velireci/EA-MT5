@@ -19,11 +19,40 @@ def file_name(login):
     return 'VELO_T013_ENTRY_INDEX_%d.state' % login
 
 
+def lock_key(login):
+    return 'VELO_T013_LOCK_INDEX_%d' % login
+
+
 @dataclass
 class State:
     login: int = 0
     halted: str = ''
     ids: list = field(default_factory=list)
+    lock_owned: bool = False            # exclusive ownership of the index (the existing lock mechanism); every index access needs it
+    lock_key: str = ''
+
+
+def acquire(lockstore, login, st):
+    key = lock_key(login)
+    if not lockstore.lock(key):
+        return False
+    st.lock_owned = True
+    st.lock_key = key
+    return True
+
+
+def release(lockstore, st):
+    """only the owner releases, and only its own key; a refused instance, a forged key or a second release do nothing"""
+    if st.lock_owned and st.lock_key:
+        lockstore.unlock(st.lock_key)
+        st.lock_owned = False
+
+
+def _owned(st):
+    if not st.lock_owned:
+        st.halted = st.halted or 'LIFECYCLE_LOCK_NOT_OWNED'
+        return False
+    return True
 
 
 def _clean(s):
@@ -85,6 +114,8 @@ def save(store, st):
 
 
 def _persist(store, st, notes):
+    if not _owned(st):
+        return False
     if not save(store, st):
         st.halted = st.halted or 'LIFECYCLE_STATE_NOT_SAVED'
         notes.append('LIFECYCLE_STATE_NOT_SAVED')
@@ -93,7 +124,9 @@ def _persist(store, st, notes):
 
 
 def register(store, st, signal_id, notes):
-    """called after the executor reached the intent for a signal: the id must be indexed or the layer halts"""
+    """the id must be indexed (saved and read back) BEFORE the executor can send; any failure halts"""
+    if not _owned(st):
+        return False
     if not signal_id.strip() or '\n' in signal_id or '\r' in signal_id:
         st.halted = st.halted or 'LIFECYCLE_BAD_SIGNAL_ID'
         return False
@@ -153,13 +186,20 @@ def _sweep(cfg, tr, store, st, notes):
     return open_ids
 
 
-def startup(cfg, tr, store, acknowledge=False):
-    """-> (State, notes). A damaged state file is never overwritten: it halts until the owner removes it."""
+def startup(cfg, tr, store, lockstore, acknowledge=False):
+    """-> (State, notes). The instance lock comes first: without it the index is neither read nor written and nothing is sent or cancelled.
+    A damaged state file is never overwritten: it halts until the owner removes it. The lock is kept for every run that continues (halted or not) and released by release()."""
     notes = []
     acct = tr.read_account()
     if not acct.read_ok or acct.login <= 0:
         return State(0, 'ACCOUNT_UNREADABLE'), ['ACCOUNT_UNREADABLE']
-    kind, st = load(store, acct.login)
+    st = State(acct.login)
+    if not acquire(lockstore, acct.login, st):
+        st.halted = 'LIFECYCLE_INSTANCE_LOCK_NOT_ACQUIRED'
+        return st, [st.halted]
+    kind, loaded = load(store, acct.login)
+    loaded.lock_owned, loaded.lock_key = st.lock_owned, st.lock_key
+    st = loaded
     if kind == 'DAMAGED':
         notes.append(st.halted)
         return st, notes
@@ -194,6 +234,8 @@ def tick(cfg, tr, store, st, due, enabled):
     notes = []
     if not st.login:
         return notes
+    if not st.lock_owned:
+        return notes
     before = (list(st.ids), st.halted)
     open_ids = _sweep(cfg, tr, store, st, notes)
     events = due & enabled
@@ -215,3 +257,36 @@ def tick(cfg, tr, store, st, due, enabled):
     if (list(st.ids), st.halted) != before:
         _persist(store, st, notes)
     return notes
+
+
+class Guard:
+    """the gate's pre-send hook: the index entry is saved and read back BEFORE the executor can create an intent or send"""
+
+    def __init__(self, store, st):
+        self.store, self.st = store, st
+        self.new = False
+        self.calls = 0
+        self.notes = []
+
+    def reserve(self, signal_id):
+        st = self.st
+        self.calls += 1
+        if not st.lock_owned:
+            st.halted = st.halted or 'LIFECYCLE_LOCK_NOT_OWNED'
+            return False, 'LIFECYCLE_LOCK_NOT_OWNED'
+        if st.halted:
+            return False, 'LIFECYCLE_HALTED: ' + st.halted
+        had = signal_id in st.ids
+        if not register(self.store, st, signal_id, self.notes):
+            return False, 'INDEX_NOT_SAVED: ' + (st.halted or 'unknown')
+        self.new = not had
+        return True, ''
+
+    def settled(self, signal_id, res):
+        """a reservation the executor did not turn into a record (refused before the intent) is released again; a signal with a record stays indexed"""
+        st = self.st
+        record = self.store.exists(en.file_name(st.login, signal_id))
+        if not record and self.new and signal_id in st.ids:
+            st.ids.remove(signal_id)
+            _persist(self.store, st, self.notes)
+        self.new = False

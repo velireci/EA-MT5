@@ -162,7 +162,7 @@ public:
       if(n_handled<EO_MAX_HANDLED) {handled[n_handled]=id; n_handled++;}
       else halted="HANDLED_LIST_FULL: restart";
      }
-   void Step(const SEoConfig &c,CEoMarket *mk,const bool feed_ok,const SM4State &st,const SM4Candidate &f[],const SM4Level &broken,const datetime cut,CEnTransport *tr,CEnStore *store,SEoOutcome &out)
+   void Step(const SEoConfig &c,CEoMarket *mk,const bool feed_ok,const SM4State &st,const SM4Candidate &f[],const SM4Level &broken,const datetime cut,CEnTransport *tr,CEnStore *store,SEoOutcome &out,CEgPreSend *pre_send=NULL)
      {
       EO_OutcomeInit(out);
       if(!feed_ok)
@@ -276,10 +276,11 @@ public:
       reg[n_handled]="";
       SEnRuntime rt;
       EN_RuntimeInit(rt);
-      EG_Submit(c.gate,c.exec,tr,store,rt,r2,chk,reg,n_handled,out.res,out.dec);
+      EG_Submit(c.gate,c.exec,tr,store,rt,r2,chk,reg,n_handled,out.res,out.dec,pre_send);
       out.status="EXECUTOR";
       out.reason=out.res.reason;
       if(!out.dec.allow) {out.status="GATE_BLOCKED"; return;}
+      if(StringFind(out.res.reason,"PRE_SEND_RESERVATION_FAILED")==0) {out.status="RESERVATION_FAILED"; return;}      // nothing was placed and the signal is NOT consumed
       if(out.res.outcome==EN_R_PLACED || out.res.outcome==EN_R_FILLED)
         {
          out.request=true;

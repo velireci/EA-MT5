@@ -42,6 +42,8 @@ assert '{Defect(); EO_Set(out,"MARKET_NOT_READY","QUOTE_NOT_READY_OR_STALE")' in
 assert 'chk.snap_digest=digest' in step and 'chk.loss_digest=digest' in step and 'chk.daily_digest=digest' in step, 'plan digest binding'
 assert 'chk.snap_time=now' in step and 'chk.loss_time=now' in step and 'chk.daily_time=now' in step, 'shared instant'
 assert 'EN_RuntimeInit(rt)' in step and step.index('EN_RuntimeInit(rt)') < step.index('EG_Submit('), 'fresh runtime per signal'
+assert 'out.res,out.dec,pre_send);' in step and 'CEgPreSend *pre_send=NULL' in step, 'the pre-send hook is passed to the gate'
+assert 'RESERVATION_FAILED' in step and step.index('GATE_BLOCKED') < step.index('RESERVATION_FAILED') < step.index('out.request=true'), 'a refused reservation is reported and does not consume the signal'
 assert 'EN_R_CANCEL_UNCERTAIN' in step and 'EN_R_RECOVERY' in step and 'EN_R_BLOCKED' in step, 'halt results'
 assert 'EO_FAKE_LABEL' in step and 'out.request=true' in step, 'label'
 assert re.search(r'out\.request=true;\s*out\.label=EO_FAKE_LABEL', step), 'request without label'
@@ -89,7 +91,7 @@ echo "=== O4: the test never includes a real transport or reads the terminal ===
 grep -nE 'EntryTransportReal|ExitTransportReal|OrderSend|SymbolInfo|OrderCalcProfit|TimeCurrent|FileOpen|CopyRates|AccountInfo|DBS_' $TS >/dev/null && { echo "  FAIL the test touches the real side"; FAIL=1; } || echo "  PASS the test uses the fake transport, the fake store and a scripted market only"
 
 echo "=== O5: protected modules are untouched since $BASE ==="
-for p in src/include/EntryTransport.mqh src/include/EntryTransportFake.mqh src/include/EntryExecutor.mqh src/include/EntryGate.mqh \
+for p in src/include/EntryTransport.mqh src/include/EntryTransportFake.mqh src/include/EntryExecutor.mqh \
          src/include/TradePlanning.mqh src/include/BrokerLossCheck.mqh src/include/DailyBridge.mqh src/include/DailyLimits.mqh src/include/DailyPreviewGate.mqh src/include/DailyBalanceStore.mqh \
          src/include/M15Confirmation.mqh src/include/M15Timeline.mqh src/include/H4M15Bridge.mqh src/include/H4TouchContext.mqh src/include/TimeframeWatcher.mqh src/include/NewsSpreadFilters.mqh \
          src/include/SessionPolicy.mqh src/include/SymbolSnapshot.mqh src/include/ExitExecutor.mqh src/include/ExitTickDriver.mqh src/include/ExitStateFile.mqh src/XauUsdTradePreview.mq5 \

@@ -100,13 +100,28 @@ void EG_Decide(const SEgConfig &g,const SSpbResult &spb,const SEgChecks &c,const
    d.permit.valid_until=MathMin(c.snap_time,MathMin(c.loss_time,c.daily_time))+g.max_age;     // never valid beyond the OLDEST evidence
   }
 
-// A block never reaches the executor. `res` is the executor result, or REFUSED "GATE_BLOCKED: ...".
+// Optional hook of the caller (the lifecycle layer): Reserve is called ONLY after the gate allowed and BEFORE the executor, so before any lock, intent or send; false places nothing (the signal is not consumed).
+// Settled is called after the executor returned, whatever it returned.
+class CEgPreSend
+  {
+public:
+   virtual bool Reserve(const string signal_id,string &reason)=0;
+   virtual void Settled(const string signal_id,const SEnResult &res)=0;
+  };
+
+// A block never reaches the executor. `res` is the executor result, or REFUSED "GATE_BLOCKED: ...", or REFUSED "PRE_SEND_RESERVATION_FAILED: ...".
 void EG_Submit(const SEgConfig &g,const SEnConfig &cfg,CEnTransport *tr,CEnStore *store,SEnRuntime &rt,const SSpbResult &spb,const SEgChecks &c,const string &reg_ids[],const int reg_count,
-               SEnResult &res,SEgDecision &d)
+               SEnResult &res,SEgDecision &d,CEgPreSend *pre_send=NULL)
   {
    long now=tr.ServerTime();
    EG_Decide(g,spb,c,reg_ids,reg_count,now,d);
    if(!d.allow) {EN_Res(res,EN_R_REFUSED,"GATE_BLOCKED: "+d.reasons); return;}
+   if(pre_send!=NULL)
+     {
+      string why;
+      if(!pre_send.Reserve(spb.plan.signal_id,why)) {EN_Res(res,EN_R_REFUSED,"PRE_SEND_RESERVATION_FAILED: "+why); return;}
+     }
    EN_Place(cfg,tr,store,rt,spb.plan,d.permit,res);
+   if(pre_send!=NULL) pre_send.Settled(spb.plan.signal_id,res);
   }
 #endif

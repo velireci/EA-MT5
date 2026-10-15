@@ -1,9 +1,10 @@
-// T019 entry-lifecycle test (FAKE transport and FAKE store only): persistent index + halt, startup reconcile, tick (fill / gated cancel), events from facts. Never a send.
-// Mirrors tests/test_lifecycle.py (the scenario names are pinned equal by a Python test). NEVER includes the real transport; no terminal read, no file, no order, no trade.
+// T019 entry-lifecycle test (FAKE transport and FAKE store only): persistent index + halt, index saved BEFORE every send, exclusive ownership of the index (the existing lock), startup reconcile,
+// tick (fill / gated cancel), events from facts. Never a send of its own. Mirrors tests/test_lifecycle.py (the scenario names are pinned equal by a Python test); the gate / orchestrator wiring of the
+// pre-send hook is tested in EntryGateTest and EntryOrchestratorTest. NEVER includes the real transport; no terminal read, no file, no order, no trade.
 // NOT YET COMPILED OR RUN (UNVERIFIED): Codex compiles it, the owner runs it in MT5.
 #property strict
 #property script_show_inputs
-#property version "1.00"
+#property version "1.01"
 #include "../include/EntryLifecycle.mqh"
 #include "../include/EntryTransportFake.mqh"
 int g_pass=0,g_fail=0;
@@ -15,18 +16,71 @@ void Check(const bool ok,const string message)
 #define SIG "SIG-1"
 #define EV_ALL_ENABLED (TP_EV_SESSION_END|TP_EV_NEWS_BLOCK|TP_EV_DAILY_LIMIT)
 
+bool Has(const string text,const string part) {return(StringFind(text,part)>=0);}
+bool Starts(const string text,const string part) {return(StringFind(text,part)==0);}
+
+// counts the accesses to the lifecycle index file
+class CCountingStore : public CEnFakeStore
+  {
+public:
+   int index_reads;
+   int index_writes;
+   CCountingStore(void) {index_reads=0; index_writes=0;}
+   virtual bool Read(const string name,string &text)
+     {
+      if(StringFind(name,"VELO_T013_ENTRY_INDEX_")==0) index_reads++;
+      return(CEnFakeStore::Read(name,text));
+     }
+   virtual bool Write(const string name,const string text)
+     {
+      if(StringFind(name,"VELO_T013_ENTRY_INDEX_")==0) index_writes++;
+      return(CEnFakeStore::Write(name,text));
+     }
+  };
+
+// records what the disk holds at the moment of every send
+class CSpyTransport : public CEnFakeTransport
+  {
+public:
+   CEnFakeStore *store;
+   int sends_seen;
+   bool index_had_id;
+   bool intent_existed;
+   CSpyTransport(void) {store=NULL; sends_seen=0; index_had_id=false; intent_existed=false;}
+   virtual void Send(const SEnRequest &req,SEnSendResult &res)
+     {
+      if(store!=NULL)
+        {
+         index_had_id=Has(store.Get(LC_FileName(account.login)),SIG);
+         intent_existed=store.Exists(EN_FileName(account.login,SIG));
+        }
+      sends_seen++;
+      CEnFakeTransport::Send(req,res);
+     }
+  };
+
+// a restart: the same disk, no lock held
+void CloneDisk(CEnFakeStore &from,CEnFakeStore &to)
+  {
+   to.n_files=from.n_files;
+   for(int i=0;i<from.n_files;i++)
+     {
+      to.names[i]=from.names[i];
+      to.texts[i]=from.texts[i];
+     }
+  }
+
 class CWorld
   {
 public:
-   CEnFakeTransport t;
+   CSpyTransport t;
    CEnFakeStore s;
    SEnConfig cfg;
    STpPlan plan;
    SEnPermit pm;
    SEnRuntime rt;
    SEnResult r;
-   SLcState st;
-   string notes;
+   CLcGuard g;
    void MakePlan(STpPlan &p,const int direction)
      {
       TP_PlanReset(p,SIG,"SET-1",direction);
@@ -47,6 +101,7 @@ public:
       cfg.quote_max_age=30;
       EN_RuntimeInit(rt);
       t.quote.time=t.now;
+      t.store=GetPointer(s);
       MakePlan(plan,direction);
       STpPermit tpm;
       tpm.allow=true;
@@ -54,17 +109,30 @@ public:
       tpm.reason_count=0;
       tpm.registered=false;
       EN_PermitFrom(plan,tpm,t.now,pm);
-      LC_StateInit(st,t.account.login);
-      notes="";
+     }
+   void Own(void)
+     {
+      LC_StateInit(g.st,t.account.login);
+      LC_Acquire(GetPointer(s),t.account.login,g.st);
+      g.Bind(GetPointer(s));
      }
    CWorld(void) {Init(1);}
-   // placed AND indexed
+   // the sequence the gate defines: Reserve (index saved + read back) -> executor -> Settled; false = the reservation failed and nothing was placed
+   bool Seq(void)
+     {
+      string why;
+      if(!g.Reserve(SIG,why)) return(false);
+      EN_Place(cfg,GetPointer(t),GetPointer(s),rt,plan,pm,r);
+      g.Settled(SIG,r);
+      return(true);
+     }
    bool Placed(const int direction)
      {
       Init(direction);
-      EN_Place(cfg,GetPointer(t),GetPointer(s),rt,plan,pm,r);
-      return(r.outcome==EN_R_PLACED && LC_Register(GetPointer(s),st,SIG,notes));
+      Own();
+      return(Seq() && r.outcome==EN_R_PLACED);
      }
+   bool HasRecord(void) {return(s.Exists(EN_FileName(t.account.login,SIG)));}
    string RecState(void)
      {
       SEnRecord rec;
@@ -77,9 +145,6 @@ public:
       return(LC_Decode(s.Get(LC_FileName(t.account.login)),t.account.login,out,why));
      }
   };
-
-bool Has(const string text,const string part) {return(StringFind(text,part)>=0);}
-bool Starts(const string text,const string part) {return(StringFind(text,part)==0);}
 
 void Scenario_index_codec_and_damage(void)
   {
@@ -108,24 +173,31 @@ void Scenario_index_codec_and_damage(void)
    Check(!LC_Decode(LC_Encode(c),5001234,b,why) && why=="LOGIN_MISMATCH","another account's file is refused");
    string body=LC_HEADER+"\n1\nlogin=5\nhalt=\nn=2\nA\n";
    Check(!LC_Decode(body+"CRC="+StringFormat("%08X",ESC_Crc32(body))+"\n",5,b,why) && why=="BAD_COUNT","a count that does not match the ids is refused");
-   Check(LC_FileName(5001234)=="VELO_T013_ENTRY_INDEX_5001234.state","the index file name");
+   Check(LC_FileName(5001234)=="VELO_T013_ENTRY_INDEX_5001234.state" && LC_LockKey(5001234)=="VELO_T013_LOCK_INDEX_5001234","the index file name and the lock key");
   }
 
 void Scenario_register_and_save_failure(void)
   {
    CWorld w;
    string notes="";
+   w.Own();
    w.s.fail_write_at=1;
-   Check(!LC_Register(GetPointer(w.s),w.st,SIG,notes) && Has(w.st.halted,"LIFECYCLE_STATE_NOT_SAVED"),"a failed save halts");
+   Check(!LC_Register(GetPointer(w.s),w.g.st,SIG,notes) && Has(w.g.st.halted,"LIFECYCLE_STATE_NOT_SAVED"),"a failed save halts");
    CWorld x;
+   x.Own();
    x.s.readback_differs_at=1;
-   Check(!LC_Register(GetPointer(x.s),x.st,SIG,notes) && x.st.halted!="","a read-back that differs halts");
+   Check(!LC_Register(GetPointer(x.s),x.g.st,SIG,notes) && x.g.st.halted!="","a read-back that differs halts");
    CWorld y;
-   Check(!LC_Register(GetPointer(y.s),y.st,"bad\nid",notes) && y.st.halted=="LIFECYCLE_BAD_SIGNAL_ID","a signal id with a newline halts");
+   y.Own();
+   Check(!LC_Register(GetPointer(y.s),y.g.st,"bad\nid",notes) && y.g.st.halted=="LIFECYCLE_BAD_SIGNAL_ID","a signal id with a newline halts");
    CWorld z;
+   z.Own();
    bool all=true;
-   for(int i=0;i<LC_MAX;i++) all=all && LC_Register(GetPointer(z.s),z.st,"ID"+IntegerToString(i),notes);
-   Check(all && !LC_Register(GetPointer(z.s),z.st,"ONE-TOO-MANY",notes) && z.st.halted=="LIFECYCLE_INDEX_FULL","a full index halts");
+   for(int i=0;i<LC_MAX;i++) all=all && LC_Register(GetPointer(z.s),z.g.st,"ID"+IntegerToString(i),notes);
+   Check(all && !LC_Register(GetPointer(z.s),z.g.st,"ONE-TOO-MANY",notes) && z.g.st.halted=="LIFECYCLE_INDEX_FULL","a full index halts");
+   CWorld u;
+   LC_StateInit(u.g.st,u.t.account.login);
+   Check(!LC_Register(GetPointer(u.s),u.g.st,SIG,notes) && u.s.writes==0,"without the lock nothing is written");
   }
 
 void Scenario_startup_clean(void)
@@ -133,17 +205,21 @@ void Scenario_startup_clean(void)
    CWorld w;
    string notes;
    SLcState st;
-   LC_Startup(w.cfg,GetPointer(w.t),GetPointer(w.s),false,st,notes);
-   Check(st.halted=="" && st.n==0 && w.s.writes==0,"nothing indexed: nothing is written");
+   LC_Startup(w.cfg,GetPointer(w.t),GetPointer(w.s),GetPointer(w.s),false,st,notes);
+   Check(st.halted=="" && st.n==0 && w.s.writes==0 && st.lock_owned,"nothing indexed: nothing is written, the lock is owned");
    for(int d=0;d<2;d++)
      {
       CWorld v;
       bool placed=v.Placed(d==0 ? 1 : -1);
       v.t.orders[0].state=EN_OS_CANCELED;              // the order ended while the EA was away
-      SLcState s2;
-      LC_Startup(v.cfg,GetPointer(v.t),GetPointer(v.s),false,s2,notes);
+      CEnFakeStore s2;
+      CloneDisk(v.s,s2);
+      SLcState s3;
+      LC_Startup(v.cfg,GetPointer(v.t),GetPointer(s2),GetPointer(s2),false,s3,notes);
+      string why;
       SLcState stored;
-      Check(placed && s2.halted=="" && s2.n==0 && v.Stored(stored) && stored.n==0 && v.t.sends==1,StringFormat("dir %d: an ended order closes its index entry, no halt, no send",d));
+      bool ok=LC_Decode(s2.Get(LC_FileName(v.t.account.login)),v.t.account.login,stored,why);
+      Check(placed && s3.halted=="" && s3.n==0 && ok && stored.n==0 && v.t.sends==1,StringFormat("dir %d: an ended order closes its index entry, no halt, no send",d));
      }
   }
 
@@ -156,20 +232,26 @@ void Scenario_startup_halts_on_unprovable(void)
       bool placed=w.Placed(dir);
       CEnFakeTransport fresh;                               // a restart: the FAKE book is empty, nothing is mapped to a broker fact
       fresh.quote.time=fresh.now;
-      SLcState s2;
+      CEnFakeStore s2;
+      CloneDisk(w.s,s2);
+      SLcState st2;
       string notes;
-      LC_Startup(w.cfg,GetPointer(fresh),GetPointer(w.s),false,s2,notes);
-      Check(placed && Has(s2.halted,"UNRESOLVED_ENTRY_RECORD") && fresh.sends==0 && fresh.cancels==0 && w.RecState()==EN_ST_RECOVERY,StringFormat("dir %d: an unprovable record halts, nothing is sent or cancelled",dir));
+      LC_Startup(w.cfg,GetPointer(fresh),GetPointer(s2),GetPointer(s2),false,st2,notes);
+      Check(placed && Has(st2.halted,"UNRESOLVED_ENTRY_RECORD") && fresh.sends==0 && fresh.cancels==0,StringFormat("dir %d: an unprovable record halts, nothing is sent or cancelled",dir));
       CEnFakeTransport fresh2;
       fresh2.quote.time=fresh2.now;
-      SLcState s3;
-      LC_Startup(w.cfg,GetPointer(fresh2),GetPointer(w.s),false,s3,notes);
-      Check(Has(s3.halted,"UNRESOLVED_ENTRY_RECORD") && s3.n==1,StringFormat("dir %d: the halt survives another restart",dir));
+      CEnFakeStore s3;
+      CloneDisk(s2,s3);
+      SLcState st3;
+      LC_Startup(w.cfg,GetPointer(fresh2),GetPointer(s3),GetPointer(s3),false,st3,notes);
+      Check(Has(st3.halted,"UNRESOLVED_ENTRY_RECORD") && st3.n==1,StringFormat("dir %d: the halt survives another restart",dir));
       CEnFakeTransport fresh3;
       fresh3.quote.time=fresh3.now;
-      SLcState s4;
-      LC_Startup(w.cfg,GetPointer(fresh3),GetPointer(w.s),true,s4,notes);
-      Check(s4.halted=="" && s4.n==0 && s4.login>0 && s4.login==w.t.account.login && s4.n==0,StringFormat("dir %d: an explicit acknowledgement clears the halt and drops the unresolved id",dir));
+      CEnFakeStore s4;
+      CloneDisk(s3,s4);
+      SLcState st4;
+      LC_Startup(w.cfg,GetPointer(fresh3),GetPointer(s4),GetPointer(s4),true,st4,notes);
+      Check(st4.halted=="" && st4.n==0 && st4.login==w.t.account.login,StringFormat("dir %d: an explicit acknowledgement clears the halt and drops the unresolved id",dir));
       CEnFakeTransport fresh4;
       fresh4.quote.time=fresh4.now;
       SEnPermit pm2;
@@ -182,7 +264,7 @@ void Scenario_startup_halts_on_unprovable(void)
       SEnRuntime rt2;
       EN_RuntimeInit(rt2);
       SEnResult again;
-      EN_Place(w.cfg,GetPointer(fresh4),GetPointer(w.s),rt2,w.plan,pm2,again);
+      EN_Place(w.cfg,GetPointer(fresh4),GetPointer(s4),rt2,w.plan,pm2,again);
       Check(again.outcome==EN_R_DUPLICATE && fresh4.sends==0,StringFormat("dir %d: the signal stays consumed",dir));
      }
   }
@@ -191,10 +273,12 @@ void Scenario_startup_keeps_open_pending(void)
   {
    CWorld w;
    bool placed=w.Placed(1);
-   SLcState s2;
+   CEnFakeStore s2;
+   CloneDisk(w.s,s2);
+   SLcState st2;
    string notes;
-   LC_Startup(w.cfg,GetPointer(w.t),GetPointer(w.s),false,s2,notes);
-   Check(placed && s2.halted=="" && s2.n==1 && s2.ids[0]==SIG && w.t.sends==1 && w.t.cancels==0,"the same book: the order is provably still active, kept in the index");
+   LC_Startup(w.cfg,GetPointer(w.t),GetPointer(s2),GetPointer(s2),false,st2,notes);
+   Check(placed && st2.halted=="" && st2.n==1 && st2.ids[0]==SIG && w.t.sends==1 && w.t.cancels==0,"the same book: the order is provably still active, kept in the index");
   }
 
 void Scenario_tick_fill_unmanaged(void)
@@ -206,8 +290,8 @@ void Scenario_tick_fill_unmanaged(void)
       w.t.orders[0].state=EN_OS_FILLED;
       w.t.orders[0].position_id=4242;
       string notes;
-      LC_Tick(w.cfg,GetPointer(w.t),GetPointer(w.s),w.st,0,0,notes);
-      Check(placed && w.st.n==0 && Has(notes,"FILLED_UNMANAGED") && w.st.halted=="" && w.t.sends==1 && w.t.cancels==0 && w.RecState()==EN_ST_FILLED,
+      LC_Tick(w.cfg,GetPointer(w.t),GetPointer(w.s),w.g.st,0,0,notes);
+      Check(placed && w.g.st.n==0 && Has(notes,"FILLED_UNMANAGED") && w.g.st.halted=="" && w.t.sends==1 && w.t.cancels==0 && w.RecState()==EN_ST_FILLED,
             StringFormat("dir %d: a fill is recorded and reported unmanaged; no registration, no cancel, no second send",d));
      }
   }
@@ -219,13 +303,13 @@ void Scenario_cancel_gated_by_enabled_events(void)
       CWorld w;
       bool placed=w.Placed(d==0 ? 1 : -1);
       string notes;
-      LC_Tick(w.cfg,GetPointer(w.t),GetPointer(w.s),w.st,TP_EV_SESSION_END,0,notes);
-      Check(placed && w.t.cancels==0 && w.st.n==1 && Has(notes,"CANCEL_DUE_NOT_ENABLED"),StringFormat("dir %d: a due event that the owner did not enable cancels nothing",d));
-      LC_Tick(w.cfg,GetPointer(w.t),GetPointer(w.s),w.st,TP_EV_SESSION_END,TP_EV_NEWS_BLOCK,notes);
+      LC_Tick(w.cfg,GetPointer(w.t),GetPointer(w.s),w.g.st,TP_EV_SESSION_END,0,notes);
+      Check(placed && w.t.cancels==0 && w.g.st.n==1 && Has(notes,"CANCEL_DUE_NOT_ENABLED"),StringFormat("dir %d: a due event that the owner did not enable cancels nothing",d));
+      LC_Tick(w.cfg,GetPointer(w.t),GetPointer(w.s),w.g.st,TP_EV_SESSION_END,TP_EV_NEWS_BLOCK,notes);
       Check(w.t.cancels==0,StringFormat("dir %d: another enabled event does not enable this one",d));
-      LC_Tick(w.cfg,GetPointer(w.t),GetPointer(w.s),w.st,TP_EV_SESSION_END|TP_EV_NEWS_BLOCK,TP_EV_NEWS_BLOCK,notes);
-      Check(w.t.cancels==1 && w.st.n==0 && w.st.halted=="" && w.RecState()==EN_ST_CANCELLED && Has(notes,"CANCELLED"),StringFormat("dir %d: an enabled due event cancels the proven pending order once",d));
-      LC_Tick(w.cfg,GetPointer(w.t),GetPointer(w.s),w.st,EV_ALL_ENABLED,EV_ALL_ENABLED,notes);
+      LC_Tick(w.cfg,GetPointer(w.t),GetPointer(w.s),w.g.st,TP_EV_SESSION_END|TP_EV_NEWS_BLOCK,TP_EV_NEWS_BLOCK,notes);
+      Check(w.t.cancels==1 && w.g.st.n==0 && w.g.st.halted=="" && w.RecState()==EN_ST_CANCELLED && Has(notes,"CANCELLED"),StringFormat("dir %d: an enabled due event cancels the proven pending order once",d));
+      LC_Tick(w.cfg,GetPointer(w.t),GetPointer(w.s),w.g.st,EV_ALL_ENABLED,EV_ALL_ENABLED,notes);
       Check(w.t.cancels==1 && w.t.sends==1,StringFormat("dir %d: a cancelled order is not cancelled twice",d));
      }
   }
@@ -239,9 +323,9 @@ void Scenario_cancel_uncertain_halts(void)
       bool placed=w.Placed(1);
       w.t.cancel_mode=modes[k];
       string notes;
-      LC_Tick(w.cfg,GetPointer(w.t),GetPointer(w.s),w.st,TP_EV_DAILY_LIMIT,TP_EV_DAILY_LIMIT,notes);
-      bool halted=Has(w.st.halted,"CANCEL_NOT_CONFIRMED");
-      LC_Tick(w.cfg,GetPointer(w.t),GetPointer(w.s),w.st,TP_EV_DAILY_LIMIT,TP_EV_DAILY_LIMIT,notes);
+      LC_Tick(w.cfg,GetPointer(w.t),GetPointer(w.s),w.g.st,TP_EV_DAILY_LIMIT,TP_EV_DAILY_LIMIT,notes);
+      bool halted=Has(w.g.st.halted,"CANCEL_NOT_CONFIRMED");
+      LC_Tick(w.cfg,GetPointer(w.t),GetPointer(w.s),w.g.st,TP_EV_DAILY_LIMIT,TP_EV_DAILY_LIMIT,notes);
       SLcState stored;
       Check(placed && halted && w.t.cancels<=1 && w.t.sends==1 && w.Stored(stored) && Has(stored.halted,"CANCEL_NOT_CONFIRMED"),
             StringFormat("cancel mode %d: not confirmed halts, persists, no automatic second cancellation",modes[k]));
@@ -265,17 +349,244 @@ void Scenario_damaged_state_never_overwritten(void)
    string name=LC_FileName(w.t.account.login);
    string damaged=w.s.Get(name);
    StringReplace(damaged,SIG,"SIG-X");
-   w.s.Put(name,damaged);
+   CEnFakeStore s2;
+   CloneDisk(w.s,s2);
+   s2.Put(name,damaged);
    CEnFakeTransport fresh;
    fresh.quote.time=fresh.now;
-   SLcState s2;
+   SLcState st2;
    string notes;
-   LC_Startup(w.cfg,GetPointer(fresh),GetPointer(w.s),true,s2,notes);
-   Check(placed && Has(s2.halted,"LIFECYCLE_STATE_DAMAGED") && w.s.Get(name)==damaged && fresh.sends==0 && fresh.cancels==0,"a damaged file halts and is never repaired or overwritten, even with an acknowledgement");
-   w.s.unreadable=name;
-   SLcState s3;
-   LC_Startup(w.cfg,GetPointer(fresh),GetPointer(w.s),false,s3,notes);
-   Check(Has(s3.halted,"LIFECYCLE_STATE_UNREADABLE"),"an unreadable file halts");
+   LC_Startup(w.cfg,GetPointer(fresh),GetPointer(s2),GetPointer(s2),true,st2,notes);
+   Check(placed && Has(st2.halted,"LIFECYCLE_STATE_DAMAGED") && s2.Get(name)==damaged && fresh.sends==0 && fresh.cancels==0,"a damaged file halts and is never repaired or overwritten, even with an acknowledgement");
+   CEnFakeStore s3;
+   CloneDisk(s2,s3);
+   s3.unreadable=name;
+   SLcState st3;
+   LC_Startup(w.cfg,GetPointer(fresh),GetPointer(s3),GetPointer(s3),false,st3,notes);
+   Check(Has(st3.halted,"LIFECYCLE_STATE_UNREADABLE"),"an unreadable file halts");
+  }
+
+// ----------------------------------------------------------------------------------------------------- review findings: index before send, exclusive ownership
+
+void Scenario_index_saved_before_send(void)
+  {
+   for(int d=0;d<2;d++)
+     {
+      CWorld w;
+      w.Init(d==0 ? 1 : -1);
+      w.Own();
+      bool ok=w.Seq();
+      SLcState stored;
+      Check(ok && w.r.outcome==EN_R_PLACED && w.t.sends_seen==1 && w.t.index_had_id && w.t.intent_existed && w.Stored(stored) && stored.n==1 && stored.ids[0]==SIG && w.g.st.halted=="",
+            StringFormat("dir %d: at the send the index holds the signal (saved, read back) and the intent exists",d));
+     }
+   CWorld r;
+   r.Init(1);
+   r.Own();
+   r.t.quote.time=r.t.now-1000;                              // the executor's own market check refuses: no intent
+   bool ok=r.Seq();
+   SLcState stored;
+   Check(ok && r.r.outcome==EN_R_REFUSED && r.t.sends==0 && !r.HasRecord() && r.Stored(stored) && stored.n==0 && r.g.st.halted=="","a refusal before the intent releases the reservation: no record, empty index, no halt");
+  }
+
+void Scenario_no_send_when_index_unusable(void)
+  {
+   for(int d=0;d<2;d++)
+     {
+      for(int k=0;k<5;k++)
+        {
+         CWorld w;
+         w.Init(d==0 ? 1 : -1);
+         w.Own();
+         string notes;
+         if(k==0) w.s.fail_write_at=1;
+         if(k==1) w.s.readback_differs_at=1;
+         if(k==2)
+           {
+            for(int i=0;i<LC_MAX;i++) LC_Register(GetPointer(w.s),w.g.st,"OTHER-"+IntegerToString(i),notes);
+            w.s.writes=0;
+           }
+         if(k==3) w.g.st.halted="LIFECYCLE_STATE_DAMAGED: CRC_MISMATCH";
+         if(k==4) w.g.st.lock_owned=false;
+         int locks0=w.s.lock_calls;
+         bool ok=w.Seq();
+         Check(!ok && w.t.sends==0 && !w.HasRecord() && w.s.lock_calls==locks0,StringFormat("dir %d case %d: reservation fails, zero sends, no intent, no per-signal lock",d,k));
+        }
+     }
+  }
+
+void Scenario_crash_windows_restart_halts(void)
+  {
+   for(int d=0;d<2;d++)
+     {
+      int dir=(d==0 ? 1 : -1);
+      // (a) the index is saved, the process dies before the intent
+      CWorld a;
+      a.Init(dir);
+      a.Own();
+      string why;
+      bool reserved=a.g.Reserve(SIG,why);
+      CEnFakeTransport tr;
+      tr.quote.time=tr.now;
+      CEnFakeStore s1;
+      CloneDisk(a.s,s1);
+      SLcState st1;
+      string notes;
+      LC_Startup(a.cfg,GetPointer(tr),GetPointer(s1),GetPointer(s1),false,st1,notes);
+      Check(reserved && Has(st1.halted,"UNRESOLVED_ENTRY_RECORD") && tr.sends==0 && tr.cancels==0 && st1.n==1,StringFormat("dir %d (a): a reserved signal without a record halts the restart",dir));
+      // (b) the intent is saved, the pre-check refuses and its state cannot be saved: the record stays INTENT, zero sends
+      CWorld b;
+      b.Init(dir);
+      b.Own();
+      b.t.precheck_ok=false;
+      b.s.fail_write_at=3;                                  // 1 = index, 2 = intent, 3 = the state after the refusal
+      bool seq=b.Seq();
+      CEnFakeTransport tr2;
+      tr2.quote.time=tr2.now;
+      CEnFakeStore s2;
+      CloneDisk(b.s,s2);
+      SLcState st2;
+      LC_Startup(b.cfg,GetPointer(tr2),GetPointer(s2),GetPointer(s2),false,st2,notes);
+      Check(seq && b.t.sends==0 && b.RecState()==EN_ST_INTENT && Has(st2.halted,"UNRESOLVED_ENTRY_RECORD") && tr2.sends==0 && st2.n==1,StringFormat("dir %d (b): intent on disk, no send: the restart halts",dir));
+      // (c) the send happened, the outcome could not be saved
+      CWorld c;
+      c.Init(dir);
+      c.Own();
+      c.s.fail_write_at=3;
+      bool seq3=c.Seq();
+      SLcState stored;
+      bool indexed=c.Stored(stored) && stored.n==1 && stored.ids[0]==SIG;
+      CEnFakeTransport tr3;
+      tr3.quote.time=tr3.now;
+      CEnFakeStore s3;
+      CloneDisk(c.s,s3);
+      SLcState st3;
+      LC_Startup(c.cfg,GetPointer(tr3),GetPointer(s3),GetPointer(s3),false,st3,notes);
+      Check(seq3 && c.t.sends==1 && indexed && Has(st3.halted,"UNRESOLVED_ENTRY_RECORD") && tr3.sends==0 && tr3.cancels==0,StringFormat("dir %d (c): sent, index saved before, empty book: the restart halts without a send",dir));
+      CEnFakeStore s4;
+      CloneDisk(c.s,s4);
+      SLcState st4;
+      LC_Startup(c.cfg,GetPointer(c.t),GetPointer(s4),GetPointer(s4),false,st4,notes);
+      Check(c.t.sends==1 && st4.n==1,StringFormat("dir %d (c): the book still holds the order: the existing recovery links it, a restart never sends",dir));
+     }
+  }
+
+void Scenario_two_instances_no_lost_update(void)
+  {
+   CWorld w;
+   w.Init(1);
+   CCountingStore store;
+   long login=w.t.account.login;
+   SLcState a;
+   LC_StateInit(a,login);
+   bool got=LC_Acquire(GetPointer(store),login,a);
+   CLcGuard ga;
+   ga.Bind(GetPointer(store));
+   ga.st=a;
+   string why;
+   bool ra=ga.Reserve("SIG-A",why);
+   int reads=store.index_reads,writes=store.index_writes,files=store.n_files;
+   string snapshot=store.Get(LC_FileName(login));
+   CEnFakeTransport trb;
+   SLcState b;
+   string notes;
+   LC_Startup(w.cfg,GetPointer(trb),GetPointer(store),GetPointer(store),false,b,notes);
+   Check(got && ra && b.halted=="LIFECYCLE_INSTANCE_LOCK_NOT_ACQUIRED" && !b.lock_owned,"the second instance does not get the lock");
+   CLcGuard gb;
+   gb.Bind(GetPointer(store));
+   gb.st=b;
+   bool rb=gb.Reserve("SIG-B",why);
+   bool regb=LC_Register(GetPointer(store),b,"SIG-B",notes);
+   string tick_notes;
+   LC_Tick(w.cfg,GetPointer(trb),GetPointer(store),b,EV_ALL_ENABLED,EV_ALL_ENABLED,tick_notes);
+   LC_Halt(GetPointer(store),b,"x",notes);
+   Check(!rb && !regb && trb.sends==0 && trb.cancels==0 && store.index_reads==reads && store.index_writes==writes && store.n_files==files && store.Get(LC_FileName(login))==snapshot,
+         "the refused instance neither reads nor writes the index, sends nothing, cancels nothing");
+   bool a2=LC_Register(GetPointer(store),ga.st,"SIG-A2",notes);
+   SLcState stored;
+   string d1;
+   LC_Decode(store.Get(LC_FileName(login)),login,stored,d1);
+   Check(a2 && stored.n==2 && stored.ids[0]=="SIG-A" && stored.ids[1]=="SIG-A2","the owner keeps working and its update is on disk");
+   LC_Release(GetPointer(store),ga.st);
+   CEnFakeTransport trc;
+   SLcState c;
+   LC_Startup(w.cfg,GetPointer(trc),GetPointer(store),GetPointer(store),false,c,notes);
+   bool regc=LC_Register(GetPointer(store),c,"SIG-C",notes);
+   SLcState fin;
+   LC_Decode(store.Get(LC_FileName(login)),login,fin,d1);
+   Check(c.lock_owned && regc && fin.n>=3 && LC_IndexOf(fin,"SIG-A")>=0 && LC_IndexOf(fin,"SIG-A2")>=0 && LC_IndexOf(fin,"SIG-C")>=0,"after the release the next instance loads both ids and adds its own: no update is lost");
+  }
+
+void Scenario_refused_instance_and_wrong_release(void)
+  {
+   CWorld w;
+   w.Init(1);
+   CEnFakeStore store;
+   long login=w.t.account.login;
+   SLcState a;
+   LC_StateInit(a,login);
+   bool got=LC_Acquire(GetPointer(store),login,a);
+   string key=LC_LockKey(login);
+   SLcState b;
+   LC_StateInit(b,login);
+   bool refused=!LC_Acquire(GetPointer(store),login,b);
+   int unlocks=store.unlock_calls;
+   LC_Release(GetPointer(store),b);
+   LC_Release(GetPointer(store),b);
+   SLcState forged;
+   LC_StateInit(forged,login);
+   forged.lock_key=key;                                     // a key without ownership
+   LC_Release(GetPointer(store),forged);
+   Check(got && refused && !b.lock_owned && store.unlock_calls==unlocks && store.n_held==1 && store.held[0]==key,"a refused instance and a forged key release nothing: the owner's lock is untouched");
+   string notes;
+   Check(LC_Register(GetPointer(store),a,SIG,notes),"the owner still works");
+   LC_Release(GetPointer(store),a);
+   Check(store.unlock_calls==unlocks+1 && store.n_held==0 && !a.lock_owned,"the owner releases once");
+   LC_Release(GetPointer(store),a);
+   Check(store.unlock_calls==unlocks+1,"a second release by the same owner is a no-op");
+   Check(!LC_Register(GetPointer(store),a,"AFTER-RELEASE",notes),"no index access after the release");
+   Check(LC_Acquire(GetPointer(store),login,b),"after the owner released, another instance can take the lock");
+  }
+
+void Scenario_release_only_by_owner_on_failure_paths(void)
+  {
+   CWorld w0;
+   bool placed=w0.Placed(1);
+   long login=w0.t.account.login;
+   string name=LC_FileName(login);
+   string damaged=w0.s.Get(name);
+   StringReplace(damaged,SIG,"SIG-X");
+   CEnFakeStore s1;
+   CloneDisk(w0.s,s1);
+   s1.Put(name,damaged);
+   CEnFakeTransport tr;
+   tr.quote.time=tr.now;
+   SLcState st;
+   string notes;
+   LC_Startup(w0.cfg,GetPointer(tr),GetPointer(s1),GetPointer(s1),false,st,notes);
+   Check(placed && Has(st.halted,"LIFECYCLE_STATE_DAMAGED") && st.lock_owned && s1.n_held==1 && s1.held[0]==LC_LockKey(login),"a damaged index: the instance keeps running halted and still owns the lock");
+   LC_Release(GetPointer(s1),st);
+   Check(s1.n_held==0 && !st.lock_owned,"the owner releases it itself");
+   CWorld w2;
+   w2.t.account.read_ok=false;
+   SLcState st2;
+   LC_Startup(w2.cfg,GetPointer(w2.t),GetPointer(w2.s),GetPointer(w2.s),false,st2,notes);
+   Check(st2.halted=="ACCOUNT_UNREADABLE" && !st2.lock_owned && w2.s.lock_calls==0 && w2.s.unlock_calls==0,"an unreadable account: nothing acquired, nothing released");
+   CWorld w3;
+   w3.Init(1);
+   w3.Own();
+   w3.s.fail_write_at=1;
+   string why;
+   bool res=w3.g.Reserve(SIG,why);
+   Check(!res && w3.g.st.lock_owned && w3.s.n_held==1 && w3.s.unlock_calls==0,"a failed reservation keeps the ownership: the owner releases, not the failure path");
+   CWorld w4;
+   w4.Init(1);
+   SLcState other;
+   LC_StateInit(other,w4.t.account.login);
+   LC_Acquire(GetPointer(w4.s),w4.t.account.login,other);
+   SLcState st4;
+   LC_Startup(w4.cfg,GetPointer(w4.t),GetPointer(w4.s),GetPointer(w4.s),false,st4,notes);
+   Check(!st4.lock_owned && w4.s.unlock_calls==0 && w4.s.n_held==1,"a refused start releases nothing of the other instance");
   }
 
 void OnStart()
@@ -291,5 +602,11 @@ void OnStart()
    Scenario_cancel_uncertain_halts();
    Scenario_due_events_from_facts();
    Scenario_damaged_state_never_overwritten();
+   Scenario_index_saved_before_send();
+   Scenario_no_send_when_index_unusable();
+   Scenario_crash_windows_restart_halts();
+   Scenario_two_instances_no_lost_update();
+   Scenario_refused_instance_and_wrong_release();
+   Scenario_release_only_by_owner_on_failure_paths();
    PrintFormat("T019 ENTRY LIFECYCLE TEST finished: %d passed, %d failed",g_pass,g_fail);
   }

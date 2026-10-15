@@ -43,7 +43,12 @@ assert 'd.permit.valid_until=MathMin(c.snap_time,MathMin(c.loss_time,c.daily_tim
 assert dec.index('EN_PermitFrom(') < dec.index('d.permit.valid_until=')
 sub = t[t.index('void EG_Submit('):]
 assert sub.index('EG_Decide(') < sub.index('if(!d.allow)') < sub.index('EN_Place(')
-assert 'return;' in sub[sub.index('if(!d.allow)'):sub.index('EN_Place(')], 'executor reached after a block'
+assert 'if(!d.allow) {EN_Res(res,EN_R_REFUSED,"GATE_BLOCKED: "+d.reasons); return;}' in sub, 'executor reached after a block'
+# the optional pre-send hook: only after the gate allowed, before the executor, and a refusal places nothing; Settled after the executor
+assert 'CEgPreSend *pre_send=NULL' in sub and 'class CEgPreSend' in t, 'hook'
+assert sub.index('if(!d.allow)') < sub.index('pre_send.Reserve(') < sub.index('EN_Place(') < sub.index('pre_send.Settled('), 'hook order'
+assert 'PRE_SEND_RESERVATION_FAILED' in sub and 'return;' in sub[sub.index('pre_send.Reserve('):sub.index('EN_Place(')], 'a refused reservation must stop before the executor'
+assert sub.count('pre_send.Reserve(') == 1 and sub.count('pre_send.Settled(') == 1, 'hook call sites'
 assert 'ServerTime()' in sub
 inc = re.findall(r'#include "([^"]+)"', t)
 assert sorted(inc) == ['BrokerLossCheck.mqh', 'DailyBridge.mqh', 'EntryExecutor.mqh', 'SetupPlanBridge.mqh'], inc
@@ -87,6 +92,11 @@ cp $HD "$NEG/H.mqh"; sed -i '/d.permit.valid_until=MathMin/d' "$NEG/H.mqh"
 expect_assert "$NEG/g2.py" "$NEG/H.mqh" "a permit without the deadline of the oldest evidence" "permit deadline is not the oldest evidence"
 cp $HD "$NEG/I.mqh"; sed -i 's/d.permit.valid_until=MathMin(c.snap_time,MathMin(c.loss_time,c.daily_time))+g.max_age;/d.permit.valid_until=now+g.max_age;/' "$NEG/I.mqh"
 expect_assert "$NEG/g2.py" "$NEG/I.mqh" "a deadline counted from the decision time" "permit deadline is not the oldest evidence"
+
+cp $HD "$NEG/J.mqh"; sed -i 's/      if(!pre_send.Reserve(spb.plan.signal_id,why)) {EN_Res(res,EN_R_REFUSED,"PRE_SEND_RESERVATION_FAILED: "+why); return;}/      pre_send.Reserve(spb.plan.signal_id,why);/' "$NEG/J.mqh"
+expect_assert "$NEG/g2.py" "$NEG/J.mqh" "a refused reservation that still reaches the executor" "refused reservation must stop"
+cp $HD "$NEG/K.mqh"; sed -i 's/   EN_Place(cfg,tr,store,rt,spb.plan,d.permit,res);/   EN_Place(cfg,tr,store,rt,spb.plan,d.permit,res);\n   store.Write("x","y");/; s/   if(pre_send!=NULL) pre_send.Settled(spb.plan.signal_id,res);//' "$NEG/K.mqh"
+expect_assert "$NEG/g2.py" "$NEG/K.mqh" "a hook that is never settled" "store.Write\|hook call sites"
 
 [ $FAIL -eq 0 ] && echo "ENTRY GATE STATIC CHECKS: ALL PASS (static only; MetaEditor compile and MT5 run UNVERIFIED)" || echo "ENTRY GATE STATIC CHECKS: FAILURES"
 exit $FAIL

@@ -109,10 +109,18 @@ def decide(gcfg, spb, checks, now):
     return d
 
 
-def submit(gcfg, cfg, tr, store, rt, spb, checks):
-    """-> (executor result, decision). A block never reaches the executor."""
+def submit(gcfg, cfg, tr, store, rt, spb, checks, pre_send=None):
+    """-> (executor result, decision). A block never reaches the executor. `pre_send` (optional) is called ONLY after the gate allowed and BEFORE the executor, so before any intent, lock or send:
+    reserve(signal_id) -> (ok, reason); a refusal places nothing. settled(signal_id, result) is called after the executor returned."""
     now = tr.server_time()
     dec = decide(gcfg, spb, checks, now)
     if not dec.allow:
         return en.Result(en.R_REFUSED, 'GATE_BLOCKED: ' + ' | '.join(dec.reasons)), dec
-    return en.place(cfg, tr, store, rt, entry_plan(spb.plan), dec.permit), dec
+    if pre_send is not None:
+        ok, why = pre_send.reserve(spb.plan.signal_id)
+        if not ok:
+            return en.Result(en.R_REFUSED, 'PRE_SEND_RESERVATION_FAILED: ' + why), dec
+    res = en.place(cfg, tr, store, rt, entry_plan(spb.plan), dec.permit)
+    if pre_send is not None:
+        pre_send.settled(spb.plan.signal_id, res)
+    return res, dec

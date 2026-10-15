@@ -86,8 +86,8 @@ class World:
                              max_positions=2, max_trades=3, risk_cap=1000.0, gate=eg.GateConfig(max_age=60),
                              exec=en.Config(enabled=True, ea_magic=777, symbol='XAUUSD', filling=en.FILL_RETURN, expiry_mode=en.EXP_GTC, permit_max_age=60, quote_max_age=30))
 
-    def step(self, ob, lvl, feed_ok=True, orch=None):
-        return (orch or self.o).step(self.cfg, self.mk, feed_ok, ob, lvl, ob.last_asof if ob is not None else 0, self.tr, self.store)
+    def step(self, ob, lvl, feed_ok=True, orch=None, pre_send=None):
+        return (orch or self.o).step(self.cfg, self.mk, feed_ok, ob, lvl, ob.last_asof if ob is not None else 0, self.tr, self.store, pre_send)
 
     def untouched(self, tc):
         tc.assertEqual((self.tr.sends, self.store.lock_calls, self.store.writes, len(self.store.files)), (0, 0, 0, 0))
@@ -289,7 +289,50 @@ class Blocks(unittest.TestCase):
 
 SCENARIOS = ['buy_to_fake_request', 'sell_to_fake_request', 'replay_baseline_no_signal', 'restart_no_double', 'defect_rebases', 'context_change_rebases', 'unset_inputs_block',
              'market_missing_blocks', 'gate_blocks_no_request', 'probe_uses_effective_tick', 'halt_after_uncertainty',
-             'market_recovery_rebases', 'context_fields_rebase', 'probe_independent_of_property']
+             'market_recovery_rebases', 'context_fields_rebase', 'probe_independent_of_property', 'reservation_before_every_send']
+
+
+class Reservation(unittest.TestCase):
+    """T019 review: the pre-send hook of the gate is wired through the orchestrator; a refusal places nothing and the signal is retried at the next build"""
+
+    class Hook:
+        def __init__(self, w, ok=True):
+            self.w, self.ok, self.calls, self.at, self.settled_n = w, ok, 0, None, 0
+
+        def reserve(self, signal_id):
+            self.calls += 1
+            self.at = (self.w.tr.sends, self.w.store.writes, self.w.store.lock_calls, len(self.w.store.files))
+            return self.ok, '' if self.ok else 'INDEX_NOT_SAVED'
+
+        def settled(self, signal_id, res):
+            self.settled_n += 1
+
+    def test_a_refused_reservation_places_nothing_and_the_signal_is_retried(self):
+        for d in (1, -1):
+            w = World(d)
+            h = self.Hook(w, ok=False)
+            o1, l1 = observer_n(d, 2)
+            w.step(o1, l1, pre_send=h)
+            o2, l2 = observer_n(d, 3)
+            out = w.step(o2, l2, pre_send=h)
+            self.assertEqual((out.status, out.request, h.calls, h.at), ('RESERVATION_FAILED', False, 1, (0, 0, 0, 0)))
+            w.untouched(self)
+            self.assertNotIn(out.spb.signal_id, w.o.handled)
+            h.ok = True
+            out2 = w.step(o2, l2, pre_send=h)
+            self.assertEqual((out2.request, w.tr.sends, h.settled_n), (True, 1, 1))
+
+    def test_a_gate_block_never_reaches_the_hook(self):
+        for d in (1, -1):
+            w = World(d)
+            w.mk.session = tp.SESSION_CLOSED
+            h = self.Hook(w)
+            o1, l1 = observer_n(d, 2)
+            w.step(o1, l1, pre_send=h)
+            o2, l2 = observer_n(d, 3)
+            out = w.step(o2, l2, pre_send=h)
+            self.assertEqual((out.status, h.calls, h.settled_n), ('GATE_BLOCKED', 0, 0))
+            w.untouched(self)
 
 
 class ReviewRegressions(unittest.TestCase):

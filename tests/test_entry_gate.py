@@ -49,8 +49,8 @@ class World:
                          calc_ok=True, profit=-risk, tolerance=0.01, risk_budget=100.0, loss_time=now, loss_digest=dg,
                          daily_present=True, daily=br.Result(entry_allowed=True, primary='', dl_called=True), daily_time=now, daily_digest=dg)
 
-    def submit(self, rt=None):
-        return eg.submit(self.gcfg, self.cfg, self.tr, self.store, rt or self.rt, self.spb, self.checks)
+    def submit(self, rt=None, pre_send=None):
+        return eg.submit(self.gcfg, self.cfg, self.tr, self.store, rt or self.rt, self.spb, self.checks, pre_send)
 
     def rec(self):
         ok, text = self.store.read(en.file_name(self.tr.account.login, self.spb.plan.signal_id))
@@ -313,7 +313,54 @@ class EvidenceExpiry(unittest.TestCase):
         self.assertEqual(en.place(w.cfg, w.tr, w.store, w.rt, eg.entry_plan(w.spb.plan), pm).final, en.R_PLACED)
 
 
-SCENARIOS = ['allow_all', 'every_block', 'plan_not_ready', 'daily_not_bypassed', 'freshness_and_binding', 'permit_for_another_or_stale_plan', 'repeat_without_second_send', 'blocks_leave_no_trace', 'evidence_expiry_during_precheck']
+class PreSendHook(unittest.TestCase):
+    """T019 review: the caller's hook runs ONLY after the gate allowed and BEFORE the executor (before any lock, intent or send); a refusal places nothing and consumes nothing"""
+
+    class Hook:
+        def __init__(self, w, ok=True):
+            self.w, self.ok, self.reserved, self.settled_with = w, ok, [], []
+
+        def reserve(self, signal_id):
+            self.reserved.append((signal_id, self.w.tr.sends, self.w.store.writes, self.w.store.lock_calls, len(self.w.store.files)))
+            return (self.ok, '' if self.ok else 'INDEX_NOT_SAVED')
+
+        def settled(self, signal_id, res):
+            self.settled_with.append((signal_id, res.final))
+
+    def test_the_hook_runs_after_the_gate_and_before_any_lock_intent_or_send(self):
+        for d in (1, -1):
+            w = World(d)
+            h = self.Hook(w)
+            res, dec = w.submit(pre_send=h)
+            self.assertEqual(res.final, en.R_PLACED)
+            self.assertEqual(h.reserved, [(w.spb.plan.signal_id, 0, 0, 0, 0)])
+            self.assertEqual(h.settled_with, [(w.spb.plan.signal_id, en.R_PLACED)])
+            self.assertEqual(w.tr.sends, 1)
+
+    def test_a_refusal_places_nothing_and_consumes_nothing(self):
+        for d in (1, -1):
+            w = World(d)
+            h = self.Hook(w, ok=False)
+            res, dec = w.submit(pre_send=h)
+            self.assertEqual(res.final, en.R_REFUSED)
+            self.assertTrue(res.reason.startswith('PRE_SEND_RESERVATION_FAILED'), res.reason)
+            self.assertEqual((w.tr.sends, w.rt.send_calls, w.store.lock_calls, w.store.writes, len(w.store.files)), (0, 0, 0, 0, 0))
+            self.assertEqual(h.settled_with, [])
+            h.ok = True
+            res2, _ = w.submit(pre_send=h)
+            self.assertEqual((res2.final, w.tr.sends), (en.R_PLACED, 1), 'the signal was not consumed by the refused reservation')
+
+    def test_a_gate_block_never_calls_the_hook(self):
+        for d in (1, -1):
+            w = World(d)
+            w.checks.daily_present = False
+            h = self.Hook(w)
+            res, dec = w.submit(pre_send=h)
+            w.assert_nothing_happened(self, res)
+            self.assertEqual((h.reserved, h.settled_with), ([], []))
+
+
+SCENARIOS = ['allow_all', 'every_block', 'plan_not_ready', 'daily_not_bypassed', 'freshness_and_binding', 'permit_for_another_or_stale_plan', 'repeat_without_second_send', 'blocks_leave_no_trace', 'evidence_expiry_during_precheck', 'pre_send_hook']
 
 
 class Sources(unittest.TestCase):

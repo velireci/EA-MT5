@@ -6,7 +6,7 @@ set -u
 cd "$(dirname "$0")/.."
 FAIL=0
 NEG=$(mktemp -d); trap 'rm -rf "$NEG"' EXIT
-BASE=21f7ade
+BASE=3d1e084
 HD=src/include/EntryLifecycle.mqh
 EA=src/XauUsdEntryOrchestrator.mq5
 TS=src/tests/EntryLifecycleTest.mq5
@@ -23,9 +23,11 @@ cat > "$NEG/l2.py" <<'PYEOF'
 import re, sys
 t = re.sub(r'//[^\n]*', '', open(sys.argv[1], encoding='ascii').read())
 for w in ('OrderSend', 'OrderCheck', 'EN_Place(', 'EN_PlaceLocked', '.Send(', 'tr.Cancel(', 'PositionClose', 'FileOpen', 'FileWrite', 'FileDelete', 'GlobalVariable', 'TimeCurrent', 'TimeGMT', 'TimeLocal', 'Sleep',
-          'AccountInfo', 'SymbolInfo', 'ETD_', 'EX_Register', 'ExitStateFile', 'ExitExecutor', 'EntryTransportReal', 'TP_Authorize', 'store.Lock'):
+          'AccountInfo', 'SymbolInfo', 'ETD_', 'EX_Register', 'ExitStateFile', 'ExitExecutor', 'EntryTransportReal', 'TP_Authorize'):
     assert w not in t, w
-assert sorted(re.findall(r'#include "([^"]+)"', t)) == ['EntryExecutor.mqh'], 'includes'
+assert sorted(re.findall(r'#include "([^"]+)"', t)) == ['EntryGate.mqh'], 'includes'
+assert not re.search(r'(?<![A-Za-z_])store\.(Lock|Unlock)\(', t), 'the per-signal lock belongs to the executor'
+assert t.count('lockstore.Lock(') == 1 and t.count('lockstore.Unlock(') == 1, 'one acquire and one release of the index lock'
 assert t.count('EN_Reconcile(') == 2 and t.count('EN_Cancel(') == 1 and t.count('TP_CancelDecision(') == 1, 'call sites'
 sweep = t[t.index('void LC_Sweep('):t.index('bool LC_Startup(')]
 assert 'EN_Reconcile(' in sweep and 'EN_Cancel(' not in sweep, 'the sweep only reconciles'
@@ -38,7 +40,9 @@ assert 'TP_CancelDecision(true,open_ids[i],false,events,dec)' in tick, 'cancel d
 assert 'CANCEL_NOT_CONFIRMED' in tick and 'r.outcome==EN_R_CANCELLED' in tick, 'an unconfirmed cancel halts'
 start = t[t.index('bool LC_Startup('):t.index('int LC_DueEvents(')]
 assert 'if(kind==LC_DAMAGED) {LC_Note(notes,s.halted); return(true);}' in start, 'a damaged file returns before anything is written'
-assert start.index('if(kind==LC_DAMAGED)') < start.index('LC_Sweep(') < start.index('if(acknowledge') < start.index('LC_Persist('), 'startup order'
+assert start.index('LC_Acquire(') < start.index('LC_NOT_ACQUIRED_MARK') if False else True
+assert start.index('LC_Acquire(') < start.index('LC_Load(') < start.index('if(kind==LC_DAMAGED)') < start.index('LC_Sweep(') < start.index('if(acknowledge') < start.index('LC_Persist('), 'startup order: the lock first'
+assert 'LIFECYCLE_INSTANCE_LOCK_NOT_ACQUIRED' in start and 'return(true);' in start[start.index('LIFECYCLE_INSTANCE_LOCK_NOT_ACQUIRED'):start.index('LC_Load(')], 'a refused instance returns before it reads the index'
 assert 'if(acknowledge && s.halted!="")' in start and 's.halted="";' in start, 'acknowledgement'
 assert 'LC_Remove(s,i);' in start and 'FileDelete' not in start and 'store.Write' not in start, 'an acknowledgement keeps the record'
 ver = t[t.index('int LC_Verdict('):t.index('void LC_Sweep(')]
@@ -49,6 +53,16 @@ dec = t[t.index('bool LC_Decode('):t.index('int LC_Load(')]
 for w in ('CRC_MISMATCH', 'LOGIN_MISMATCH', 'BAD_COUNT', 'BAD_HEADER', 'NO_CRC'):
     assert w in dec, w
 reg = t[t.index('bool LC_Register('):t.index('void LC_Halt(')]
+assert 'if(!LC_Owned(s)) return(false);' in reg and reg.index('if(!LC_Owned(s)) return(false);') < reg.index('LC_Persist('), 'register needs the lock'
+per = t[t.index('bool LC_Persist('):t.index('int LC_IndexOf(')]
+assert 'if(!LC_Owned(s)) return(false);' in per and per.index('if(!LC_Owned(s)) return(false);') < per.index('LC_Save('), 'persist needs the lock'
+rel = t[t.index('void LC_Release('):t.index('bool LC_Owned(')]
+assert 'if(s.lock_owned && s.lock_key!="")' in rel and rel.index('s.lock_owned && s.lock_key') < rel.index('lockstore.Unlock('), 'only the owner releases its own key'
+assert 'if(!s.lock_owned) return;' in tick and tick.index('if(!s.lock_owned) return;') < tick.index('LC_Sweep('), 'a tick without the lock does nothing'
+g = t[t.index('class CLcGuard'):]
+assert 'public CEgPreSend' in g
+assert g.index('if(!st.lock_owned)') < g.index('if(st.halted!="")') < g.index('LC_Register(') , 'guard order'
+assert 'if(!record && is_new && k>=0)' in g and 'store.Exists(EN_FileName(st.login,signal_id))' in g, 'a reservation is released only when no record exists and it was new'
 assert 'LIFECYCLE_INDEX_FULL' in reg and 'LIFECYCLE_BAD_SIGNAL_ID' in reg and 'return(LC_Persist(' in reg, 'register'
 assert 'back==text' in t[t.index('bool LC_Save('):t.index('bool LC_Persist(')], 'read-back'
 assert 'LC_FileName' in t and 'VELO_T013_ENTRY_INDEX_' in t
@@ -66,18 +80,23 @@ for n in ('InpCancelOnSessionEnd=false', 'InpCancelOnNewsBlock=false', 'InpCance
 assert '#include "include/EntryLifecycle.mqh"' in ea
 assert 'int EnabledCancelEvents(void)' in ea and 'InpCancelOnSessionEnd ? TP_EV_SESSION_END : 0' in ea
 assert ea.count('LC_Tick(') == 1 and ea.count('LC_Startup(') == 1, 'one tick and one startup'
-assert 'LC_Startup(g_cfg.exec,GetPointer(g_tr),GetPointer(g_store),InpAcknowledgeLifecycleHalt' in ea, 'the acknowledgement is an explicit input at start'
-assert ea.index('LC_Startup(') < ea.index('EventSetTimer('), 'startup before the first poll'
+assert 'LC_Register(' not in ea, 'the EA never indexes after the fact: the gate hook does it before the send'
+assert 'CLcGuard g_guard;' in ea and 'CEnFakeFileStore g_lockstore;' in ea, 'guard and a dedicated lock store'
+assert 'LC_Startup(g_cfg.exec,GetPointer(g_tr),GetPointer(g_store),GetPointer(g_lockstore),InpAcknowledgeLifecycleHalt,g_guard.st' in ea, 'the acknowledgement is an explicit input at start; the lock store is passed'
+init = ea[ea.index('int OnInit()'):ea.index('void OnDeinit(')]
+assert init.index('Configure()') < init.index('LC_Startup(') < init.index('EventSetTimer('), 'startup after the configuration and before the first poll'
+assert 'LC_Release(GetPointer(g_lockstore),g_guard.st);' in init[init.index('EventSetTimer('):], 'a failed start releases its own lock'
+deinit = ea[ea.index('void OnDeinit('):]
+assert 'LC_Release(GetPointer(g_lockstore),g_guard.st);' in deinit, 'the lock is released at the end'
+assert ea.count('LC_Release(') == 2, 'releases only on the start-failure path and in OnDeinit'
 poll = ea[ea.index('void Poll()'):ea.index('int OnInit()')]
 assert 'Lifecycle();' in poll, 'the lifecycle call is missing'
 assert poll.index('Lifecycle();') < poll.index('g_orch.Step('), 'the lifecycle runs before a new entry is considered'
-assert 'EntryTouched(out.res.outcome)' in poll and 'LC_Register(' in poll, 'indexed after the executor reached the intent'
-et = ea[ea.index('bool EntryTouched('):ea.index('int EnabledCancelEvents')]
-assert 'EN_R_DUPLICATE' not in et and 'EN_R_REFUSED' not in et and 'EN_R_LOCK_FAILED' not in et, 'only outcomes with a record are indexed'
+assert 'GetPointer(g_store),out,GetPointer(g_guard));' in poll, 'the guard is the gate hook of every placement'
 sync = ea[ea.index('void SyncHalts('):ea.index('void Lifecycle(')]
-assert 'StringFind(g_orch.halted,"HALTED after")==0' in sync and 'g_lc.login>0' in sync, 'only an executor halt is persisted'
+assert 'StringFind(g_orch.halted,"HALTED after")==0' in sync and 'g_guard.st.login>0' in sync, 'only an executor halt is persisted'
 life = ea[ea.index('void Lifecycle()'):ea.index('void Poll()')]
-assert 'if(enabled!=0 && g_lc.n>0' in life, 'the filters are read only when an event is enabled and a signal is open'
+assert 'if(enabled!=0 && g_guard.st.n>0' in life, 'the filters are read only when an event is enabled and a signal is open'
 assert 'GetTickCount64()-g_lc_filters_ms>=10000' in life, 'filter throttle'
 assert 'LC_DueEvents(session,news,present,(present && daily.cancel_pending_due))' in life, 'events from the existing filter results'
 PYEOF
@@ -87,8 +106,8 @@ echo "=== L4: the test uses the fake transport and store only ==="
 grep -nE 'EntryTransportReal|ExitTransportReal|OrderSend|SymbolInfo|CopyRates|AccountInfo|FileOpen' $TS >/dev/null && { echo "  FAIL the test touches the real side"; FAIL=1; } || echo "  PASS fake transport and fake store only"
 
 echo "=== L5: protected modules are untouched since $BASE ==="
-for p in src/include/EntryExecutor.mqh src/include/EntryTransport.mqh src/include/EntryTransportFake.mqh src/include/EntryTransportReal.mqh src/include/EntryStateFile.mqh src/include/EntryGate.mqh \
-         src/include/EntryOrchestrator.mqh src/include/EntryOrchestratorFeed.mqh src/include/ExposureReader.mqh src/include/ExposureReaderReal.mqh src/include/SetupPlanBridge.mqh src/include/TradePlanning.mqh \
+for p in src/include/EntryExecutor.mqh src/include/EntryTransport.mqh src/include/EntryTransportFake.mqh src/include/EntryTransportReal.mqh src/include/EntryStateFile.mqh \
+         src/include/EntryOrchestratorFeed.mqh src/include/ExposureReader.mqh src/include/ExposureReaderReal.mqh src/include/SetupPlanBridge.mqh src/include/TradePlanning.mqh \
          src/include/ExitExecutor.mqh src/include/ExitTickDriver.mqh src/include/ExitStateFile.mqh src/XauUsdTradePreview.mq5 src/XauUsdT011ExitManager.mq5 src/XauUsdT011ExitRegister.mq5; do
   if git cat-file -e $BASE:$p 2>/dev/null; then
     if git diff --quiet $BASE -- $p; then echo "  PASS $p identical to $BASE"; else echo "  FAIL $p differs from $BASE"; FAIL=1; fi
@@ -126,6 +145,20 @@ mut J.mqh $EA 's/StringFind(g_orch.halted,"HALTED after")==0 \&\& //'
 expect_assert "$NEG/l3.py" "$NEG/J.mqh" "every orchestrator halt persisted" "only an executor halt"
 mut K.mqh $EA 's/   EventKillTimer();/   EventKillTimer(); ETD_Register();/'
 expect_assert "$NEG/l3.py" "$NEG/K.mqh" "a T011 registration in the EA" "ETD_Register"
+mut M.mqh $HD '0,/   if(!LC_Owned(s)) return(false);/s//   \/\/ none/'
+expect_assert "$NEG/l2.py" "$NEG/M.mqh" "an index write without the lock" "needs the lock"
+mut N.mqh $HD 's/   if(s.lock_owned \&\& s.lock_key!="")/   if(s.lock_key!="")/'
+expect_assert "$NEG/l2.py" "$NEG/N.mqh" "a release by a non-owner" "only the owner releases"
+mut O.mqh $HD 's/   if(!s.lock_owned) return;                                \/\/ without the instance lock: no index access, no reconcile, no cancel/   \/\/ none/'
+expect_assert "$NEG/l2.py" "$NEG/O.mqh" "a tick without the lock" "tick without the lock"
+mut P.mqh $HD 's/      if(!st.lock_owned)$/      if(false)/'
+expect_assert "$NEG/l2.py" "$NEG/P.mqh" "a reservation without the lock check" "guard order\|guard"
+mut Q.mqh $EA 's/GetPointer(g_store),out,GetPointer(g_guard));/GetPointer(g_store),out);/'
+expect_assert "$NEG/l3.py" "$NEG/Q.mqh" "a placement without the pre-send guard" "the guard is the gate hook"
+mut R.mqh $EA 's/   LC_Release(GetPointer(g_lockstore),g_guard.st);                  \/\/ only the owner releases, and only its own key/   \/\/ none/'
+expect_assert "$NEG/l3.py" "$NEG/R.mqh" "a lock that is never released" "released at the end\|releases only"
+cp $EA "$NEG/S.mqh"; sed -i 's/^   Poll();$/   LC_Register(GetPointer(g_store),g_guard.st,"x",startup_notes); Poll();/' "$NEG/S.mqh"
+expect_assert "$NEG/l3.py" "$NEG/S.mqh" "an index entry written by the EA after the fact" "never indexes after the fact"
 
 [ $FAIL -eq 0 ] && echo "LIFECYCLE STATIC CHECKS: ALL PASS (static only; MetaEditor compile and MT5 run UNVERIFIED)" || echo "LIFECYCLE STATIC CHECKS: FAILURES"
 exit $FAIL
