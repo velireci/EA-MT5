@@ -52,6 +52,15 @@ class World:
     def submit(self, rt=None):
         return eg.submit(self.gcfg, self.cfg, self.tr, self.store, rt or self.rt, self.spb, self.checks)
 
+    def rec(self):
+        ok, text = self.store.read(en.file_name(self.tr.account.login, self.spb.plan.signal_id))
+        ok, r = en.decode(text)
+        assert ok, r
+        return r
+
+    def clean(self):
+        return self.store.held == set() and self.store.lock_calls == self.store.unlock_calls
+
     def assert_nothing_happened(self, tc, res, reg0=0):
         tc.assertEqual(res.final, en.R_REFUSED)
         tc.assertTrue(res.reason.startswith('GATE_BLOCKED'), res.reason)
@@ -240,7 +249,71 @@ class Repetition(unittest.TestCase):
         self.assertEqual((res2.final, w.tr.sends), (en.R_PLACED, 1))
 
 
-SCENARIOS = ['allow_all', 'every_block', 'plan_not_ready', 'daily_not_bypassed', 'freshness_and_binding', 'permit_for_another_or_stale_plan', 'repeat_without_second_send', 'blocks_leave_no_trace']
+class EvidenceExpiry(unittest.TestCase):
+    """the Codex review of 9950ab7: the permit built by the gate must not outlive the OLDEST evidence it was built from (gate max_age), even when the executor permit age is longer"""
+
+    def world(self, d, ages, advance=0, gate_age=5):
+        w = World(d)
+        w.gcfg.max_age = gate_age
+        now = w.tr.now
+        w.checks.snapshot_time, w.checks.loss_time, w.checks.daily_time = now - ages[0], now - ages[1], now - ages[2]
+        w.tr.precheck_advance = advance
+        self.assertEqual(w.cfg.permit_max_age, 60)
+        return w
+
+    def test_the_permit_carries_the_deadline_of_the_oldest_evidence(self):
+        for d in (1, -1):
+            for ages, oldest in (((4, 4, 4), 4), ((1, 4, 2), 4), ((0, 0, 3), 3), ((5, 1, 1), 5)):
+                w = self.world(d, ages)
+                dec = eg.decide(w.gcfg, w.spb, w.checks, w.tr.now)
+                self.assertTrue(dec.allow, dec.reasons)
+                self.assertEqual(dec.permit.issued, w.tr.now)
+                self.assertEqual(dec.permit.valid_until, w.tr.now - oldest + 5)
+
+    def test_evidence_that_expires_during_the_precheck_gives_zero_sends_after_the_intent(self):
+        for d in (1, -1):
+            for ages, advance in (((4, 4, 4), 10), ((1, 4, 2), 2), ((4, 4, 4), 2), ((5, 5, 5), 1)):
+                with self.subTest('%d %s %d' % (d, ages, advance)):
+                    w = self.world(d, ages, advance)
+                    res, dec = w.submit()
+                    self.assertTrue(dec.allow)                                           # the decision itself was legitimate
+                    self.assertEqual((res.final, res.sends, w.tr.sends, w.rt.send_calls), (en.R_REFUSED, 0, 0, 0), res.reason)
+                    self.assertIn('ABORTED_BEFORE_SEND', res.reason)                     # the intent was saved: this is NOT the initial block
+                    self.assertIn('PERMIT_EVIDENCE_EXPIRED', res.reason)
+                    self.assertEqual(w.rec().state, en.ST_PRECHECK_REFUSED)
+                    self.assertEqual(w.store.writes, 2)                                  # intent + the refused state
+                    self.assertTrue(w.clean())
+
+    def test_evidence_that_is_still_valid_places_once(self):
+        for d in (1, -1):
+            for ages, advance in (((4, 4, 4), 1), ((1, 4, 2), 1), ((0, 0, 0), 5), ((2, 3, 1), 2)):
+                with self.subTest('%d %s %d' % (d, ages, advance)):
+                    w = self.world(d, ages, advance)
+                    res, dec = w.submit()
+                    self.assertEqual((res.final, res.sends, w.tr.sends), (en.R_PLACED, 1, 1), res.reason)
+
+    def test_the_initial_block_has_no_intent_and_differs_from_the_refusal_after_the_precheck(self):
+        for d in (1, -1):
+            w = self.world(d, (6, 1, 1))                                                 # already older than the gate age: blocked by the gate, nothing written
+            res, dec = w.submit()
+            self.assertFalse(dec.allow)
+            self.assertTrue(res.reason.startswith('GATE_BLOCKED'))
+            self.assertEqual((w.tr.sends, w.store.lock_calls, w.store.writes, len(w.store.files)), (0, 0, 0, 0))
+            w2 = self.world(d, (4, 4, 4))                                                # a permit whose deadline is already past when it reaches the executor: refused before any intent
+            dec2 = eg.decide(w2.gcfg, w2.spb, w2.checks, w2.tr.now)
+            late = replace(dec2.permit, valid_until=w2.tr.now - 1)
+            r = en.place(w2.cfg, w2.tr, w2.store, w2.rt, eg.entry_plan(w2.spb.plan), late)
+            self.assertEqual((r.final, w2.tr.sends, w2.store.lock_calls, w2.store.writes, len(w2.store.files)), (en.R_REFUSED, 0, 0, 0, 0))
+            self.assertTrue(r.reason.startswith('PERMIT_EVIDENCE_EXPIRED'), r.reason)
+
+    def test_a_permit_without_a_deadline_keeps_the_old_behaviour(self):
+        w = World(1)
+        pm = en.permit_from(eg.entry_plan(w.spb.plan), tp.Permit(tp.ALLOW, '', ()), w.tr.now)
+        self.assertEqual(pm.valid_until, 0)
+        self.assertEqual(en.place(w.cfg, w.tr, w.store, w.rt, eg.entry_plan(w.spb.plan), pm).final, en.R_PLACED)
+
+
+SCENARIOS = ['allow_all', 'every_block', 'plan_not_ready', 'daily_not_bypassed', 'freshness_and_binding', 'permit_for_another_or_stale_plan', 'repeat_without_second_send', 'blocks_leave_no_trace', 'evidence_expiry_during_precheck']
 
 
 class Sources(unittest.TestCase):
@@ -275,7 +348,7 @@ class Mutants(unittest.TestCase):
             eg.__dict__[k] = ns[k]
         try:
             suite = unittest.TestSuite()
-            for cls in (Allow, Blocks, Daily, Binding, Repetition):
+            for cls in (Allow, Blocks, Daily, Binding, Repetition, EvidenceExpiry):
                 suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(cls))
             r = unittest.TestResult()
             suite.run(r)
@@ -300,6 +373,9 @@ class Mutants(unittest.TestCase):
             ('the executor is called after a block', [("    if not dec.allow:\n        return en.Result(en.R_REFUSED, 'GATE_BLOCKED: ' + ' | '.join(dec.reasons)), dec", "    if False:\n        return en.Result(en.R_REFUSED, 'GATE_BLOCKED: ' + ' | '.join(dec.reasons)), dec")]),
             ('the permit is stamped with another time', [("    d.permit = en.permit_from(plan, tpermit, now)", "    d.permit = en.permit_from(plan, tpermit, now - 1000)")]),
             ('the permit is built from another plan', [("    d.permit = en.permit_from(plan, tpermit, now)", "    d.permit = en.permit_from(replace(plan, volume_out=plan.volume_out + 0.01), tpermit, now)")]),
+            ('the deadline is stamped from the decision time', [("min(checks.snapshot_time, checks.loss_time, checks.daily_time) + gcfg.max_age", "now + gcfg.max_age")]),
+            ('the deadline follows the NEWEST evidence', [("min(checks.snapshot_time, checks.loss_time, checks.daily_time) + gcfg.max_age", "max(checks.snapshot_time, checks.loss_time, checks.daily_time) + gcfg.max_age")]),
+            ('no deadline is stamped', [("    d.permit.valid_until = min(checks.snapshot_time, checks.loss_time, checks.daily_time) + gcfg.max_age        # never valid beyond the OLDEST evidence\n", "")]),
             ('the guarded risk model is not used', [("        guarded = replace(spb.plan, risk_model=bl.permit_risk(checks.profit, spb.plan.risk_model))", "        guarded = spb.plan")]),
         ]
         for name, pairs in cases:
@@ -309,6 +385,22 @@ class Mutants(unittest.TestCase):
                 except Exception:
                     bad = ['exception']
                 self.assertTrue(bad, 'mutant not caught: ' + name)
+
+    def test_an_executor_that_ignores_the_deadline_is_caught(self):
+        src = _read('tests', 'entry_reference.py')
+        old = "    if permit.valid_until > 0 and now > permit.valid_until:"
+        self.assertEqual(src.count(old), 1)
+        ns = {'__name__': 'entry_mutant'}
+        exec(compile(src.replace(old, "    if False:", 1), 'entry_mutant', 'exec'), ns)
+        saved = en.permit_refusal
+        en.permit_refusal = ns['permit_refusal']
+        try:
+            suite = unittest.defaultTestLoader.loadTestsFromTestCase(EvidenceExpiry)
+            r = unittest.TestResult()
+            suite.run(r)
+            self.assertTrue(r.failures + r.errors, 'mutant not caught')
+        finally:
+            en.permit_refusal = saved
 
 
 if __name__ == '__main__':

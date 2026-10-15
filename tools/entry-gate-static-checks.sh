@@ -6,7 +6,7 @@ set -u
 cd "$(dirname "$0")/.."
 FAIL=0
 NEG=$(mktemp -d); trap 'rm -rf "$NEG"' EXIT
-BASE=7833a10
+BASE=9950ab7
 HD=src/include/EntryGate.mqh
 TS=src/tests/EntryGateTest.mq5
 FILES="$HD $TS tests/entry_gate_reference.py tests/test_entry_gate.py tools/entry-gate-static-checks.sh"
@@ -39,6 +39,8 @@ assert 'DAILY_NOT_EVALUATED' in dec and dec.index('if(!c.daily_present) EG_Add')
 assert dec.count('EN_PermitFrom(') == 1 and dec.index('if(d.reasons!="") return;') < dec.index('EN_PermitFrom(')
 # the permit of T007 is only the INPUT of the executor permit, never forwarded on its own
 assert 'tpermit.allow' in dec
+assert 'd.permit.valid_until=MathMin(c.snap_time,MathMin(c.loss_time,c.daily_time))+g.max_age' in dec, 'the permit deadline is not the oldest evidence'
+assert dec.index('EN_PermitFrom(') < dec.index('d.permit.valid_until=')
 sub = t[t.index('void EG_Submit('):]
 assert sub.index('EG_Decide(') < sub.index('if(!d.allow)') < sub.index('EN_Place(')
 assert 'return;' in sub[sub.index('if(!d.allow)'):sub.index('EN_Place(')], 'executor reached after a block'
@@ -52,7 +54,7 @@ echo "=== G3: the test never includes a real transport ==="
 grep -nE 'EntryTransportReal|ExitTransportReal|OrderSend' $TS >/dev/null && { echo "  FAIL the test touches the real side"; FAIL=1; } || echo "  PASS the test uses the fake transport and the fake store only"
 
 echo "=== G4: protected modules are untouched since $BASE ==="
-for p in src/include/EntryExecutor.mqh src/include/EntryTransport.mqh src/include/EntryTransportFake.mqh src/include/EntryTransportReal.mqh src/include/SetupPlanBridge.mqh src/include/TradePlanning.mqh \
+for p in src/include/EntryTransport.mqh src/include/EntryTransportFake.mqh src/include/EntryTransportReal.mqh src/include/SetupPlanBridge.mqh src/include/TradePlanning.mqh \
          src/include/BrokerLossCheck.mqh src/include/DailyBridge.mqh src/include/DailyLimits.mqh src/include/DailyPreviewGate.mqh src/include/DailyBalanceStore.mqh src/include/M15Confirmation.mqh \
          src/include/ExitExecutor.mqh src/include/ExitTickDriver.mqh src/XauUsdTradePreview.mq5 src/XauUsdT011DemoOpenPosition.mq5; do
   if git cat-file -e $BASE:$p 2>/dev/null; then
@@ -80,6 +82,11 @@ cp $HD "$NEG/F.mqh"; sed -i 's/bool EG_Fresh_unused//; s/   TP_CheckPermit(guard
 expect_assert "$NEG/g2.py" "$NEG/F.mqh" "the preview final decision (MANUAL semantics)" "DG_FinalPreview"
 cp $HD "$NEG/G.mqh"; sed -i 's/   EN_Place(cfg,tr,store,rt,spb.plan,d.permit,res);/   EN_Place(cfg,tr,store,rt,spb.plan,d.permit,res);\n   store.Write("x","y");/' "$NEG/G.mqh"
 expect_assert "$NEG/g2.py" "$NEG/G.mqh" "a write by the gate" "store.Write"
+
+cp $HD "$NEG/H.mqh"; sed -i '/d.permit.valid_until=MathMin/d' "$NEG/H.mqh"
+expect_assert "$NEG/g2.py" "$NEG/H.mqh" "a permit without the deadline of the oldest evidence" "permit deadline is not the oldest evidence"
+cp $HD "$NEG/I.mqh"; sed -i 's/d.permit.valid_until=MathMin(c.snap_time,MathMin(c.loss_time,c.daily_time))+g.max_age;/d.permit.valid_until=now+g.max_age;/' "$NEG/I.mqh"
+expect_assert "$NEG/g2.py" "$NEG/I.mqh" "a deadline counted from the decision time" "permit deadline is not the oldest evidence"
 
 [ $FAIL -eq 0 ] && echo "ENTRY GATE STATIC CHECKS: ALL PASS (static only; MetaEditor compile and MT5 run UNVERIFIED)" || echo "ENTRY GATE STATIC CHECKS: FAILURES"
 exit $FAIL

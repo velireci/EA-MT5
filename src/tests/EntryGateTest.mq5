@@ -32,6 +32,14 @@ public:
    int reg_count;
    int dir;
    string Digest(void) {return(EN_PlanDigest(spb.plan));}
+   string State(void)
+     {
+      SEnRecord rec;
+      string why;
+      if(!EN_Decode(s.Get(EN_FileName(t.account.login,spb.plan.signal_id)),rec,why)) return("NO_RECORD");
+      return(rec.state);
+     }
+   bool Clean(void) {return(s.n_held==0 && s.lock_calls==s.unlock_calls);}
    void Init(const int direction)
      {
       dir=direction;
@@ -365,6 +373,87 @@ void Scenario_blocks_leave_no_trace(void)
    Check(a && w.r.outcome==EN_R_PLACED && w.t.sends==1,"a block leaves no trace and a later allowed submit still places exactly once");
   }
 
+void Scenario_evidence_expiry_during_precheck(void)
+  {
+   long ages[12]={4,4,4, 1,4,2, 0,0,3, 5,1,1};
+   for(int d=0;d<2;d++)
+     {
+      int dir=(d==0 ? 1 : -1);
+      for(int k=0;k<4;k++)
+        {
+         long oldest=MathMax(ages[3*k],MathMax(ages[3*k+1],ages[3*k+2]));
+         CGw w;
+         w.Init(dir);
+         w.g.max_age=5;
+         w.c.snap_time=w.t.now-ages[3*k];
+         w.c.loss_time=w.t.now-ages[3*k+1];
+         w.c.daily_time=w.t.now-ages[3*k+2];
+         SEgDecision dd;
+         EG_Decide(w.g,w.spb,w.c,w.reg,w.reg_count,w.t.now,dd);
+         Check(dd.allow && dd.permit.issued==w.t.now && dd.permit.valid_until==w.t.now-oldest+5,StringFormat("dir %d ages %d: the permit deadline is the oldest evidence plus the gate age",dir,k));
+        }
+      // expiry DURING the pre-check: the intent is already saved, zero sends, PRECHECK_REFUSED
+      long adv[4]={10,2,2,1};
+      long cas[12]={4,4,4, 1,4,2, 4,4,4, 5,5,5};
+      for(int k=0;k<4;k++)
+        {
+         CGw w;
+         w.Init(dir);
+         w.g.max_age=5;
+         w.c.snap_time=w.t.now-cas[3*k];
+         w.c.loss_time=w.t.now-cas[3*k+1];
+         w.c.daily_time=w.t.now-cas[3*k+2];
+         w.t.precheck_advance=adv[k];
+         w.Submit();
+         Check(w.dec.allow && w.r.outcome==EN_R_REFUSED && w.r.sends==0 && w.t.sends==0 && w.rt.send_calls==0 && Has(w.r.reason,"ABORTED_BEFORE_SEND") && Has(w.r.reason,"PERMIT_EVIDENCE_EXPIRED") &&
+               w.State()==EN_ST_PRECHECK_REFUSED && w.s.writes==2 && w.Clean(),StringFormat("dir %d case %d: evidence expiring during the pre-check: zero sends after the saved intent",dir,k));
+        }
+      // still valid
+      long vadv[4]={1,1,5,2};
+      long vca[12]={4,4,4, 1,4,2, 0,0,0, 2,3,1};
+      for(int k=0;k<4;k++)
+        {
+         CGw w;
+         w.Init(dir);
+         w.g.max_age=5;
+         w.c.snap_time=w.t.now-vca[3*k];
+         w.c.loss_time=w.t.now-vca[3*k+1];
+         w.c.daily_time=w.t.now-vca[3*k+2];
+         w.t.precheck_advance=vadv[k];
+         w.Submit();
+         Check(w.r.outcome==EN_R_PLACED && w.t.sends==1,StringFormat("dir %d case %d: evidence still valid at the send: one order",dir,k));
+        }
+      // the initial block (no intent) differs from the refusal after the pre-check
+      CGw a;
+      a.Init(dir);
+      a.g.max_age=5;
+      a.c.snap_time=a.t.now-6;
+      a.Submit();
+      bool initial=(!a.dec.allow && Starts(a.r.reason,"GATE_BLOCKED") && a.t.sends==0 && a.s.lock_calls==0 && a.s.writes==0 && a.s.n_files==0);
+      CGw b;
+      b.Init(dir);
+      b.g.max_age=5;
+      b.c.snap_time=b.t.now-4;
+      b.c.loss_time=b.t.now-4;
+      b.c.daily_time=b.t.now-4;
+      EG_Decide(b.g,b.spb,b.c,b.reg,b.reg_count,b.t.now,b.dec);
+      b.dec.permit.valid_until=b.t.now-1;
+      EN_Place(b.cfg,GetPointer(b.t),GetPointer(b.s),b.rt,b.spb.plan,b.dec.permit,b.r);
+      Check(initial && b.r.outcome==EN_R_REFUSED && Starts(b.r.reason,"PERMIT_EVIDENCE_EXPIRED") && b.t.sends==0 && b.s.lock_calls==0 && b.s.writes==0 && b.s.n_files==0,
+            StringFormat("dir %d: an initial block / expired permit leaves no intent",dir));
+     }
+   CGw c;
+   c.Init(1);
+   SEnPermit pm;
+   STpPermit tpm;
+   tpm.allow=true;
+   tpm.primary_reason="";
+   tpm.reason_count=0;
+   tpm.registered=false;
+   EN_PermitFrom(c.spb.plan,tpm,c.t.now,pm);
+   Check(pm.valid_until==0,"a permit without a deadline keeps the old behaviour");
+  }
+
 void OnStart()
   {
    Print("T015 ENTRY GATE TEST: fake transport and fake store only; no file, no terminal read, no order, no trade.");
@@ -376,5 +465,6 @@ void OnStart()
    Scenario_permit_for_another_or_stale_plan();
    Scenario_repeat_without_second_send();
    Scenario_blocks_leave_no_trace();
+   Scenario_evidence_expiry_during_precheck();
    PrintFormat("T015 ENTRY GATE TEST finished: %d passed, %d failed",g_pass,g_fail);
   }

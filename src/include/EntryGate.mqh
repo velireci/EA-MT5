@@ -97,6 +97,7 @@ void EG_Decide(const SEgConfig &g,const SSpbResult &spb,const SEgChecks &c,const
    if(d.reasons!="") return;
    d.allow=true;
    EN_PermitFrom(spb.plan,tpermit,now,d.permit);
+   d.permit.valid_until=MathMin(c.snap_time,MathMin(c.loss_time,c.daily_time))+g.max_age;     // never valid beyond the OLDEST evidence
   }
 
 // A block never reaches the executor. `res` is the executor result, or REFUSED "GATE_BLOCKED: ...".

@@ -57,6 +57,7 @@ class Permit:
     allow: bool = False
     digest: str = ''
     issued: int = 0
+    valid_until: int = 0               # 0 = no extra deadline; > 0 = the permit is void after this instant (the oldest evidence it was built from expires)
 
 
 @dataclass
@@ -417,6 +418,8 @@ def permit_refusal(cfg, plan, permit, now):
         return 'PERMIT_TIME_INVALID: issued in the future or unset'
     if now - permit.issued > cfg.permit_max_age:
         return 'PERMIT_STALE: older than the configured maximum age'
+    if permit.valid_until > 0 and now > permit.valid_until:
+        return 'PERMIT_EVIDENCE_EXPIRED: the evidence behind the permit is older than its validity allows'
     return ''
 
 

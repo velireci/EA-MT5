@@ -109,6 +109,7 @@ struct SEnPermit
    bool allow;
    string digest;
    long issued;
+   long valid_until;             // 0 = no extra deadline; > 0 = the permit is void after this instant (the oldest evidence it was built from expires)
   };
 
 void EN_PermitInit(SEnPermit &p)
@@ -117,6 +118,7 @@ void EN_PermitInit(SEnPermit &p)
    p.allow=false;
    p.digest="";
    p.issued=0;
+   p.valid_until=0;
   }
 
 struct SEnRuntime
@@ -254,6 +256,7 @@ void EN_PermitFrom(const STpPlan &plan,const STpPermit &tpermit,const long issue
    out.allow=tpermit.allow;
    out.digest=EN_PlanDigest(plan);
    out.issued=issued;
+   out.valid_until=0;
   }
 
 // ------------------------------------------------------------------------------------------------ record codec
@@ -454,6 +457,7 @@ string EN_PermitRefusal(const SEnConfig &cfg,const STpPlan &plan,const SEnPermit
    if(pm.digest=="" || pm.digest!=EN_PlanDigest(plan)) return("PERMIT_FOR_ANOTHER_PLAN: the permit digest differs from this plan");
    if(pm.issued<=0 || pm.issued>now) return("PERMIT_TIME_INVALID: issued in the future or unset");
    if(now-pm.issued>cfg.permit_max_age) return("PERMIT_STALE: older than the configured maximum age");
+   if(pm.valid_until>0 && now>pm.valid_until) return("PERMIT_EVIDENCE_EXPIRED: the evidence behind the permit is older than its validity allows");
    return("");
   }
 

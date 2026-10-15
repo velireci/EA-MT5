@@ -105,6 +105,7 @@ def decide(gcfg, spb, checks, now):
         return d
     d.allow = True
     d.permit = en.permit_from(plan, tpermit, now)
+    d.permit.valid_until = min(checks.snapshot_time, checks.loss_time, checks.daily_time) + gcfg.max_age        # never valid beyond the OLDEST evidence
     return d
 
 
