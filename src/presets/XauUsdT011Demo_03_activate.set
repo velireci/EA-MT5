@@ -1,0 +1,20 @@
+; XauUsdT011DemoHarness - step 3: ACTIVATE at the diagnostic level (the only step that can send ONE closing request)
+; DIAGNOSTIC TEST PARAMETERS for ONE demo test, not strategy rules. No signal, no live trading. Complete preset: every input is listed once.
+; InpPositionId, InpLevel2R and InpTpPrice are left UNSET (0 / -1) on purpose: the harness refuses them until the owner fills them in from the logs (see docs/T011-demo-package.md).
+; InpAuthorisation is left EMPTY: after Codex has reviewed the package the owner types the phrase deliberately. InpConfirmSendOnce is false.
+; Enum values: InpStep 0 NONE, 1 STATUS, 2 REGISTER, 3 ACTIVATE, 4 RECONCILE | InpDirection 1 BUY, -1 SELL, 0 UNSET | InpFilling 0 UNSET, 1 FOK, 2 IOC, 3 RETURN | InpFilterPolicy 0 UNSET, 1 IGNORE, 2 NEEDS_CLEAR | InpFilterState 0 UNKNOWN, 1 CLEAR, 2 BLOCKED.
+; Volume 0.10 = 10 steps of 0.01: the 80/20 split is 8 / 2 (realisable, remainder above the minimum). TP is never equal to the level.
+InpStep=3
+InpAuthorisation=
+InpConfirmSendOnce=false
+InpEaMagic=777
+InpPositionId=0
+InpSymbol=XAUUSD
+InpDirection=1
+InpLevel2R=-1
+InpTpPrice=-1
+InpVolumeInitial=0.10
+InpFilling=2
+InpDeviation=20
+InpFilterPolicy=1
+InpFilterState=1

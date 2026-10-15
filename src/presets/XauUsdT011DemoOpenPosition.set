@@ -1,0 +1,14 @@
+; XauUsdT011DemoOpenPosition - DEMO-ONLY separate step that opens ONE test position (not a strategy, not a signal). DISABLED: InpEnabled=false, authorisation empty.
+; The owner enables it only after Codex has reviewed XauUsdT011DemoOpenPosition.mq5, and types the phrase I_AUTHORISE_T011_DEMO_OPEN_POSITION deliberately.
+; Complete preset: every input is listed once. Volume 0.10 (80/20 realisable). SL distance 5.00 and TP distance 10.00 in price units are TEST values (demo money), not rules.
+; InpDirection 1 BUY, -1 SELL | InpFilling 0 UNSET, 1 FOK, 2 IOC, 3 RETURN
+InpEnabled=false
+InpAuthorisation=
+InpEaMagic=777
+InpSymbol=XAUUSD
+InpDirection=1
+InpVolume=0.10
+InpStopLossDistance=5.00
+InpTakeProfitDistance=10.00
+InpFilling=2
+InpDeviation=20

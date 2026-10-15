@@ -313,7 +313,7 @@ void TestRegistrationRestartBeforeTwoR(void)
    EX_RuntimeInit(rt);
    int g,n,pl;
    Check(EX_Register(cfg,GetPointer(t),rt,FN,Ident(),q,r) && DiskStatus(g,n,pl)=="IDLE" && g==1 && pl==1 && t.sends==0,"registration stores the bound IDLE record with the authorised plan, no send");
-   string before,after,w;
+   string before,after;
    ESF_ReadAll(FN,before);
    SExQuote below=q;
    below.bid=1999.0;

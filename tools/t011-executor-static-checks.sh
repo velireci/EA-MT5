@@ -19,7 +19,7 @@ echo "=== S1: files exist ==="
 for f in $NEWFILES; do [ -s "$f" ] && echo "  PASS $f exists" || { echo "  FAIL $f missing or empty"; FAIL=1; }; done
 
 echo "=== S2: the trading call exists only in the real transport; the real transport is included only by the compile stub; tests use the fake only ==="
-python3 -I - <<'PYEOF' && echo "  PASS exactly one OrderSend (real transport); no OrderSendAsync / CTrade / PositionClose anywhere; the stub is the only includer of the real header and calls nothing" || { echo "  FAIL"; FAIL=1; }
+python3 -I - <<'PYEOF' && echo "  PASS exactly one OrderSend in the real transport and one in the separate demo open-position script; no OrderSendAsync / CTrade / PositionClose anywhere; only the compile stub and the demo harness script include the real header" || { echo "  FAIL"; FAIL=1; }
 import glob, re
 strip = lambda t: re.sub(r'//[^\n]*', '', re.sub(r'(?s)/\*.*?\*/', '', t))
 files = glob.glob('src/**/*.mq[h5]', recursive=True)
@@ -28,7 +28,7 @@ for f in files:
     code = strip(open(f, encoding='ascii').read())
     for w in ('OrderSend', 'OrderSendAsync', 'CTrade', 'PositionClose', 'PositionOpen', 'OrderDelete', 'OrderModify', 'OrderCalcMargin'):
         n = len(re.findall(r'\b%s\s*\(' % w, code)) + (len(re.findall(r'\bCTrade\b', code)) if w == 'CTrade' else 0)
-        if n and not (w == 'OrderSend' and f.endswith('ExitTransportReal.mqh') and n == 1):
+        if n and not (w == 'OrderSend' and (f.endswith('ExitTransportReal.mqh') or f.endswith('XauUsdT011DemoOpenPosition.mq5')) and n == 1):
             # legacy / earlier modules must not have gained a call; only report calls outside the allowed one
             calls.setdefault(f, []).append(w)
 legacy_ok = ('MA_Crossover',)
@@ -37,7 +37,7 @@ assert not bad, bad
 real = strip(open('src/include/ExitTransportReal.mqh', encoding='ascii').read())
 assert len(re.findall(r'\bOrderSend\s*\(', real)) == 1
 includers = [f for f in files if re.search(r'#include\s+"[^"]*ExitTransportReal\.mqh"', strip(open(f, encoding='ascii').read()))]
-assert includers == ['src/tests/T011_ExecutorRealCompile.mq5'], includers
+assert sorted(includers) == ['src/XauUsdT011DemoHarness.mq5', 'src/tests/T011_ExecutorRealCompile.mq5'], includers
 stub = strip(open('src/tests/T011_ExecutorRealCompile.mq5', encoding='ascii').read())
 assert not re.search(r'\btransport\s*\.', stub), 'the compile stub calls a method'
 for f in ('src/include/ExitExecutor.mqh', 'src/tests/T011_ExecutorTest.mq5', 'src/include/ExitTransportFake.mqh'):
