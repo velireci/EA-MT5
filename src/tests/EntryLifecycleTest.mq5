@@ -589,6 +589,82 @@ void Scenario_release_only_by_owner_on_failure_paths(void)
    Check(!st4.lock_owned && w4.s.unlock_calls==0 && w4.s.n_held==1,"a refused start releases nothing of the other instance");
   }
 
+// Codex finding on 10a2ee1: a VALID index at the start, damaged AFTER it. The existing index is validated before every update and every lifecycle action; nothing writes over the evidence.
+void CorruptIndex(CWorld &w,const int how,string &original)
+  {
+   string name=LC_FileName(w.t.account.login);
+   if(how==0)
+     {
+      string text=w.s.Get(name);
+      StringReplace(text,"halt=\n","halt=X\n");
+      w.s.Put(name,text);
+     }
+   else w.s.unreadable=name;
+   original=w.s.Get(name);
+  }
+
+void Scenario_damage_during_run_never_overwritten(void)
+  {
+   for(int d=0;d<2;d++)
+     {
+      int dir=(d==0 ? 1 : -1);
+      for(int how=0;how<2;how++)
+        {
+         // an entry attempt after the damage: HALT, zero sends, no new intent, original bytes untouched, the lock stays owned
+         CWorld w;
+         w.Init(dir);
+         SLcState seed;
+         LC_StateInit(seed,w.t.account.login);
+         bool seeded=LC_Save(GetPointer(w.s),seed);
+         string notes;
+         LC_Startup(w.cfg,GetPointer(w.t),GetPointer(w.s),GetPointer(w.s),false,w.g.st,notes);
+         w.g.Bind(GetPointer(w.s));
+         bool owned=w.g.st.lock_owned && w.g.st.halted=="";
+         string original;
+         CorruptIndex(w,how,original);
+         int writes=w.s.writes;
+         bool seq=w.Seq();
+         string name=LC_FileName(w.t.account.login);
+         Check(seeded && owned && !seq && w.t.sends==0 && !w.HasRecord() && w.s.Get(name)==original && w.s.writes==writes && Has(w.g.st.halted,"LIFECYCLE_STATE_") &&
+               w.g.st.lock_owned && w.s.n_held==1 && w.s.unlock_calls==0,StringFormat("dir %d how %d: an entry attempt after the damage halts, zero sends, no intent, bytes untouched, lock kept",dir,how));
+         // Halt / Persist / Settled never repair it
+         string n2;
+         LC_Halt(GetPointer(w.s),w.g.st,"x",n2);
+         bool reg=LC_Register(GetPointer(w.s),w.g.st,"NEW-1",n2);
+         w.g.is_new=true;
+         w.g.st.ids[w.g.st.n]="NEW-2";
+         w.g.st.n++;
+         SEnResult none;
+         EN_Res(none,EN_R_NONE,"");
+         w.g.Settled("NEW-2",none);
+         string n3;
+         LC_Tick(w.cfg,GetPointer(w.t),GetPointer(w.s),w.g.st,0,0,n3);
+         Check(!reg && w.s.Get(name)==original && w.s.writes==writes && w.g.st.lock_owned && w.s.unlock_calls==0,StringFormat("dir %d how %d: Halt, Persist and Settled never repair an unusable index",dir,how));
+         LC_Release(GetPointer(w.s),w.g.st);
+         Check(w.s.n_held==0 && !w.g.st.lock_owned,StringFormat("dir %d how %d: the normal release still works",dir,how));
+         // a tick with every cancel enabled cancels nothing and reconciles nothing
+         CWorld v;
+         bool placed=v.Placed(dir);
+         string original2;
+         CorruptIndex(v,how,original2);
+         int writes2=v.s.writes;
+         string n4;
+         LC_Tick(v.cfg,GetPointer(v.t),GetPointer(v.s),v.g.st,EV_ALL_ENABLED,EV_ALL_ENABLED,n4);
+         Check(placed && v.t.cancels==0 && v.t.sends==1 && v.s.Get(name)==original2 && v.s.writes==writes2 && Has(v.g.st.halted,"LIFECYCLE_STATE_") && v.RecState()==EN_ST_PLACED && v.g.st.lock_owned,
+               StringFormat("dir %d how %d: a tick with cancel enabled and a damaged index cancels nothing and writes nothing",dir,how));
+        }
+      // a valid index and the initial creation work as before
+      CWorld u;
+      u.Init(dir);
+      u.Own();
+      string n5;
+      bool a=LC_Register(GetPointer(u.s),u.g.st,"ID-1",n5);
+      bool b=LC_Register(GetPointer(u.s),u.g.st,"ID-2",n5);
+      SLcState stored;
+      Check(a && b && u.Stored(stored) && stored.n==2,StringFormat("dir %d: the initial creation and the update of a valid index work",dir));
+     }
+  }
+
 void OnStart()
   {
    Print("T019 ENTRY LIFECYCLE TEST: fake transport and fake store only; no terminal read, no order, no file.");
@@ -608,5 +684,6 @@ void OnStart()
    Scenario_two_instances_no_lost_update();
    Scenario_refused_instance_and_wrong_release();
    Scenario_release_only_by_owner_on_failure_paths();
+   Scenario_damage_during_run_never_overwritten();
    PrintFormat("T019 ENTRY LIFECYCLE TEST finished: %d passed, %d failed",g_pass,g_fail);
   }

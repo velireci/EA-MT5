@@ -113,8 +113,27 @@ def save(store, st):
     return ok and back == text
 
 
+def disk_check(store, st):
+    """the EXISTING index is validated (readable, CRC, login) before every update and every lifecycle action; no file = the initial creation is allowed. -> (ok, reason)"""
+    name = file_name(st.login)
+    if not store.exists(name):
+        return True, ''
+    ok, text = store.read(name)
+    if not ok:
+        return False, 'LIFECYCLE_STATE_UNREADABLE'
+    ok, r = decode(text, st.login)
+    if not ok:
+        return False, 'LIFECYCLE_STATE_DAMAGED: ' + r
+    return True, ''
+
+
 def _persist(store, st, notes):
     if not _owned(st):
+        return False
+    ok, why = disk_check(store, st)
+    if not ok:
+        st.halted = st.halted or why
+        notes.append(why)
         return False
     if not save(store, st):
         st.halted = st.halted or 'LIFECYCLE_STATE_NOT_SAVED'
@@ -235,6 +254,11 @@ def tick(cfg, tr, store, st, due, enabled):
     if not st.login:
         return notes
     if not st.lock_owned:
+        return notes
+    ok, why = disk_check(store, st)
+    if not ok:
+        st.halted = st.halted or why
+        notes.append(why)
         return notes
     before = (list(st.ids), st.halted)
     open_ids = _sweep(cfg, tr, store, st, notes)

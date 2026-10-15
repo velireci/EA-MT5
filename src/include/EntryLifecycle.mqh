@@ -142,9 +142,30 @@ bool LC_Save(CEnStore *store,const SLcState &s)
    return(store.Read(name,back) && back==text);
   }
 
+// the EXISTING index is validated (readable, CRC, login) before every update and every lifecycle action; no file = the initial creation is allowed. No repair, retry, deletion or migration.
+bool LC_DiskCheck(CEnStore *store,const SLcState &s,string &why)
+  {
+   why="";
+   string name=LC_FileName(s.login);
+   if(!store.Exists(name)) return(true);
+   string text;
+   if(!store.Read(name,text)) {why="LIFECYCLE_STATE_UNREADABLE"; return(false);}
+   SLcState t;
+   string r;
+   if(!LC_Decode(text,s.login,t,r)) {why="LIFECYCLE_STATE_DAMAGED: "+r; return(false);}
+   return(true);
+  }
+
 bool LC_Persist(CEnStore *store,SLcState &s,string &notes)
   {
    if(!LC_Owned(s)) return(false);
+   string why;
+   if(!LC_DiskCheck(store,s,why))
+     {
+      if(s.halted=="") s.halted=why;
+      LC_Note(notes,why);
+      return(false);
+     }
    if(LC_Save(store,s)) return(true);
    if(s.halted=="") s.halted="LIFECYCLE_STATE_NOT_SAVED";
    LC_Note(notes,"LIFECYCLE_STATE_NOT_SAVED");
@@ -284,6 +305,13 @@ void LC_Tick(const SEnConfig &cfg,CEnTransport *tr,CEnStore *store,SLcState &s,c
    notes="";
    if(s.login<=0) return;
    if(!s.lock_owned) return;                                // without the instance lock: no index access, no reconcile, no cancel
+   string disk_why;
+   if(!LC_DiskCheck(store,s,disk_why))                      // a damaged / unreadable index stops every action of the layer and is never written over
+     {
+      if(s.halted=="") s.halted=disk_why;
+      LC_Note(notes,disk_why);
+      return;
+     }
    string before_halt=s.halted;
    int before_n=s.n;
    string open_ids[];

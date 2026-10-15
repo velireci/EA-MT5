@@ -16,7 +16,7 @@ SIG = te.SIGNAL
 SCENARIOS = ['index_codec_and_damage', 'register_and_save_failure', 'startup_clean', 'startup_halts_on_unprovable', 'startup_keeps_open_pending', 'tick_fill_unmanaged',
              'cancel_gated_by_enabled_events', 'cancel_uncertain_halts', 'due_events_from_facts', 'damaged_state_never_overwritten',
              'index_saved_before_send', 'no_send_when_index_unusable', 'crash_windows_restart_halts', 'two_instances_no_lost_update', 'refused_instance_and_wrong_release',
-             'release_only_by_owner_on_failure_paths']
+             'release_only_by_owner_on_failure_paths', 'damage_during_run_never_overwritten']
 EV_ALL_ENABLED = tp.EV_SESSION_END | tp.EV_NEWS_BLOCK | tp.EV_DAILY_LIMIT
 
 
@@ -512,6 +512,94 @@ class Instances(unittest.TestCase):
         self.assertEqual((st4.lock_owned, store4.unlock_calls, store4.held), (False, 0, {lc.lock_key(login)}))
 
 
+class DamageDuringRun(unittest.TestCase):
+    """Codex finding on 10a2ee1: a valid index at the start, damaged AFTER it: Reserve -> register -> save used to overwrite the proof with a fresh CRC and allow a send.
+    The existing index is validated before every update and before every lifecycle action; damage or an unreadable file halts without writing over it."""
+
+    def corrupt(self, w, how):
+        name = lc.file_name(w.tr.account.login)
+        if how == 'bytes':
+            w.store.files[name] = w.store.files[name].replace('halt=\n', 'halt=X\n')
+        else:
+            w.store.unreadable = {name}
+        return name, w.store.files[name]
+
+    def started(self, dirn):
+        """a VALID existing index (no ids) and the lock owned after the start"""
+        w = teo.World(dirn)
+        login = w.tr.account.login
+        self.assertTrue(lc.save(w.store, lc.State(login)))
+        st, notes = start(w.cfg.exec, w.tr, w.store)
+        self.assertTrue(st.lock_owned)
+        self.assertEqual((st.halted, st.ids), ('', []))
+        return w, st
+
+    def test_entry_attempt_after_damage_halts_without_a_send_or_a_write(self):
+        for dirn in (1, -1):
+            for how in ('bytes', 'unreadable'):
+                w, st = self.started(dirn)
+                name, original = self.corrupt(w, how)
+                writes = w.store.writes
+                guard = lc.Guard(w.store, st)
+                w, out = live(dirn, guard, w)
+                tag = '%s dir %d' % (how, dirn)
+                self.assertEqual(out.status, 'RESERVATION_FAILED', tag)
+                self.assertEqual(w.tr.sends, 0, tag)
+                self.assertFalse(any(n.startswith('VELO_T013_ENTRY_%d_' % w.tr.account.login) for n in w.store.files), tag + ': no new intent')
+                self.assertEqual((w.store.files[name], w.store.writes), (original, writes), tag + ': the original bytes are untouched, nothing was written')
+                self.assertIn('LIFECYCLE_STATE_', st.halted, tag)
+                self.assertTrue(st.lock_owned and w.store.held == {lc.lock_key(w.tr.account.login)} and w.store.unlock_calls == 0, tag + ': the failure does not release the lock')
+                self.assertNotIn(out.spb.signal_id, w.o.handled, tag)
+
+    def test_a_tick_with_cancel_enabled_and_a_damaged_index_cancels_nothing(self):
+        for dirn in (1, -1):
+            for how in ('bytes', 'unreadable'):
+                w, st = placed(dirn)
+                name, original = self.corrupt(w, how)
+                writes, unlocks = w.store.writes, w.store.unlock_calls
+                notes = lc.tick(w.cfg, w.tr, w.store, st, EV_ALL_ENABLED, EV_ALL_ENABLED)
+                tag = '%s dir %d' % (how, dirn)
+                self.assertEqual((w.tr.cancels, w.tr.sends), (0, 1), tag)
+                self.assertEqual((w.store.files[name], w.store.writes), (original, writes), tag)
+                self.assertIn('LIFECYCLE_STATE_', st.halted, tag)
+                self.assertEqual(w.rec().state, en.ST_PLACED, tag + ': no reconcile either')
+                self.assertTrue(st.lock_owned and w.store.unlock_calls == unlocks and w.store.held == {lc.lock_key(w.tr.account.login)}, tag)
+
+    def test_halt_persist_and_settled_never_repair_an_unusable_index(self):
+        for dirn in (1, -1):
+            for how in ('bytes', 'unreadable'):
+                w, st = self.started(dirn)
+                name, original = self.corrupt(w, how)
+                writes = w.store.writes
+                guard = lc.Guard(w.store, st)
+                notes = []
+                lc.halt(w.store, st, 'x', notes)
+                self.assertFalse(lc.register(w.store, st, 'NEW-1', notes))
+                guard.new = True
+                st.ids.append('NEW-2')
+                guard.settled('NEW-2', None)                  # no record: the release path tries to persist
+                lc.tick(w.cfg.exec, w.tr, w.store, st, 0, 0)
+                tag = '%s dir %d' % (how, dirn)
+                self.assertEqual((w.store.files[name], w.store.writes), (original, writes), tag + ': nothing writes over the evidence')
+                self.assertTrue(st.lock_owned and w.store.unlock_calls == 0, tag)
+        lc.release(w.store, st)                                # the normal release still works
+        self.assertEqual((w.store.held, st.lock_owned), (set(), False))
+
+    def test_a_valid_index_and_the_initial_creation_work_as_before(self):
+        for dirn in (1, -1):
+            w = teo.World(dirn)
+            login = w.tr.account.login
+            st = owner(w.store, login)                         # no file yet: the first save creates it
+            self.assertTrue(lc.register(w.store, st, 'ID-1', []))
+            self.assertTrue(lc.register(w.store, st, 'ID-2', []))      # a valid existing file is updated
+            self.assertEqual(index_ids(w.store, login), ['ID-1', 'ID-2'])
+            w3 = teo.World(dirn)
+            st3 = owner(w3.store, w3.tr.account.login)
+            w3, out = live(dirn, lc.Guard(w3.store, st3), w3)
+            self.assertTrue(out.request)
+            self.assertEqual(index_ids(w3.store, w3.tr.account.login), [out.spb.signal_id])
+
+
 class Sources(unittest.TestCase):
     def test_mql_scenarios_pinned(self):
         with open(os.path.join(ROOT, 'src', 'tests', 'EntryLifecycleTest.mq5'), encoding='ascii') as f:
@@ -527,7 +615,7 @@ class Mutants(unittest.TestCase):
 
     def _suite_failures(self):
         suite = unittest.TestSuite()
-        for cls in (Index, Startup, Tick, IndexBeforeSend, Crash, Instances):
+        for cls in (Index, Startup, Tick, IndexBeforeSend, Crash, Instances, DamageDuringRun):
             for n in unittest.TestLoader().getTestCaseNames(cls):
                 suite.addTest(cls(n))
         res = unittest.TestResult()
@@ -578,6 +666,9 @@ class Mutants(unittest.TestCase):
                 ("    if st.lock_owned and st.lock_key:\n        lockstore.unlock(st.lock_key)", "    if st.lock_key:\n        lockstore.unlock(st.lock_key)"),
                 ("    if not lockstore.lock(key):", "    if False:"),
                 ("    if not st.lock_owned:\n        st.halted = st.halted or 'LIFECYCLE_LOCK_NOT_OWNED'\n        return False", "    if False:\n        return False"),
+                # Codex finding on 10a2ee1: the existing index is validated before every update and every lifecycle action
+                ("    ok, why = disk_check(store, st)\n    if not ok:\n        st.halted = st.halted or why\n        notes.append(why)\n        return False\n    if not save(store, st):", "    if not save(store, st):"),
+                ("    ok, why = disk_check(store, st)\n    if not ok:\n        st.halted = st.halted or why\n        notes.append(why)\n        return notes\n", "    pass\n"),
                 ("    acct = tr.read_account()\n    if not acct.read_ok or acct.login <= 0:\n        return State(0, 'ACCOUNT_UNREADABLE'), ['ACCOUNT_UNREADABLE']\n    st = State(acct.login)\n    if not acquire(lockstore, acct.login, st):",
                  "    acct = tr.read_account()\n    if not acct.read_ok or acct.login <= 0:\n        return State(0, 'ACCOUNT_UNREADABLE'), ['ACCOUNT_UNREADABLE']\n    st = State(acct.login)\n    if False:")]
         for old, new in muts:

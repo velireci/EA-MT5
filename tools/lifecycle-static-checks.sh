@@ -56,6 +56,11 @@ reg = t[t.index('bool LC_Register('):t.index('void LC_Halt(')]
 assert 'if(!LC_Owned(s)) return(false);' in reg and reg.index('if(!LC_Owned(s)) return(false);') < reg.index('LC_Persist('), 'register needs the lock'
 per = t[t.index('bool LC_Persist('):t.index('int LC_IndexOf(')]
 assert 'if(!LC_Owned(s)) return(false);' in per and per.index('if(!LC_Owned(s)) return(false);') < per.index('LC_Save('), 'persist needs the lock'
+assert 'LC_DiskCheck(store,s,why)' in per and per.index('LC_DiskCheck(') < per.index('LC_Save(') and 'return(false);' in per[per.index('LC_DiskCheck('):per.index('LC_Save(')], 'persist validates the existing index first'
+dk = t[t.index('bool LC_DiskCheck('):t.index('bool LC_Persist(')]
+assert 'store.Exists(' in dk and 'store.Read(' in dk and 'LC_Decode(' in dk and 'Write' not in dk and 'Delete' not in dk, 'the validation only reads'
+assert t.count('store.Write(') == 1, 'one write call site (LC_Save): no repair, no second writer'
+assert 'LC_DiskCheck(store,s,disk_why)' in tick and tick.index('LC_DiskCheck(') < tick.index('LC_Sweep('), 'a tick validates the existing index before any action'
 rel = t[t.index('void LC_Release('):t.index('bool LC_Owned(')]
 assert 'if(s.lock_owned && s.lock_key!="")' in rel and rel.index('s.lock_owned && s.lock_key') < rel.index('lockstore.Unlock('), 'only the owner releases its own key'
 assert 'if(!s.lock_owned) return;' in tick and tick.index('if(!s.lock_owned) return;') < tick.index('LC_Sweep('), 'a tick without the lock does nothing'
@@ -147,6 +152,12 @@ mut K.mqh $EA 's/   EventKillTimer();/   EventKillTimer(); ETD_Register();/'
 expect_assert "$NEG/l3.py" "$NEG/K.mqh" "a T011 registration in the EA" "ETD_Register"
 mut M.mqh $HD '0,/   if(!LC_Owned(s)) return(false);/s//   \/\/ none/'
 expect_assert "$NEG/l2.py" "$NEG/M.mqh" "an index write without the lock" "needs the lock"
+mut T.mqh $HD '0,/   if(!LC_DiskCheck(store,s,why))/s//   if(false)/'
+expect_assert "$NEG/l2.py" "$NEG/T.mqh" "an update that does not validate the existing index" "validates the existing index first"
+mut U.mqh $HD 's/   if(!LC_DiskCheck(store,s,disk_why))                      \/\/ a damaged \/ unreadable index stops every action of the layer and is never written over/   if(false)/'
+expect_assert "$NEG/l2.py" "$NEG/U.mqh" "a tick that acts on a damaged index" "validates the existing index before any action"
+mut V.mqh $HD 's/   if(!store.Read(name,text)) {why="LIFECYCLE_STATE_UNREADABLE"; return(false);}/   if(!store.Read(name,text)) {why="LIFECYCLE_STATE_UNREADABLE"; store.Write(name,"");  return(false);}/'
+expect_assert "$NEG/l2.py" "$NEG/V.mqh" "a validation that repairs" "the validation only reads\|one write call site"
 mut N.mqh $HD 's/   if(s.lock_owned \&\& s.lock_key!="")/   if(s.lock_key!="")/'
 expect_assert "$NEG/l2.py" "$NEG/N.mqh" "a release by a non-owner" "only the owner releases"
 mut O.mqh $HD 's/   if(!s.lock_owned) return;                                \/\/ without the instance lock: no index access, no reconcile, no cancel/   \/\/ none/'
