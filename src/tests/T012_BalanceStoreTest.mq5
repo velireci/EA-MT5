@@ -241,6 +241,20 @@ string DiskClass(CFakePort &port,const string expected)
    if(port.has_start && port.f_text[i]==port.start_text) return("SAME");
    return(DBS_Decode(port.f_text[i],rec,why) ? "NEW" : "PARTIAL");
   }
+// an EMPTY expectation means "no condition on the text" (as in the Python table); a non-empty one must really be found in the reason
+bool ReasonOk(const string expected,const string reason)
+  {
+   if(expected=="") return(true);
+   return(StringFind(reason,expected)>=0);
+  }
+void TestReasonOk(void)
+  {
+   Check(ReasonOk("",""),"empty expectation / empty reason: no condition");
+   Check(ReasonOk("","anything"),"empty expectation / some text: no condition");
+   Check(ReasonOk("MISSING","DAMAGED: MISSING field"),"a present text is found");
+   Check(!ReasonOk("MISSING","DAMAGED: other"),"an absent text fails");
+   Check(!ReasonOk("MISSING",""),"a non-empty expectation fails against an empty reason");
+  }
 void RunRows(void)
   {
    for(int i=0;i<NROWS;i++)
@@ -262,7 +276,7 @@ void RunRows(void)
         }
       Print(tag,DBS_StatusName(res.status)," | ",res.reason);
       Check(DBS_StatusName(res.status)==X_STATUS[i],tag+"status "+DBS_StatusName(res.status));
-      Check(StringFind(res.reason,X_REASON[i])>=0,tag+"reason contains '"+X_REASON[i]+"' got '"+res.reason+"'");
+      Check(ReasonOk(X_REASON[i],res.reason),tag+"reason contains '"+X_REASON[i]+"' got '"+res.reason+"'");
       Check(res.source==X_SOURCE[i] && res.balance.amount==X_AMOUNT[i],tag+"source '"+res.source+"' and amount "+DoubleToString(res.balance.amount,6));
       Check(port.writes==X_WRITES[i] && port.bal_calls==X_READS[i],tag+"writes "+IntegerToString(port.writes)+" and balance reads "+IntegerToString(port.bal_calls));
       string dc=DiskClass(port,X_DISK[i]);
@@ -371,6 +385,7 @@ void TestIdempotentAndMidnight(void)
 void OnStart()
   {
    Print("T012 BALANCE STORE TEST: fake port, in-memory files; no real file, no account read, no order.");
+   TestReasonOk();
    RunRows();
    TestCodec();
    TestActions();

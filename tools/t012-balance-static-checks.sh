@@ -189,5 +189,22 @@ cp $HDR "$NEG/H.mqh"; echo "void x(){" >> "$NEG/H.mqh"
 python3 tools/t001-check-balance.py "$NEG/H.mqh" >/dev/null 2>&1 && { echo "  FAIL unbalanced brace"; FAIL=1; } || echo "  PASS unbalanced brace detected"
 
 echo
+echo "=== S7: reason-text check keeps the empty-expectation semantics ==="
+python3 -I - $TST <<'PYEOF' && echo "  PASS no raw StringFind on a table expectation; ReasonOk guards the empty text and has direct tests" || { echo "  FAIL"; FAIL=1; }
+import re, sys
+code = re.sub(r'//[^\n]*', '', open(sys.argv[1], encoding='ascii').read())
+assert not re.search(r'StringFind\([^;]*X_REASON\[', code), 'raw StringFind on X_REASON'
+body = code[code.index('bool ReasonOk('):]
+assert 'if(expected=="") return(true);' in body.split('}')[0]
+for need in ('ReasonOk("","")', 'ReasonOk("","anything")', '!ReasonOk("MISSING","DAMAGED: other")', 'ReasonOk("MISSING","DAMAGED: MISSING field")'):
+    assert need in code, need
+assert 'Check(ReasonOk(X_REASON[i],res.reason)' in code
+PYEOF
+NEG_T="$NEG/T.mq5"; sed 's/Check(ReasonOk(X_REASON\[i\],res.reason)/Check(StringFind(res.reason,X_REASON[i])>=0/' $TST > "$NEG_T"
+python3 -I - "$NEG_T" <<'PYEOF' && { echo "  FAIL raw StringFind not detected"; FAIL=1; } || echo "  PASS the old wrong form is detected"
+import re, sys
+code = re.sub(r'//[^\n]*', '', open(sys.argv[1]).read())
+sys.exit(1 if re.search(r'StringFind\([^;]*X_REASON\[', code) else 0)
+PYEOF
 [ $FAIL -eq 0 ] && echo "T012 BALANCE STATIC CHECKS: ALL PASS (static only; MetaEditor compile and MT5 run UNVERIFIED)" || echo "T012 BALANCE STATIC CHECKS: FAILURES"
 exit $FAIL
