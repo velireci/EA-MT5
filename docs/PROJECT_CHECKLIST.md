@@ -92,10 +92,10 @@ Status: moduli i pastër i sizing-ut i verifikuar (Python, MetaEditor, MT5); 10 
 - [ ] Anulimi në ndryshim drejtimi/sinjal të kundërt
 - [ ] Anulimi në fund seance dhe përpara lajmeve
 
-### 5. Menaxhimi 80% / 20% — NISUR (vetëm module të pastra T011; asnjë urdhër)
+### 5. Menaxhimi 80% / 20% — NISUR (T011: një cikël real demo i përcjellë nga pronari; jo i përfunduar)
 - [x] Ndarja 80/20 në hapa të plotë, aktivizimi në 2R si makinë gjendjesh dhe pajtimi me snapshot (module të pastra; shih T011 më poshtë)
-- [ ] Ekzekutuesi real që regjistron biletat e urdhrave, harta kërkesë→urdhër dhe rinisja
-- [ ] Mbyllja e 80% në 2R në broker dhe politika kur ndarja nuk realizohet (SPLIT_POLICY_UNSET)
+- [x] Ekzekutuesi që regjistron biletat, harta kërkesë→urdhër dhe rinisja: provuar në UNË cikël real demo (të përcjella nga pronari: BUY 0.05, urdhri mbyllës 58913523110, DONE, ALREADY_DONE pas rihapjes së MT5, sends 0). Jo SELL, jo rrugë dështimi, jo llogari live.
+- [ ] Mbyllja e 80% në 2R në broker: u provua në prag DIAGNOSTIK 4140.00 (jo aktivizim strategjik në 2R); politika kur ndarja nuk realizohet (SPLIT_POLICY_UNSET) mbetet vendim klienti
 - [ ] Pajtimi i entry plus kosto me +0.2%
 - [ ] Mbetja deri te TP/SL, pa trailing
 
@@ -190,14 +190,15 @@ Mbetet: orari nuk dërgon ende anulime ose mbyllje; persistence/catchup/lajmet t
 - [x] Filtra të pastër (lajme USD high ±30 min, serveri; spread me prag të furnizuar, -1 = UNSET) me lexues të hollë kalendari në EA; MANUAL mbetet parazgjedhja.
 - [ ] Verifikimi MT5/live i kalendarit dhe pragu i spread-it (vendim i hapur).
 
-## T011 — daljet 80/20 (vetëm module të pastra, pa urdhra)
+## T011 — daljet 80/20 (module + një cikël real demo i përcjellë; T011 NUK është i mbyllur)
+- [x] PROVA REALE DEMO (të përcjella nga pronari, jo ekzekutim i Claude, pa log të bashkëngjitur): opener 68da9b2 BUY 0.05 magic 777, position id 58913478802; harness 2bec28d REGISTER pa dërgim, ACTIVATE një kërkesë, urdhri mbyllës 58913523110; RECONCILE READY/CONFIRMED/DONE, confirmations 1, generation 4; pas mbylljes dhe rihapjes së MT5 ALREADY_DONE, sends 0, pa rishkrim; mbetja 0.01 u mbyll manualisht nga pronari; skedarët state/intent nuk u fshinë. Pragu 4140.00 ishte diagnostik. Provon vetëm këtë cikël (BUY, 0.05, një llogari demo).
 - [x] ExitSplit: Codex Python 9/0, MetaEditor 0/0, pronari MT5 SplitTest 234/0 (e3abea2).
 - [x] ExitActivation: Codex Python 12/0, MetaEditor 0/0, pronari MT5 1010/0 (d83426a).
 - [x] ExitReconciliation: pronari MT5 951/0, Codex kompilim 0/0 (të përcjella).
-- [x] ExitSnapshotAdapter (vetëm lexim, ca3bd57): Codex Python 10/0, MetaEditor AdapterTest/diagnostik 0/0; pronari MT5 15.10.2026 10:42:58: 391 passed, 0 failed (të përcjella). NUK provon hartën reale request→closing order dhe as pajtimin real: harta e ekzekutuesit mbetet input (ekzekutuesi nuk është ndërtuar).
-- [x] Ruajtja/rikthimi i gjendjes pas restart (ExitStateCodec + ExitStateFile, protokoll ruaj-para-dërgimit, pa urdhra): Python 29 teste OK dhe kontrolle statike; kompilimi, T011_PersistTest dhe T011_PersistFileTest në MT5 — UNVERIFIED. Nuk ka garanci atomike me brokerin.
-- [x] Rrjedha e restart-it LOAD → identitet → snapshot → ER_Reconcile → SAVE (ExitRestartFlow; pa urdhra, pa kërkesë të re, pa retry): Python 11 teste OK; kompilimi dhe T011_FlowTest/diagnostiku në MT5 — UNVERIFIED. Provat e pronarit (restart MT5 12/0) janë vetëm për restart të terminalit.
-- [ ] Hapat e hapur: ekzekutuesi që regjistron biletat, harta reale kërkesë→urdhër, rinisja, politikat e daljes. T011 mbetet pjesërisht i hapur.
+- [x] ExitSnapshotAdapter (vetëm lexim, ca3bd57): Codex Python 10/0, MetaEditor AdapterTest/diagnostik 0/0; pronari MT5 15.10.2026 10:42:58: 391 passed, 0 failed (të përcjella). Në atë commit nuk provonte hartën reale as pajtimin real; ZËVENDËSUAR nga prova reale demo më lart.
+- [x] Ruajtja/rikthimi i gjendjes pas restart (ExitStateCodec + ExitStateFile, protokoll ruaj-para-dërgimit, pa urdhra): Python 29 teste OK dhe kontrolle statike; T011_PersistTest 395/0 (të përcjella nga pronari te 0356f39) dhe PersistFile 31/0; kompilimi Codex 0/0 (të përcjella). Nuk ka garanci atomike me brokerin.
+- [x] Rrjedha e restart-it LOAD → identitet → snapshot → ER_Reconcile → SAVE (ExitRestartFlow; pa urdhra, pa kërkesë të re, pa retry): Python 11 teste OK; T011_FlowTest 261/0 (MT5, pronari) dhe Codex 0/0 (të përcjella). Provat e pronarit (restart MT5 12/0) janë vetëm për restart të terminalit.
+- [ ] Hapat e hapur: lidhja me ciklin e kuotave dhe 2R automatik, jetëgjatësia pas DONE (mbetja), rrugët e dështimit në broker real, rregulli i mbajtjes së skedarëve state/intent, kontrolli i modalitetit të llogarisë live, leximi i faqeve zyrtare API, politikat e daljes (vendime klienti). T011 mbetet pjesërisht i hapur.
 
 ## T012 — kufijtë ditorë
 - [x] DailyLimits (pronari MT5 604/0) dhe DailyPreviewGate (200/0); preview hipotetik DAILY_LOSS_LIMIT i konfirmuar nga pronari.
