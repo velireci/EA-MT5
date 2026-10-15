@@ -1075,7 +1075,7 @@ void Scenario_auto_registration_idempotent_after_management_started(void)
      }
   }
 
-void Scenario_auto_registration_synthetic_fill_never_registers_a_real_position(void)
+void Scenario_auto_registration_synthetic_fill_is_rejected(void)
   {
    for(int d=0;d<2;d++)
      {
@@ -1125,7 +1125,8 @@ void OnStart()
    Scenario_auto_registration_acknowledge_and_instances();
    Scenario_auto_registration_existing_record_needs_the_full_base();
    Scenario_auto_registration_idempotent_after_management_started();
-   Scenario_auto_registration_synthetic_fill_never_registers_a_real_position();
+   Scenario_auto_registration_synthetic_fill_is_rejected();
    PrintFormat("T019 ENTRY LIFECYCLE TEST finished: %d passed, %d failed",g_pass,g_fail);
   }
+
 

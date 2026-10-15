@@ -23,7 +23,7 @@ SCENARIOS = ['index_codec_and_damage', 'register_and_save_failure', 'startup_cle
              'release_only_by_owner_on_failure_paths', 'damage_during_run_never_overwritten', 'fill_report_and_registration_inputs',
              'auto_registration_confirms_once', 'auto_registration_idempotent_after_crash', 'auto_registration_refusals_keep_the_t011_contracts', 'auto_registration_transient_and_locks',
              'auto_registration_acknowledge_and_instances', 'auto_registration_existing_record_needs_the_full_base', 'auto_registration_idempotent_after_management_started',
-        'auto_registration_synthetic_fill_never_registers_a_real_position']
+        'auto_registration_synthetic_fill_is_rejected']
 EV_ALL_ENABLED = tp.EV_SESSION_END | tp.EV_NEWS_BLOCK | tp.EV_DAILY_LIMIT
 
 
@@ -930,7 +930,7 @@ class AutoRegistration(unittest.TestCase):
             self.assertEqual(status, lc.SINK_PENDING, detail)
             self.assertIn('POSITION_NOT_FOUND', detail)
 
-    def test_auto_registration_synthetic_fill_never_registers_a_real_position(self):
+    def test_auto_registration_synthetic_fill_is_rejected(self):
         for d in (1, -1):
             for prov, label in ((lc.PROV_SYNTHETIC, 'synthetic'), (lc.PROV_UNSET, 'unset')):
                 rw = RegWorld(self, d)                                  # a REAL position with the same identifier, magic, symbol, direction, volume and SL exists
@@ -1047,3 +1047,4 @@ class Mutants(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
