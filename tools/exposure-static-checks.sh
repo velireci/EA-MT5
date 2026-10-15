@@ -28,19 +28,22 @@ for w in ('OrderSend', 'OrderCheck', 'OrderCalcProfit', 'PositionClose', 'Positi
     assert w not in t, w
 assert re.findall(r'#include "([^"]+)"', t) == [], 'the core includes nothing'
 c = t[t.index('void EX_Compute('):]
-order = ['INPUT_UNSET', 'port.Account(', 'ACCOUNT_UNREADABLE', 'mode!=EX_HEDGING', 'port.Positions(', 'POSITIONS_INCOMPLETE', 'pos[i].magic!=magic', 'POSITION_TYPE_UNKNOWN',
-         'if(pend_policy==EX_PEND_COUNT)', 'port.Orders(', 'ORDERS_INCOMPLETE', 'ord[i].magic!=magic', 'ORDER_TYPE_UNKNOWN', 'r.ok=true;', 'EX_Usable(own[i])', 'port.Calc(', 'MathMax(0.0,-profit)',
-         'r.existing_risk=(r.risk_known ? total : -1.0)']
+order = ['INPUT_UNSET', 'port.Account(', 'ACCOUNT_UNREADABLE', 'mode!=EX_HEDGING', 'port.Positions(pos,', 'POSITIONS_INCOMPLETE', 'port.Positions(pos2,', 'EX_SameList(pos,np,pos2,np2)', 'POSITIONS_CHANGED',
+         'pos[i].magic!=magic', 'POSITION_TYPE_UNKNOWN', 'port.Orders(ord,', 'ORDERS_INCOMPLETE', 'port.Orders(ord2,', 'EX_SameList(ord,no,ord2,no2)', 'ORDERS_CHANGED', 'ord[i].magic!=magic', 'ORDER_TYPE_UNKNOWN',
+         'r.ok=true;', 'r.open_positions=nown_pos+(pend_policy==EX_PEND_COUNT ? nown_ord : 0)', 'nown_ord>0 && risk_policy==EX_RISK_UNSET', 'risk_policy==EX_RISK_INCLUDE ? nown : nown_pos', 'EX_Usable(own[i])',
+         'port.Calc(', 'MathMax(0.0,-profit)', 'r.existing_risk=(r.risk_known ? total : -1.0)']
 for o in order:
     assert o in c, 'missing step: ' + o
 pos = [c.index(o) for o in order]
 assert pos == sorted(pos), pos
-assert c.count('port.Orders(') == 1 and c.count('port.Calc(') == 1 and c.count('port.Positions(') == 1, 'call sites'
+assert c.count('port.Orders(') == 2 and c.count('port.Calc(') == 1 and c.count('port.Positions(') == 2, 'call sites (every list is read twice)'
+assert 'if(pend_policy==EX_PEND_COUNT)' not in c, 'the counting policy must not gate the order read or the risk'
+assert 'risk_policy!=EX_RISK_UNSET && risk_policy!=EX_RISK_INCLUDE && risk_policy!=EX_RISK_EXCLUDE' in c, 'risk policy validation'
 assert 'long EX_GatePositions(const SExResult &r) {return(r.ok ? r.open_positions : -1);}' in t, 'gate positions mapping'
 assert 'double EX_GateRisk(const SExResult &r) {return((r.ok && r.risk_known) ? r.existing_risk : -1.0);}' in t, 'gate risk mapping'
 assert 'pend_policy!=EX_PEND_COUNT && pend_policy!=EX_PEND_IGNORE' in c, 'pending policy default'
 PYEOF
-python3 -I "$NEG/x2.py" $CORE && echo "  PASS pure core, order of the checks, magic-only ownership, hedging only, unknown is -1, one read of each list, one calculation call site" || { echo "  FAIL"; FAIL=1; }
+python3 -I "$NEG/x2.py" $CORE && echo "  PASS pure core, order of the checks, magic-only ownership, hedging only, unknown is -1, two reads per list compared, counting policy separate from the risk policy, one calculation call site" || { echo "  FAIL"; FAIL=1; }
 
 echo "=== X3: the real port only reads; the EA wiring is opt-in and has no fallback ==="
 cat > "$NEG/x3.py" <<'PYEOF'
@@ -50,11 +53,23 @@ ea = re.sub(r'//[^\n]*', '', open(sys.argv[2], encoding='ascii').read())
 for w in ('OrderSend', 'OrderCheck', 'OrderDelete', 'PositionClose', 'CTrade', 'TRADE_ACTION', 'FileOpen', 'FileWrite', 'GlobalVariableSet', 'ObjectCreate', 'SymbolInfoDouble', 'DBS_', 'EntryTransportReal'):
     assert w not in real, 'real port: ' + w
 assert 'OrderCalcProfit(' in real and 'PositionsTotal()' in real and 'OrdersTotal()' in real, 'real reads'
+for g in ('PositionGetString(POSITION_SYMBOL,symbol)', 'PositionGetInteger(POSITION_MAGIC,magic)', 'PositionGetInteger(POSITION_TYPE,type)', 'PositionGetDouble(POSITION_VOLUME,volume)', 'PositionGetDouble(POSITION_PRICE_OPEN,price)',
+          'PositionGetDouble(POSITION_SL,sl)', 'OrderGetString(ORDER_SYMBOL,symbol)', 'OrderGetInteger(ORDER_MAGIC,magic)', 'OrderGetInteger(ORDER_TYPE,type)', 'OrderGetDouble(ORDER_VOLUME_CURRENT,volume)',
+          'OrderGetDouble(ORDER_PRICE_OPEN,price)', 'OrderGetDouble(ORDER_SL,sl)'):
+    assert g in real, 'a getter without the success flag: ' + g
+assert not re.search(r'(?<![A-Za-z_])(PositionGet|OrderGet)(Integer|Double|String)\((POSITION|ORDER)_[A-Z_]+\)', real), 'a getter that returns the value directly (a failure would read as 0)'
+assert 'PositionsTotal()!=total' in real and 'OrdersTotal()!=total' in real, 'the list is checked for a change while it is read'
+assert 'magic>=0' in real, 'a negative magic is a failed read'
 assert 'class CExRealPort : public CExPort' in real
 assert 'InpExposureSource=EOI_EXPOSURE_EXPLICIT' in ea, 'exposure source default'
 assert 'InpPendingPolicy=EOI_PENDING_UNSET' in ea, 'pending policy default'
+assert 'InpPendingRiskPolicy=EOI_PENDRISK_UNSET' in ea, 'pending risk policy default'
+cf = ea[ea.index('bool Configure(void)'):ea.index('SEoFeedCfg fc;')]
+assert '(int)InpExposureSource!=(int)EOI_EXPOSURE_EXPLICIT && (int)InpExposureSource!=(int)EOI_EXPOSURE_ACCOUNT_READ) return(false)' in cf, 'an unknown exposure source is not refused'
+assert 'InpPendingPolicy' in cf and 'InpPendingRiskPolicy' in cf, 'policy enums are validated'
+assert 'Configure()' in ea and 'INIT_PARAMETERS_INCORRECT' in ea[ea.index('int OnInit'):], 'a refused configuration stops OnInit'
 w = ea[ea.index('if(InpExposureSource==EOI_EXPOSURE_ACCOUNT_READ)'):ea.index('SEoOutcome out;')]
-assert 'EX_Compute(InpEaMagic,_Symbol,(int)InpPendingPolicy' in w and 'g_cfg.open_positions=EX_GatePositions(ex)' in w and 'g_cfg.existing_risk=EX_GateRisk(ex)' in w, 'wiring'
+assert 'EX_Compute(InpEaMagic,_Symbol,(int)InpPendingPolicy,(int)InpPendingRiskPolicy,' in w and 'g_cfg.open_positions=EX_GatePositions(ex)' in w and 'g_cfg.existing_risk=EX_GateRisk(ex)' in w, 'wiring'
 assert 'InpOpenPositions' not in w and 'InpExistingRisk' not in w, 'a fallback to the manual exposure inputs'
 assert ea.count('EX_Compute(') == 1 and ea.count('CExRealPort') == 1, 'one read per build'
 assert 'OrderSend' not in ea and 'CEnRealTransport' not in ea
@@ -98,6 +113,16 @@ mut G.mqh $REAL 's/      return(OrderCalcProfit(/      return(OrderSend() \&\& O
 expect_assert "$NEG/x3.py" "$NEG/G.mqh $EA" "an order call in the real port" "OrderSend"
 mut H.mqh $EA 's/^input ENUM_EO_PENDING InpPendingPolicy=EOI_PENDING_UNSET;/input ENUM_EO_PENDING InpPendingPolicy=EOI_PENDING_COUNT_AS_POSITIONS;/'
 expect_assert "$NEG/x3.py" "$REAL $NEG/H.mqh" "a defaulted pending policy in the EA" "pending policy default"
+mut J.mqh $CORE 's/   int nrisk=(risk_policy==EX_RISK_INCLUDE ? nown : nown_pos);/   int nrisk=(pend_policy==EX_PEND_COUNT ? nown : nown_pos);/'
+expect_assert "$NEG/x2.py" "$NEG/J.mqh" "the counting policy deciding the risk of a pending order" "missing step: risk_policy==EX_RISK_INCLUDE"
+mut K.mqh $CORE 's/   if(!EX_SameList(pos,np,pos2,np2)) {r.reason="POSITIONS_CHANGED"; return;}/   if(false) {}/'
+expect_assert "$NEG/x2.py" "$NEG/K.mqh" "a position list compared with nothing" "missing step: EX_SameList(pos"
+mut L.mqh $REAL 's/PositionGetInteger(POSITION_MAGIC,magic)/(PositionGetInteger(POSITION_MAGIC)>=0)/'
+expect_assert "$NEG/x3.py" "$NEG/L.mqh $EA" "a magic getter without the success flag" "getter without the success flag"
+mut M2.mqh $REAL 's/      if(PositionsTotal()!=total) {complete=false; n=0;}/      \/\/ none/'
+expect_assert "$NEG/x3.py" "$NEG/M2.mqh $EA" "no check that the list changed while it was read" "checked for a change while it is read"
+mut N.mqh $EA 's/   if((int)InpExposureSource!=(int)EOI_EXPOSURE_EXPLICIT \&\& (int)InpExposureSource!=(int)EOI_EXPOSURE_ACCOUNT_READ) return(false);/   \/\/ none/'
+expect_assert "$NEG/x3.py" "$REAL $NEG/N.mqh" "an unknown exposure source falling through to the manual inputs" "not refused"
 mut I.mqh $EA 's/      g_cfg.existing_risk=EX_GateRisk(ex);/      g_cfg.existing_risk=(ex.risk_known ? ex.existing_risk : InpExistingRisk);/'
 expect_assert "$NEG/x3.py" "$REAL $NEG/I.mqh" "a fallback to the manual exposure input" "fallback to the manual\|wiring"
 

@@ -12,6 +12,8 @@ public:
       margin_mode=(int)AccountInfoInteger(ACCOUNT_MARGIN_MODE);
       ok=(AccountInfoInteger(ACCOUNT_LOGIN)>0 && GetLastError()==0);
      }
+   // Every getter uses the overload that RETURNS a success flag: a failed getter must never become 0 (a magic of 0 would read as a manual position). Any failure, or a count that changed while the list was
+   // read, makes the list INCOMPLETE (= unknown); the core additionally reads every list twice and compares.
    virtual void Positions(SExItem &p[],int &n,bool &complete)
      {
       n=0;
@@ -24,16 +26,22 @@ public:
         {
          ulong t=PositionGetTicket(i);
          if(t==0) {complete=false; return;}
+         long type=-1,magic=-1;
+         double volume=0.0,price=0.0,sl=0.0;
+         string symbol="";
+         bool got=(PositionGetString(POSITION_SYMBOL,symbol) && symbol!="" && PositionGetInteger(POSITION_MAGIC,magic) && magic>=0 && PositionGetInteger(POSITION_TYPE,type) &&
+                   PositionGetDouble(POSITION_VOLUME,volume) && PositionGetDouble(POSITION_PRICE_OPEN,price) && PositionGetDouble(POSITION_SL,sl));
+         if(!got) {complete=false; n=0; return;}
          p[n].ticket=t;
-         p[n].symbol=PositionGetString(POSITION_SYMBOL);
-         p[n].magic=PositionGetInteger(POSITION_MAGIC);
-         long type=PositionGetInteger(POSITION_TYPE);
+         p[n].symbol=symbol;
+         p[n].magic=magic;
          p[n].kind=(type==POSITION_TYPE_BUY ? 0 : type==POSITION_TYPE_SELL ? 1 : 2);
-         p[n].volume=PositionGetDouble(POSITION_VOLUME);
-         p[n].price=PositionGetDouble(POSITION_PRICE_OPEN);
-         p[n].sl=PositionGetDouble(POSITION_SL);
+         p[n].volume=volume;
+         p[n].price=price;
+         p[n].sl=sl;
          n++;
         }
+      if(PositionsTotal()!=total) {complete=false; n=0;}      // the list changed while it was read
      }
    virtual void Orders(SExItem &o[],int &n,bool &complete)
      {
@@ -47,18 +55,24 @@ public:
         {
          ulong t=OrderGetTicket(i);
          if(t==0) {complete=false; return;}
-         o[n].ticket=t;
-         o[n].symbol=OrderGetString(ORDER_SYMBOL);
-         o[n].magic=OrderGetInteger(ORDER_MAGIC);
-         long type=OrderGetInteger(ORDER_TYPE);
+         long type=-1,magic=-1;
+         double volume=0.0,price=0.0,sl=0.0;
+         string symbol="";
+         bool got=(OrderGetString(ORDER_SYMBOL,symbol) && symbol!="" && OrderGetInteger(ORDER_MAGIC,magic) && magic>=0 && OrderGetInteger(ORDER_TYPE,type) &&
+                   OrderGetDouble(ORDER_VOLUME_CURRENT,volume) && OrderGetDouble(ORDER_PRICE_OPEN,price) && OrderGetDouble(ORDER_SL,sl));
+         if(!got) {complete=false; n=0; return;}
          bool buy=(type==ORDER_TYPE_BUY_LIMIT || type==ORDER_TYPE_BUY_STOP || type==ORDER_TYPE_BUY_STOP_LIMIT);
          bool sell=(type==ORDER_TYPE_SELL_LIMIT || type==ORDER_TYPE_SELL_STOP || type==ORDER_TYPE_SELL_STOP_LIMIT);
+         o[n].ticket=t;
+         o[n].symbol=symbol;
+         o[n].magic=magic;
          o[n].kind=(buy ? 0 : sell ? 1 : 2);
-         o[n].volume=OrderGetDouble(ORDER_VOLUME_CURRENT);
-         o[n].price=OrderGetDouble(ORDER_PRICE_OPEN);
-         o[n].sl=OrderGetDouble(ORDER_SL);
+         o[n].volume=volume;
+         o[n].price=price;
+         o[n].sl=sl;
          n++;
         }
+      if(OrdersTotal()!=total) {complete=false; n=0;}
      }
    virtual bool Calc(const bool buy,const string symbol,const double volume,const double open,const double sl,double &profit)
      {

@@ -1,7 +1,7 @@
 // T018 EXPOSURE READER core (mirror of tests/exposure_reference.py): READ-ONLY account exposure of THIS EA for the entry gate, over an abstract port (the terminal reads are in ExposureReaderReal.mqh).
 // Ownership is the magic number ONLY and only on a HEDGING account (netting / exchange merge positions, so a manual trade cannot be separated: UNKNOWN). A position / order of another magic is counted as
 // foreign information and never owned. Risk = loss at the stop from the BROKER calculation (calc port); a missing SL, price or volume, an unreadable calculation, an incomplete list or an UNSET pending
-// policy never becomes zero: the value is UNKNOWN (-1) and the gate blocks. Whether a pending order reserves a position is the owner's policy (EX_PEND_*), never defaulted. No order function here.
+// policy never becomes zero: the value is UNKNOWN (-1) and the gate blocks. Whether an owned pending order reserves a position (EX_PEND_*) and whether its risk is part of the existing risk (EX_RISK_*) are two SEPARATE owner decisions, never defaulted; an UNSET risk policy makes the risk UNKNOWN as soon as an owned pending order exists. Every list is read twice and a difference means it changed while it was read: UNKNOWN. No order function here.
 #ifndef VELO_EXPOSURE_READER_MQH
 #define VELO_EXPOSURE_READER_MQH
 
@@ -9,6 +9,9 @@
 #define EX_PEND_UNSET 0
 #define EX_PEND_COUNT 1
 #define EX_PEND_IGNORE 2
+#define EX_RISK_UNSET 0
+#define EX_RISK_INCLUDE 1
+#define EX_RISK_EXCLUDE 2
 #define EX_HEDGING 2
 
 struct SExItem
@@ -62,10 +65,24 @@ double EX_GateRisk(const SExResult &r) {return((r.ok && r.risk_known) ? r.existi
 
 bool EX_Usable(const SExItem &i) {return(i.sl>0.0 && MathIsValidNumber(i.sl) && i.price>0.0 && MathIsValidNumber(i.price) && i.volume>0.0 && MathIsValidNumber(i.volume));}
 
-void EX_Compute(const long magic,const string symbol,const int pend_policy,CExPort *port,SExResult &r)
+bool EX_SameItem(const SExItem &a,const SExItem &b)
+  {
+   return(a.ticket==b.ticket && a.symbol==b.symbol && a.magic==b.magic && a.kind==b.kind && a.volume==b.volume && a.price==b.price && a.sl==b.sl);
+  }
+
+bool EX_SameList(const SExItem &a[],const int na,const SExItem &b[],const int nb)
+  {
+   if(na!=nb) return(false);
+   for(int i=0;i<na;i++)
+      if(!EX_SameItem(a[i],b[i])) return(false);
+   return(true);
+  }
+
+void EX_Compute(const long magic,const string symbol,const int pend_policy,const int risk_policy,CExPort *port,SExResult &r)
   {
    EX_ResultInit(r);
-   if(magic<=0 || symbol=="" || (pend_policy!=EX_PEND_COUNT && pend_policy!=EX_PEND_IGNORE)) {r.reason="INPUT_UNSET"; return;}
+   if(magic<=0 || symbol=="" || (pend_policy!=EX_PEND_COUNT && pend_policy!=EX_PEND_IGNORE) ||
+      (risk_policy!=EX_RISK_UNSET && risk_policy!=EX_RISK_INCLUDE && risk_policy!=EX_RISK_EXCLUDE)) {r.reason="INPUT_UNSET"; return;}
    bool acc_ok=false;
    int mode=-1;
    port.Account(acc_ok,mode);
@@ -76,6 +93,12 @@ void EX_Compute(const long magic,const string symbol,const int pend_policy,CExPo
    bool pc=false;
    port.Positions(pos,np,pc);
    if(!pc || np<0 || np>EX_MAX) {r.reason="POSITIONS_INCOMPLETE"; return;}
+   SExItem pos2[];
+   int np2=0;
+   bool pc2=false;
+   port.Positions(pos2,np2,pc2);
+   if(!pc2) {r.reason="POSITIONS_INCOMPLETE"; return;}
+   if(!EX_SameList(pos,np,pos2,np2)) {r.reason="POSITIONS_CHANGED"; return;}
    SExItem own[];
    ArrayResize(own,0);
    int nown=0;
@@ -88,29 +111,40 @@ void EX_Compute(const long magic,const string symbol,const int pend_policy,CExPo
       nown++;
      }
    int nown_pos=nown;
-   if(pend_policy==EX_PEND_COUNT)
+   SExItem ord[];
+   int no=0;
+   bool oc=false;
+   port.Orders(ord,no,oc);
+   if(!oc || no<0 || no>EX_MAX) {r.reason="ORDERS_INCOMPLETE"; return;}
+   SExItem ord2[];
+   int no2=0;
+   bool oc2=false;
+   port.Orders(ord2,no2,oc2);
+   if(!oc2) {r.reason="ORDERS_INCOMPLETE"; return;}
+   if(!EX_SameList(ord,no,ord2,no2)) {r.reason="ORDERS_CHANGED"; return;}
+   int nown_ord=0;
+   for(int i=0;i<no;i++)
      {
-      SExItem ord[];
-      int no=0;
-      bool oc=false;
-      port.Orders(ord,no,oc);
-      if(!oc || no<0 || no>EX_MAX) {r.reason="ORDERS_INCOMPLETE"; return;}
-      for(int i=0;i<no;i++)
-        {
-         if(ord[i].magic!=magic) {r.foreign_pending++; continue;}
-         if(ord[i].kind!=0 && ord[i].kind!=1) {r.reason="ORDER_TYPE_UNKNOWN"; return;}
-         ArrayResize(own,nown+1);
-         own[nown]=ord[i];
-         nown++;
-        }
+      if(ord[i].magic!=magic) {r.foreign_pending++; continue;}
+      if(ord[i].kind!=0 && ord[i].kind!=1) {r.reason="ORDER_TYPE_UNKNOWN"; return;}
+      ArrayResize(own,nown+1);
+      own[nown]=ord[i];
+      nown++;
+      nown_ord++;
      }
    r.ok=true;
    r.reason="OK";
-   r.pending=(pend_policy==EX_PEND_COUNT ? nown-nown_pos : 0);
-   r.open_positions=nown;
+   r.pending=nown_ord;
+   r.open_positions=nown_pos+(pend_policy==EX_PEND_COUNT ? nown_ord : 0);
    double total=0.0;
    r.risk_known=true;
-   for(int i=0;i<nown;i++)
+   if(nown_ord>0 && risk_policy==EX_RISK_UNSET)
+     {
+      r.risk_known=false;
+      r.risk_reason="PENDING_RISK_POLICY_UNSET: "+IntegerToString(nown_ord)+" owned pending order(s)";
+     }
+   int nrisk=(risk_policy==EX_RISK_INCLUDE ? nown : nown_pos);
+   for(int i=0;i<nrisk && r.risk_known;i++)
      {
       string what=(i<nown_pos ? "position " : "order ")+IntegerToString((long)own[i].ticket);
       if(!EX_Usable(own[i])) {r.risk_known=false; r.risk_reason=what+": no usable SL / price / volume"; break;}

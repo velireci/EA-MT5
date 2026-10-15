@@ -4,7 +4,7 @@
 //   Every source / selection / policy input is UNSET by default and UNSET blocks. Exposure: EXPLICIT inputs by default (-1 = unknown) or the opt-in READ-ONLY account reader (T018: this EA magic, hedging account, pending policy explicit); the trade counter stays an explicit input. Chart symbol only (incl. XAUUSD.fx).
 //   FAKE entry records persist in VELO_T016_FAKE_ files. Baseline, halt and fake orders remain in memory; this is not complete orchestrator recovery or proof of broker execution.
 #property strict
-#property version "1.02"
+#property version "1.03"
 #include "include/EntryOrchestratorFeed.mqh"
 #include "include/EntryTransportFake.mqh"
 #include "include/ExposureReaderReal.mqh"
@@ -19,6 +19,7 @@ enum ENUM_EO_SL {EOI_SL_UNSELECTED=0,EOI_SL_BROKEN_LEVEL_PRICE_PLUS_BUFFER=1};
 enum ENUM_EO_TARGET {EOI_TGT_UNSELECTED=0,EOI_TGT_NONE_2R_MINIMUM=1};
 enum ENUM_EO_EXPOSURE {EOI_EXPOSURE_EXPLICIT=0,EOI_EXPOSURE_ACCOUNT_READ=1};
 enum ENUM_EO_PENDING {EOI_PENDING_UNSET=0,EOI_PENDING_COUNT_AS_POSITIONS=1,EOI_PENDING_IGNORE=2};
+enum ENUM_EO_PENDING_RISK {EOI_PENDRISK_UNSET=0,EOI_PENDRISK_INCLUDE=1,EOI_PENDRISK_EXCLUDE=2};
 enum ENUM_EO_FILLING {EOI_FILL_UNSET=0,EOI_FILL_RETURN=1};
 enum ENUM_EO_EXPIRY {EOI_EXP_UNSET=0,EOI_EXP_GTC=1,EOI_EXP_SECONDS=2};
 
@@ -37,7 +38,8 @@ input long InpMaxQuoteAgeSeconds=-1;         // -1 = UNSET
 input long InpGateMaxAgeSeconds=-1;          // age of the gate evidence; -1 = UNSET
 input long InpPermitMaxAgeSeconds=-1;        // executor permit age; -1 = UNSET
 input ENUM_EO_EXPOSURE InpExposureSource=EOI_EXPOSURE_EXPLICIT; // ACCOUNT_READ = READ-ONLY: open positions (+ pending per policy) and the loss-at-SL risk of THIS EA magic on a HEDGING account; the two explicit exposure inputs below are then IGNORED (no fallback)
-input ENUM_EO_PENDING InpPendingPolicy=EOI_PENDING_UNSET; // ACCOUNT_READ only: whether an owned pending order reserves a position (owner policy; UNSET blocks)
+input ENUM_EO_PENDING InpPendingPolicy=EOI_PENDING_UNSET; // ACCOUNT_READ only: whether an owned pending order RESERVES a position (owner policy; UNSET blocks)
+input ENUM_EO_PENDING_RISK InpPendingRiskPolicy=EOI_PENDRISK_UNSET; // ACCOUNT_READ only: whether the RISK of an owned pending order is part of the existing risk (a separate owner policy; UNSET = risk unknown while such an order exists)
 input long InpOpenPositions=-1;              // explicit external snapshot; -1 = unknown (blocks)
 input long InpTradesToday=-1;                // also the trade counter of the daily check; -1 = unknown
 input double InpExistingRisk=-1;             // -1 = unknown
@@ -137,6 +139,10 @@ void Status(const string text)
 
 bool Configure(void)
   {
+   // an unknown enum value (a preset or a hand-typed number) is refused here; it must never fall through to the manual exposure inputs
+   if((int)InpExposureSource!=(int)EOI_EXPOSURE_EXPLICIT && (int)InpExposureSource!=(int)EOI_EXPOSURE_ACCOUNT_READ) return(false);
+   if((int)InpPendingPolicy<(int)EOI_PENDING_UNSET || (int)InpPendingPolicy>(int)EOI_PENDING_IGNORE) return(false);
+   if((int)InpPendingRiskPolicy<(int)EOI_PENDRISK_UNSET || (int)InpPendingRiskPolicy>(int)EOI_PENDRISK_EXCLUDE) return(false);
    SEoFeedCfg fc;
    fc.source=(int)InpContextSource;
    fc.level_proposal=(InpM15Level==EOI_SWING_LATEST_FRACTAL_PROPOSAL);
@@ -211,7 +217,7 @@ void Poll()
      {
       SExResult ex;
       CExRealPort port;
-      EX_Compute(InpEaMagic,_Symbol,(int)InpPendingPolicy,GetPointer(port),ex);      // InpPendingPolicy: 1 = EX_PEND_COUNT, 2 = EX_PEND_IGNORE, 0 = UNSET
+      EX_Compute(InpEaMagic,_Symbol,(int)InpPendingPolicy,(int)InpPendingRiskPolicy,GetPointer(port),ex);      // 1 = COUNT / INCLUDE, 2 = IGNORE / EXCLUDE, 0 = UNSET
       g_cfg.open_positions=EX_GatePositions(ex);
       g_cfg.existing_risk=EX_GateRisk(ex);
       PrintFormat("T018 EXPOSURE source=ACCOUNT_READ (read-only) ok=%d reason=%s owned+reserved=%I64d pending=%I64d foreign_positions=%I64d foreign_pending=%I64d risk_known=%d risk=%.2f %s",
