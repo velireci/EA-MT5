@@ -16,7 +16,7 @@ SIG = te.SIGNAL
 SCENARIOS = ['index_codec_and_damage', 'register_and_save_failure', 'startup_clean', 'startup_halts_on_unprovable', 'startup_keeps_open_pending', 'tick_fill_unmanaged',
              'cancel_gated_by_enabled_events', 'cancel_uncertain_halts', 'due_events_from_facts', 'damaged_state_never_overwritten',
              'index_saved_before_send', 'no_send_when_index_unusable', 'crash_windows_restart_halts', 'two_instances_no_lost_update', 'refused_instance_and_wrong_release',
-             'release_only_by_owner_on_failure_paths', 'damage_during_run_never_overwritten']
+             'release_only_by_owner_on_failure_paths', 'damage_during_run_never_overwritten', 'fill_report_and_registration_inputs']
 EV_ALL_ENABLED = tp.EV_SESSION_END | tp.EV_NEWS_BLOCK | tp.EV_DAILY_LIMIT
 
 
@@ -201,8 +201,11 @@ class Tick(unittest.TestCase):
             w.tr.orders[0].state = en.OS_FILLED
             w.tr.orders[0].position_id = 4242
             notes = lc.tick(w.cfg, w.tr, w.store, st, 0, 0)
-            self.assertEqual(st.ids, [])
+            self.assertEqual(st.ids, [SIG], 'reported first, forgotten only on the next tick')
             self.assertTrue(any(n.startswith('FILLED_UNMANAGED') for n in notes))
+            self.assertEqual(lc.tick(w.cfg, w.tr, w.store, st, 0, 0), [])
+            self.assertEqual(st.ids, [])
+            self.assertEqual(index_ids(w.store, w.tr.account.login), [])
             self.assertEqual(st.halted, '')
             self.assertEqual((w.tr.sends, w.tr.cancels), (1, 0), 'no registration, no cancel, no second send')
             self.assertEqual(w.rec().state, en.ST_FILLED)
@@ -600,6 +603,69 @@ class DamageDuringRun(unittest.TestCase):
             self.assertEqual(index_ids(w3.store, w3.tr.account.login), [out.spb.signal_id])
 
 
+class FillHandoff(unittest.TestCase):
+    """fill -> T011 management, WITHOUT any change of the T011 contracts: the fill is reported with the exact inputs of the EXPLICIT registration script (the owner still asserts the initial SL);
+    the report is at-least-once (the index entry is forgotten only on the tick after the report, so a restart in between reports it again)"""
+
+    def filled(self, direction, tp=None, magic=None):
+        w = te.World(direction)
+        if tp is not None:
+            w.plan = te.plan(direction, tp=tp)
+            w.permit = te.permit_for(w.plan, w.tr)
+        st = owner(w.store, w.tr.account.login)
+        res, guard, why = guarded_place(w, st)
+        self.assertEqual(res.final, en.R_PLACED, why)
+        w.tr.orders[0].state = en.OS_FILLED
+        w.tr.orders[0].position_id = 4242
+        if magic is not None:
+            w.cfg.ea_magic = magic
+        return w, st
+
+    def test_the_report_carries_the_exact_registration_inputs(self):
+        for direction, side, tp in ((1, 'BUY', 2005.0), (-1, 'SELL', 1995.0)):
+            w, st = self.filled(direction, tp=tp)
+            rec_before = dict(w.store.files)
+            notes = lc.tick(w.cfg, w.tr, w.store, st, 0, 0)
+            text = ' '.join(notes)
+            rec = w.rec()
+            for frag in ('FILLED_UNMANAGED ' + SIG, 'InpEnabled=true', 'InpRPolicy=R_GEOM', 'InpEaMagic=777', 'InpPositionId=4242', 'InpSymbol=XAUUSD', 'InpDirection=' + side,
+                         'InpInitialSl=%.8f' % rec.s, 'InpTpPrice=%.8f' % tp, 'InpVolumeInitial=%.8f' % rec.volume):
+                self.assertIn(frag, text, side)
+            self.assertNotIn('NOT_REGISTRABLE', text, side)
+            self.assertEqual(set(w.store.files) - set(rec_before), set(), 'the report writes nothing of T011 and creates no file')
+            self.assertEqual((w.tr.sends, w.tr.cancels), (1, 0))
+
+    def test_a_tp_that_is_not_beyond_2r_is_reported_as_not_registrable(self):
+        for direction in (1, -1):
+            w, st = self.filled(direction)                  # the default plan: TP == the 2R level (what the 2R-minimum target rule produces)
+            text = ' '.join(lc.tick(w.cfg, w.tr, w.store, st, 0, 0))
+            self.assertIn('NOT_REGISTRABLE', text)
+            self.assertIn('TP_EQUALS_2R', text)
+            w3, st3 = self.filled(direction, tp=1999.0 if direction == 1 else 2001.0)
+            self.assertIn('TP_BEFORE_2R', ' '.join(lc.tick(w3.cfg, w3.tr, w3.store, st3, 0, 0)))
+
+    def test_a_record_of_another_magic_is_never_reported_for_registration(self):
+        w, st = self.filled(1, tp=2005.0)
+        w.cfg.ea_magic = 778                                 # the record was written with 777: the executor's own identity proof blocks it first
+        text = ' '.join(lc.tick(w.cfg, w.tr, w.store, st, 0, 0))
+        self.assertIn('IDENTITY_MISMATCH', text)
+        self.assertNotIn('T011_REGISTRATION_INPUTS', text)
+        self.assertIn('UNRESOLVED_ENTRY_RECORD', st.halted)
+
+    def test_the_report_is_at_least_once_across_a_restart(self):
+        for direction in (1, -1):
+            w, st = self.filled(direction, tp=2005.0 if direction == 1 else 1995.0)
+            self.assertTrue(any(n.startswith('FILLED_UNMANAGED') for n in lc.tick(w.cfg, w.tr, w.store, st, 0, 0)))
+            lc.release(w.store, st)                           # the process dies after the report, before the next tick
+            tr, store = new_process(w, keep_book=True)
+            st2, notes = start(w.cfg, tr, store)
+            self.assertTrue(any(n.startswith('FILLED_UNMANAGED') for n in notes), 'reported again after the restart')
+            self.assertEqual(st2.ids, [SIG])
+            lc.tick(w.cfg, tr, store, st2, 0, 0)
+            self.assertEqual(st2.ids, [])
+            self.assertEqual(index_ids(store, w.tr.account.login), [])
+
+
 class Sources(unittest.TestCase):
     def test_mql_scenarios_pinned(self):
         with open(os.path.join(ROOT, 'src', 'tests', 'EntryLifecycleTest.mq5'), encoding='ascii') as f:
@@ -615,7 +681,7 @@ class Mutants(unittest.TestCase):
 
     def _suite_failures(self):
         suite = unittest.TestSuite()
-        for cls in (Index, Startup, Tick, IndexBeforeSend, Crash, Instances, DamageDuringRun):
+        for cls in (Index, Startup, Tick, IndexBeforeSend, Crash, Instances, DamageDuringRun, FillHandoff):
             for n in unittest.TestLoader().getTestCaseNames(cls):
                 suite.addTest(cls(n))
         res = unittest.TestResult()
@@ -666,6 +732,10 @@ class Mutants(unittest.TestCase):
                 ("    if st.lock_owned and st.lock_key:\n        lockstore.unlock(st.lock_key)", "    if st.lock_key:\n        lockstore.unlock(st.lock_key)"),
                 ("    if not lockstore.lock(key):", "    if False:"),
                 ("    if not st.lock_owned:\n        st.halted = st.halted or 'LIFECYCLE_LOCK_NOT_OWNED'\n        return False", "    if False:\n        return False"),
+                # fill -> T011: reported first, forgotten on the next tick; the report states why T011 would refuse
+                ("        elif v == FILLED and sid not in st.noted:", "        elif False:"),
+                ("    elif abs(rec.tp - geo.level_2r) < sym.tick_size / 2.0:", "    elif False:"),
+                ("    elif (buy and rec.tp < geo.level_2r) or (not buy and rec.tp > geo.level_2r):", "    elif False:"),
                 # Codex finding on 10a2ee1: the existing index is validated before every update and every lifecycle action
                 ("    ok, why = disk_check(store, st)\n    if not ok:\n        st.halted = st.halted or why\n        notes.append(why)\n        return False\n    if not save(store, st):", "    if not save(store, st):"),
                 ("    ok, why = disk_check(store, st)\n    if not ok:\n        st.halted = st.halted or why\n        notes.append(why)\n        return notes\n", "    pass\n"),

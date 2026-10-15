@@ -23,6 +23,8 @@ struct SLcState
    string halted;
    string ids[LC_MAX];
    int n;
+   string noted[LC_MAX];        // fills already reported in THIS process (not persisted): a fill is forgotten only on the tick after its report
+   int n_noted;
    bool lock_owned;             // exclusive ownership of the index (the existing store lock); every index access needs it
    string lock_key;
   };
@@ -34,7 +36,8 @@ void LC_StateInit(SLcState &s,const long login)
    s.n=0;
    s.lock_owned=false;
    s.lock_key="";
-   for(int i=0;i<LC_MAX;i++) s.ids[i]="";
+   s.n_noted=0;
+   for(int i=0;i<LC_MAX;i++) {s.ids[i]=""; s.noted[i]="";}
   }
 
 string LC_LockKey(const long login) {return("VELO_T013_LOCK_INDEX_"+IntegerToString(login));}
@@ -225,6 +228,43 @@ int LC_Verdict(const SEnResult &r)
    return(LC_V_HALT);
   }
 
+int LC_NotedIndex(const SLcState &s,const string id)
+  {
+   for(int i=0;i<s.n_noted;i++)
+      if(s.noted[i]==id) return(i);
+   return(-1);
+  }
+
+void LC_NotedRemove(SLcState &s,const int i)
+  {
+   for(int k=i;k<s.n_noted-1;k++) s.noted[k]=s.noted[k+1];
+   s.n_noted--;
+   s.noted[s.n_noted]="";
+  }
+
+// The fill is NOT registered with T011 (the registration stays the explicit, owner-asserted script): this is the exact input set of that script, read from the executor record, with every reason
+// T011 would refuse it. It writes nothing and calls nothing of T011.
+string LC_Proposal(CEnTransport *tr,CEnStore *store,const long login,const string id)
+  {
+   SEnRecord rec;
+   string why;
+   if(EN_Load(store,EN_FileName(login,id),rec,why)!=1) return("T011_REGISTRATION: NOT_REGISTRABLE (the executor record is unreadable)");
+   SEnSymbol sym;
+   tr.ReadSymbol(rec.symbol,sym);
+   string reasons="";
+   if(rec.state!=EN_ST_FILLED || rec.linked!=1 || rec.position_id==0) reasons+="FILL_NOT_PROVEN";
+   bool buy=(rec.direction==1);
+   STgResult geo;
+   TG_Compute(buy ? TG_BUY : TG_SELL,rec.e,rec.s,false,0.0,sym.tick_size,sym.digits,sym.point,sym.stops_level,false,0.0,0.0,geo);
+   if(geo.status!=TG_OK) reasons+=(reasons=="" ? "" : "; ")+"GEOMETRY_REFUSED: "+TG_StatusName(geo.status);
+   else if(MathAbs(rec.tp-geo.level_2r)<sym.tick_size/2.0) reasons+=(reasons=="" ? "" : "; ")+"TP_EQUALS_2R: T011 refuses a TP that is not strictly beyond the 2R level (the remainder behaviour is an open decision)";
+   else if((buy && rec.tp<geo.level_2r) || (!buy && rec.tp>geo.level_2r)) reasons+=(reasons=="" ? "" : "; ")+"TP_BEFORE_2R: inconsistent with the minimum of 2R";
+   string out="T011_REGISTRATION_INPUTS (the explicit script; the owner asserts the initial SL): InpEnabled=true InpRPolicy=R_GEOM InpEaMagic="+IntegerToString(rec.magic)+" InpPositionId="+IntegerToString((long)rec.position_id)+
+              " InpSymbol="+rec.symbol+" InpDirection="+(buy ? "BUY" : "SELL")+" InpInitialSl="+DoubleToString(rec.s,8)+" InpTpPrice="+DoubleToString(rec.tp,8)+" InpVolumeInitial="+DoubleToString(rec.volume,8)+
+              " (planned entry "+DoubleToString(rec.e,8)+"; R_GEOM is derived from the real open price)";
+   return(out+(reasons!="" ? " | NOT_REGISTRABLE: "+reasons : ""));
+  }
+
 // reconcile every indexed id (never a send); the open pending orders are returned
 void LC_Sweep(const SEnConfig &cfg,CEnTransport *tr,CEnStore *store,SLcState &s,string &open_ids[],int &n_open,string &notes)
   {
@@ -242,10 +282,17 @@ void LC_Sweep(const SEnConfig &cfg,CEnTransport *tr,CEnStore *store,SLcState &s,
          LC_Note(notes,"UNRESOLVED "+id+": "+EN_ResultName(r.outcome)+" "+r.reason);
          if(s.halted=="") s.halted="UNRESOLVED_ENTRY_RECORD: "+LC_Clean(r.reason);
         }
+      else if(v==LC_V_FILLED && LC_NotedIndex(s,id)<0)
+        {
+         LC_Note(notes,"FILLED_UNMANAGED "+id+": no T011 registration is connected | "+LC_Proposal(tr,store,s.login,id));
+         s.noted[s.n_noted]=id;                           // reported first; forgotten on the next sweep, so a restart in between reports it again
+         s.n_noted++;
+        }
       else
         {
          LC_Remove(s,i);
-         if(v==LC_V_FILLED) LC_Note(notes,"FILLED_UNMANAGED "+id+": no T011 registration is connected");
+         int nk=LC_NotedIndex(s,id);
+         if(nk>=0) LC_NotedRemove(s,nk);
         }
      }
   }

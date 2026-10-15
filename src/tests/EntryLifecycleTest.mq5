@@ -81,13 +81,19 @@ public:
    SEnRuntime rt;
    SEnResult r;
    CLcGuard g;
+   double tp_val;
    void MakePlan(STpPlan &p,const int direction)
      {
       TP_PlanReset(p,SIG,"SET-1",direction);
       p.e_out=(direction==1 ? 1990.0 : 2010.0);
       p.s_out=(direction==1 ? 1985.0 : 2015.0);
-      p.tp=2000.0;
+      p.tp=tp_val;
       p.volume_out=0.1;
+     }
+   void InitTp(const int direction,const double tp)
+     {
+      tp_val=tp;
+      Init(direction);
      }
    void Init(const int direction)
      {
@@ -116,7 +122,7 @@ public:
       LC_Acquire(GetPointer(s),t.account.login,g.st);
       g.Bind(GetPointer(s));
      }
-   CWorld(void) {Init(1);}
+   CWorld(void) {tp_val=2000.0; Init(1);}
    // the sequence the gate defines: Reserve (index saved + read back) -> executor -> Settled; false = the reservation failed and nothing was placed
    bool Seq(void)
      {
@@ -291,8 +297,12 @@ void Scenario_tick_fill_unmanaged(void)
       w.t.orders[0].position_id=4242;
       string notes;
       LC_Tick(w.cfg,GetPointer(w.t),GetPointer(w.s),w.g.st,0,0,notes);
-      Check(placed && w.g.st.n==0 && Has(notes,"FILLED_UNMANAGED") && w.g.st.halted=="" && w.t.sends==1 && w.t.cancels==0 && w.RecState()==EN_ST_FILLED,
-            StringFormat("dir %d: a fill is recorded and reported unmanaged; no registration, no cancel, no second send",d));
+      bool reported=(w.g.st.n==1 && Has(notes,"FILLED_UNMANAGED"));
+      string notes2;
+      LC_Tick(w.cfg,GetPointer(w.t),GetPointer(w.s),w.g.st,0,0,notes2);
+      SLcState stored;
+      Check(placed && reported && notes2=="" && w.g.st.n==0 && w.Stored(stored) && stored.n==0 && w.g.st.halted=="" && w.t.sends==1 && w.t.cancels==0 && w.RecState()==EN_ST_FILLED,
+            StringFormat("dir %d: a fill is reported first and forgotten on the next tick; no registration, no cancel, no second send",d));
      }
   }
 
@@ -665,6 +675,70 @@ void Scenario_damage_during_run_never_overwritten(void)
      }
   }
 
+void Scenario_fill_report_and_registration_inputs(void)
+  {
+   for(int d=0;d<2;d++)
+     {
+      int dir=(d==0 ? 1 : -1);
+      string side=(d==0 ? "BUY" : "SELL");
+      double beyond=(d==0 ? 2005.0 : 1995.0);
+      CWorld w;
+      w.InitTp(dir,beyond);
+      w.Own();
+      bool placed=(w.Seq() && w.r.outcome==EN_R_PLACED);
+      w.t.orders[0].state=EN_OS_FILLED;
+      w.t.orders[0].position_id=4242;
+      int files=w.s.n_files;
+      string notes;
+      LC_Tick(w.cfg,GetPointer(w.t),GetPointer(w.s),w.g.st,0,0,notes);
+      Check(placed && Has(notes,"FILLED_UNMANAGED "+SIG) && Has(notes,"InpEnabled=true") && Has(notes,"InpRPolicy=R_GEOM") && Has(notes,"InpEaMagic=777") && Has(notes,"InpPositionId=4242") &&
+            Has(notes,"InpSymbol=XAUUSD") && Has(notes,"InpDirection="+side) && Has(notes,"InpInitialSl="+DoubleToString(w.plan.s_out,8)) && Has(notes,"InpTpPrice="+DoubleToString(beyond,8)) &&
+            Has(notes,"InpVolumeInitial="+DoubleToString(0.1,8)) && !Has(notes,"NOT_REGISTRABLE") && w.s.n_files==files && w.t.sends==1 && w.t.cancels==0,
+            StringFormat("dir %d: the report carries the exact inputs of the explicit registration script; it writes nothing and registers nothing",dir));
+      // at-least-once across a restart between the report and the next tick
+      LC_Release(GetPointer(w.s),w.g.st);
+      CEnFakeStore s2;
+      CloneDisk(w.s,s2);
+      SLcState st2;
+      string notes2;
+      LC_Startup(w.cfg,GetPointer(w.t),GetPointer(s2),GetPointer(s2),false,st2,notes2);
+      bool again=(Has(notes2,"FILLED_UNMANAGED") && st2.n==1);
+      string notes3;
+      LC_Tick(w.cfg,GetPointer(w.t),GetPointer(s2),st2,0,0,notes3);
+      Check(again && st2.n==0,StringFormat("dir %d: reported again after the restart, forgotten on the next tick",dir));
+      // a TP that is not strictly beyond 2R is reported as not registrable
+      CWorld e;
+      e.InitTp(dir,2000.0);
+      e.Own();
+      bool placed2=(e.Seq() && e.r.outcome==EN_R_PLACED);
+      e.t.orders[0].state=EN_OS_FILLED;
+      e.t.orders[0].position_id=4242;
+      string n4;
+      LC_Tick(e.cfg,GetPointer(e.t),GetPointer(e.s),e.g.st,0,0,n4);
+      Check(placed2 && Has(n4,"NOT_REGISTRABLE") && Has(n4,"TP_EQUALS_2R"),StringFormat("dir %d: TP == 2R (what the 2R-minimum target rule produces) is reported as not registrable",dir));
+      CWorld b;
+      b.InitTp(dir,(d==0 ? 1999.0 : 2001.0));
+      b.Own();
+      bool placed3=(b.Seq() && b.r.outcome==EN_R_PLACED);
+      b.t.orders[0].state=EN_OS_FILLED;
+      b.t.orders[0].position_id=4242;
+      string n5;
+      LC_Tick(b.cfg,GetPointer(b.t),GetPointer(b.s),b.g.st,0,0,n5);
+      Check(placed3 && Has(n5,"TP_BEFORE_2R"),StringFormat("dir %d: a TP before 2R is reported as not registrable",dir));
+      // a record of another magic is blocked by the executor's own identity proof and never reported for registration
+      CWorld m;
+      m.InitTp(dir,beyond);
+      m.Own();
+      bool placed4=(m.Seq() && m.r.outcome==EN_R_PLACED);
+      m.t.orders[0].state=EN_OS_FILLED;
+      m.t.orders[0].position_id=4242;
+      m.cfg.ea_magic=778;
+      string n6;
+      LC_Tick(m.cfg,GetPointer(m.t),GetPointer(m.s),m.g.st,0,0,n6);
+      Check(placed4 && Has(n6,"IDENTITY_MISMATCH") && !Has(n6,"T011_REGISTRATION_INPUTS") && Has(m.g.st.halted,"UNRESOLVED_ENTRY_RECORD"),StringFormat("dir %d: another magic is never reported for registration",dir));
+     }
+  }
+
 void OnStart()
   {
    Print("T019 ENTRY LIFECYCLE TEST: fake transport and fake store only; no terminal read, no order, no file.");
@@ -685,5 +759,6 @@ void OnStart()
    Scenario_refused_instance_and_wrong_release();
    Scenario_release_only_by_owner_on_failure_paths();
    Scenario_damage_during_run_never_overwritten();
+   Scenario_fill_report_and_registration_inputs();
    PrintFormat("T019 ENTRY LIFECYCLE TEST finished: %d passed, %d failed",g_pass,g_fail);
   }

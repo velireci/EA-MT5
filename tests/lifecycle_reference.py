@@ -8,6 +8,7 @@
 from dataclasses import dataclass, field
 
 import entry_reference as en
+import t005_geometry_reference as tg
 import t007_planning_reference as tp
 import t011_persist_reference as p
 
@@ -28,6 +29,7 @@ class State:
     login: int = 0
     halted: str = ''
     ids: list = field(default_factory=list)
+    noted: list = field(default_factory=list)       # fills already reported in THIS process (not persisted): a fill is forgotten only on the tick after its report
     lock_owned: bool = False            # exclusive ownership of the index (the existing lock mechanism); every index access needs it
     lock_key: str = ''
 
@@ -186,6 +188,31 @@ def verdict(res):
     return HALT
 
 
+def proposal(cfg, tr, store, login, sid):
+    """the fill is NOT registered with T011 (the registration stays the explicit, owner-asserted script): this is the exact input set of that script, read from the executor record,
+    with every reason T011 would refuse it. It writes nothing and calls nothing of T011."""
+    ok, text = store.read(en.file_name(login, sid))
+    ok, rec = en.decode(text) if ok else (False, None)
+    if not ok:
+        return 'T011_REGISTRATION: NOT_REGISTRABLE (the executor record is unreadable)'
+    sym = tr.read_symbol(rec.symbol)
+    why = []
+    if rec.state != en.ST_FILLED or rec.linked != 1 or rec.position_id <= 0:
+        why.append('FILL_NOT_PROVEN')
+    buy = rec.direction == 1
+    geo = tg.compute(tg.BUY if buy else tg.SELL, rec.e, rec.s, sym.tick_size, sym.digits, sym.point, sym.stops_level)
+    if geo.status != tg.OK:
+        why.append('GEOMETRY_REFUSED: ' + geo.status)
+    elif abs(rec.tp - geo.level_2r) < sym.tick_size / 2.0:
+        why.append('TP_EQUALS_2R: T011 refuses a TP that is not strictly beyond the 2R level (the remainder behaviour is an open decision)')
+    elif (buy and rec.tp < geo.level_2r) or (not buy and rec.tp > geo.level_2r):
+        why.append('TP_BEFORE_2R: inconsistent with the minimum of 2R')
+    out = ('T011_REGISTRATION_INPUTS (the explicit script; the owner asserts the initial SL): InpEnabled=true InpRPolicy=R_GEOM InpEaMagic=%d InpPositionId=%d InpSymbol=%s InpDirection=%s '
+           'InpInitialSl=%.8f InpTpPrice=%.8f InpVolumeInitial=%.8f (planned entry %.8f; R_GEOM is derived from the real open price)'
+           % (rec.magic, rec.position_id, rec.symbol, 'BUY' if buy else 'SELL', rec.s, rec.tp, rec.volume, rec.e))
+    return out + (' | NOT_REGISTRABLE: ' + '; '.join(why) if why else '')
+
+
 def _sweep(cfg, tr, store, st, notes):
     """reconcile every indexed id (never a send); returns the ids that are open pending orders"""
     open_ids = []
@@ -198,10 +225,13 @@ def _sweep(cfg, tr, store, st, notes):
             notes.append('UNRESOLVED %s: %s %s' % (sid, res.final, res.reason))
             if not st.halted:
                 st.halted = 'UNRESOLVED_ENTRY_RECORD: %s' % _clean(res.reason)
+        elif v == FILLED and sid not in st.noted:
+            notes.append('FILLED_UNMANAGED %s: no T011 registration is connected | %s' % (sid, proposal(cfg, tr, store, st.login, sid)))
+            st.noted.append(sid)                  # reported first; forgotten on the next sweep, so a restart in between reports it again
         else:
             st.ids.remove(sid)
-            if v == FILLED:
-                notes.append('FILLED_UNMANAGED %s: no T011 registration is connected' % sid)
+            if sid in st.noted:
+                st.noted.remove(sid)
     return open_ids
 
 

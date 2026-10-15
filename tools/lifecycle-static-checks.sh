@@ -57,6 +57,11 @@ assert 'if(!LC_Owned(s)) return(false);' in reg and reg.index('if(!LC_Owned(s)) 
 per = t[t.index('bool LC_Persist('):t.index('int LC_IndexOf(')]
 assert 'if(!LC_Owned(s)) return(false);' in per and per.index('if(!LC_Owned(s)) return(false);') < per.index('LC_Save('), 'persist needs the lock'
 assert 'LC_DiskCheck(store,s,why)' in per and per.index('LC_DiskCheck(') < per.index('LC_Save(') and 'return(false);' in per[per.index('LC_DiskCheck('):per.index('LC_Save(')], 'persist validates the existing index first'
+pr = t[t.index('string LC_Proposal('):t.index('void LC_Sweep(')]
+assert 'Write' not in pr and 'Delete' not in pr and 'ETD_' not in pr and 'EX_Register' not in pr and 'Send' not in pr and 'Cancel' not in pr, 'the registration report only reads'
+assert pr.count('TG_Compute(') == 1 and 'EN_Load(store,EN_FileName(login,id),rec,why)!=1' in pr and 'TP_EQUALS_2R' in pr and 'TP_BEFORE_2R' in pr and 'InpInitialSl=' in pr, 'report content'
+sw = t[t.index('void LC_Sweep('):t.index('bool LC_Startup(')]
+assert 'v==LC_V_FILLED && LC_NotedIndex(s,id)<0' in sw and sw.index('LC_Proposal(') < sw.index('LC_Remove(s,i)'), 'a fill is reported first and forgotten on a later sweep'
 dk = t[t.index('bool LC_DiskCheck('):t.index('bool LC_Persist(')]
 assert 'store.Exists(' in dk and 'store.Read(' in dk and 'LC_Decode(' in dk and 'Write' not in dk and 'Delete' not in dk, 'the validation only reads'
 assert t.count('store.Write(') == 1, 'one write call site (LC_Save): no repair, no second writer'
@@ -152,6 +157,10 @@ mut K.mqh $EA 's/   EventKillTimer();/   EventKillTimer(); ETD_Register();/'
 expect_assert "$NEG/l3.py" "$NEG/K.mqh" "a T011 registration in the EA" "ETD_Register"
 mut M.mqh $HD '0,/   if(!LC_Owned(s)) return(false);/s//   \/\/ none/'
 expect_assert "$NEG/l2.py" "$NEG/M.mqh" "an index write without the lock" "needs the lock"
+mut W.mqh $HD 's/      else if(v==LC_V_FILLED \&\& LC_NotedIndex(s,id)<0)/      else if(false)/'
+expect_assert "$NEG/l2.py" "$NEG/W.mqh" "a fill that is forgotten before it is reported" "reported first and forgotten"
+mut X.mqh $HD 's/   TG_Compute(buy ? TG_BUY : TG_SELL,rec.e,rec.s,false,0.0,sym.tick_size,sym.digits,sym.point,sym.stops_level,false,0.0,0.0,geo);/   TG_Compute(buy ? TG_BUY : TG_SELL,rec.e,rec.s,false,0.0,sym.tick_size,sym.digits,sym.point,sym.stops_level,false,0.0,0.0,geo); ETD_Register();/'
+expect_assert "$NEG/l2.py" "$NEG/X.mqh" "a registration call in the report" "ETD_"
 mut T.mqh $HD '0,/   if(!LC_DiskCheck(store,s,why))/s//   if(false)/'
 expect_assert "$NEG/l2.py" "$NEG/T.mqh" "an update that does not validate the existing index" "validates the existing index first"
 mut U.mqh $HD 's/   if(!LC_DiskCheck(store,s,disk_why))                      \/\/ a damaged \/ unreadable index stops every action of the layer and is never written over/   if(false)/'
