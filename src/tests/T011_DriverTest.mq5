@@ -317,16 +317,26 @@ void TestBreakEvenAndChangedRecord(void)
    q.ask=2010.3;
    bool b=ETD_Tick(cfg,GetPointer(t),rt,FN,Ident(),q,s,res);
    Check(!a && b && t.sends==1 && t.last_request.price==2010.0,"a live SL moved to break-even does not change the level");
-   // a record that changed under the driver is not given to the executor
+  }
+// a record that changed under the driver is not given to the executor (fresh objects: the first case above sent once on its own transport)
+void TestChangedRecord(void)
+  {
+   SExConfig cfg;
+   CFakeTransport t;
+   SExQuote q;
+   SEtdState s;
+   SErfResult flow;
+   SXaRaw nyet;
+   BuildRaw(nyet,0);
    World(cfg,t,q);
    Prepare(S_GEOM);
    ETD_Init(cfg,GetPointer(t),FN,Ident(),nyet,nyet,s,flow);
    Prepare(S_PEND_MAP);
+   SExRuntime rt;
    EX_RuntimeInit(rt);
-   CFakeTransport t2;
-   World(cfg,t2,q);
-   bool c=ETD_Tick(cfg,GetPointer(t2),rt,FN,Ident(),q,s,res);
-   Check(!c && !s.armed && s.process_calls==0 && t2.sends==0,"a record that needs reconciliation is not given to EX_Process");
+   SExResult res;
+   bool c=ETD_Tick(cfg,GetPointer(t),rt,FN,Ident(),q,s,res);
+   Check(!c && !s.armed && s.process_calls==0 && t.sends==0,"a record that needs reconciliation is not given to EX_Process");
   }
 void TestRestartAndTimer(void)
   {
@@ -431,7 +441,10 @@ void TestArmingProof(void)
       Check(!armed && !s.armed && Has(s.reason,"INIT_POSITION_NOT_PROVEN") && !sent && t.sends==0 && s.process_calls==0 && Has(res.reason,"NOT_ARMED") && res.final_state==EX_BLOCKED,tag+"NOT armed, a tick at and beyond the level is NOT_ARMED, zero sends, executor never called");
       Check(DiskStatus(g)==before && g==g0 && LockFree(),tag+"the IDLE record is untouched (no repair, no deletion) and the lock is released");
      }
-   // the live SL is no part of the proof and the stored initial SL is never replaced
+  }
+// each case below owns FRESH config / transport / quote / state / runtime: World() does not reset t.sends, so a transport shared between cases would carry a send into the next one
+void TestArmingLiveSlIrrelevant(void)
+  {
    SExConfig cfg;
    CFakeTransport t;
    SExQuote q;
@@ -447,15 +460,51 @@ void TestArmingProof(void)
    EX_RuntimeInit(rt);
    SExResult res;
    bool sent=ETD_Tick(cfg,GetPointer(t),rt,FN,Ident(),q,s,res);
-   Check(armed && s.level==2010.0 && sent && t.sends==1 && t.last_request.price==2010.0,"a live SL at break even: still armed, the level comes from the stored basis");
-   // a request-bearing record keeps the existing recovery whatever the position says
+   Check(armed && s.level==2010.0,"a live SL at break even: still armed, the level comes from the stored basis");
+   Check(sent && t.sends==1 && t.last_request.price==2010.0,"a live SL at break even: exactly one send at the stored level");
+  }
+// a request-bearing record keeps the existing recovery whatever the position says
+void TestArmingRequestBearingKeepsRecovery(void)
+  {
+   SExConfig cfg;
+   CFakeTransport t;
+   SExQuote q;
+   SEtdState s;
+   SErfResult flow;
    World(cfg,t,q);
+   Check(t.sends==0,"recovery case: a fresh transport starts with zero sends");
    Prepare(S_PEND_MAP);
    t.position.found=false;
    SXaRaw full;
    BuildRaw(full,1);
-   armed=ETD_Init(cfg,GetPointer(t),FN,Ident(),full,full,s,flow);
-   Check(!armed && Has(s.reason,"INIT_RECOVERY") && flow.final_state==ERF_DONE && t.sends==0,"a request-bearing record goes through the recovery, not through the position proof");
+   bool armed=ETD_Init(cfg,GetPointer(t),FN,Ident(),full,full,s,flow);
+   Check(Has(s.reason,"INIT_RECOVERY"),"recovery case: INIT_RECOVERY (the position proof is not applied)");
+   Check(!armed && !s.armed,"recovery case: NOT armed");
+   Check(flow.final_state==ERF_DONE,"recovery case: the existing flow reaches DONE");
+   Check(t.sends==0,"recovery case: zero sends");
+  }
+// regression for the isolation itself: a send made in one case never leaks into another
+void TestArmingIsolation(void)
+  {
+   SExConfig cfg1,cfg2;
+   CFakeTransport t1,t2;
+   SExQuote q1,q2;
+   SEtdState s;
+   SErfResult flow;
+   SXaRaw nyet;
+   BuildRaw(nyet,0);
+   World(cfg1,t1,q1);
+   Prepare(S_GEOM);
+   ETD_Init(cfg1,GetPointer(t1),FN,Ident(),nyet,nyet,s,flow);
+   SExRuntime rt1,rt2;
+   EX_RuntimeInit(rt1);
+   EX_RuntimeInit(rt2);
+   SExResult res;
+   ETD_Tick(cfg1,GetPointer(t1),rt1,FN,Ident(),q1,s,res);
+   World(cfg2,t2,q2);
+   Check(t1.sends==1 && t2.sends==0 && rt1.send_calls==1 && rt2.send_calls==0,"isolation: a send on one transport / runtime is not visible on a fresh one");
+   World(cfg1,t1,q1);
+   Check(t1.sends==1,"isolation: World() alone does not reset a used transport (so each case must create its own)");
   }
 void TestRegister(void)
   {
@@ -485,8 +534,12 @@ void OnStart()
    TestRecovery();
    TestTick();
    TestBreakEvenAndChangedRecord();
+   TestChangedRecord();
    TestRestartAndTimer();
    TestArmingProof();
+   TestArmingLiveSlIrrelevant();
+   TestArmingRequestBearingKeepsRecovery();
+   TestArmingIsolation();
    TestRegister();
    Clean();
    GlobalVariableDel(KEY);

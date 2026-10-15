@@ -426,6 +426,27 @@ class Sources(unittest.TestCase):
         for need in ('pos.found', 'pos.ticket==0', 'pos.identifier!=id.position_id', 'pos.symbol!=id.symbol', 'pos.magic!=cfg.ea_magic', 'pos.type!=', 'st.volume_initial', 'o.plan_vol_step'):
             self.assertIn(need, proof)
 
+    def test_the_mql_test_cases_never_share_a_transport_through_a_second_world_call(self):
+        """World() does not reset CFakeTransport.sends: a second World(cfg,t,q) on the same transport inside one test function would carry a send into the next case (the 3215e0a failure)"""
+        src = self.strip(_read('src', 'tests', 'T011_DriverTest.mq5'))
+        funcs = re.split(r'\n(?=void |bool |string |SEsIdentity |#define )', src)
+        seen = 0
+        for f in funcs:
+            m = re.match(r'void (Test\w+)\(', f)
+            if not m:
+                continue
+            seen += 1
+            pairs = re.findall(r'World\((\w+),(\w+),', f)
+            if m.group(1) == 'TestArmingIsolation':
+                self.assertEqual(len(pairs), 3)           # the deliberate demonstration of the pitfall
+                continue
+            self.assertEqual(len(pairs), len(set(pairs)), m.group(1) + ' reuses a transport')
+        self.assertGreaterEqual(seen, 10)
+        rec = src[src.index('void TestArmingRequestBearingKeepsRecovery('):src.index('void TestArmingIsolation(')]
+        for need in ('Has(s.reason,"INIT_RECOVERY")', '!armed && !s.armed', 'flow.final_state==ERF_DONE', 't.sends==0'):
+            self.assertEqual(sum(1 for line in rec.split('\n') if 'Check(' in line and need in line and 'fresh transport' not in line), 1, need)    # one condition per Check
+        self.assertIn('t.sends==0', rec)
+
     def test_the_python_reference_mirrors_the_header_order(self):
         src = _read('tests', 't011_driver_reference.py')
         self.assertLess(src.index('flow = fl.run('), src.index('s.armed, s.direction, s.level, s.reason = True'))
