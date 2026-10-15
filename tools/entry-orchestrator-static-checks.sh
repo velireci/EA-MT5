@@ -78,7 +78,7 @@ for n in ('InpContextSource=EOI_SRC_UNSELECTED', 'InpM15Level=EOI_SWING_UNSELECT
           'InpPermitMaxAgeSeconds=-1', 'InpOpenPositions=-1', 'InpTradesToday=-1', 'InpExistingRisk=-1', 'InpMaxPositions=-1', 'InpMaxTrades=-1', 'InpCombinedRiskCap=-1', 'InpSessionClock=false',
           'InpNewsCalendar=false', 'InpMaxSpreadPoints=-1', 'InpDailyHistoryBridge=false', 'InpDailyServerOffsetSeconds=99999', 'InpDailyHistoryComplete=false', 'InpFilling=EOI_FILL_UNSET', 'InpExpiryMode=EOI_EXP_UNSET'):
     assert n in ea, 'default not UNSET: ' + n
-assert sorted(re.findall(r'#include "([^"]+)"', ea)) == sorted(['include/EntryOrchestratorFeed.mqh', 'include/EntryStateFile.mqh', 'include/EntryTransportFake.mqh', 'include/EntryLifecycle.mqh', 'include/ExposureReaderReal.mqh']), 'EA includes'
+assert sorted(re.findall(r'#include "([^"]+)"', ea)) == sorted(['include/EntryOrchestratorFeed.mqh', 'include/EntryStateFile.mqh', 'include/EntryTransportFake.mqh', 'include/EntryLifecycle.mqh', 'include/EntryManagementHandoff.mqh', 'include/ExposureReaderReal.mqh']), 'EA includes'
 assert 'daily_on=InpDailyHistoryBridge' in ea
 daily = fd[fd.index('virtual bool Daily('):]
 assert 'EO_OffsetSeconds(mc.daily_offset_seconds,daily_offset)' in daily, 'offset validation'

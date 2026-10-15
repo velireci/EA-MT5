@@ -1,6 +1,6 @@
 #!/bin/bash
 # Static checks for T019 (entry lifecycle): the layer only reconciles with the existing executor (never a send), cancels only through TP_CancelDecision + EN_Cancel for an event that is due AND enabled, never
-# overwrites a damaged state file, persists the halt; the EA keeps every cancel event off by default, wires the layer without an order call or a T011 registration; protected modules are untouched. NOT a compiler.
+# overwrites a damaged state file, persists the halt; the EA keeps every cancel event off by default, wires the layer without an order call; the automatic fill -> T011 registration goes ONLY through the existing ETD_Register (read-only exit transport, off by default); protected modules are untouched. NOT a compiler.
 # Usage: bash tools/lifecycle-static-checks.sh (from anywhere; it cd's to the repo root)
 set -u
 cd "$(dirname "$0")/.."
@@ -8,9 +8,10 @@ FAIL=0
 NEG=$(mktemp -d); trap 'rm -rf "$NEG"' EXIT
 BASE=3d1e084
 HD=src/include/EntryLifecycle.mqh
+MH=src/include/EntryManagementHandoff.mqh
 EA=src/XauUsdEntryOrchestrator.mq5
 TS=src/tests/EntryLifecycleTest.mq5
-FILES="$HD $EA $TS tests/lifecycle_reference.py tests/test_lifecycle.py tools/lifecycle-static-checks.sh"
+FILES="$HD $MH $EA $TS tests/lifecycle_reference.py tests/test_lifecycle.py tools/lifecycle-static-checks.sh"
 
 echo "=== L1: files exist, ASCII only ==="
 for f in $FILES; do
@@ -62,7 +63,10 @@ assert 'Write' not in pr and 'Delete' not in pr and 'ETD_' not in pr and 'EX_Reg
 assert 'LIVE_CHECK_REQUIRED' in pr and 'PLANNED_GEOMETRY' in pr and ' | NOT_REGISTRABLE: ' not in pr, 'planned geometry cannot prove live registration refusal'
 assert pr.count('TG_Compute(') == 1 and 'EN_Load(store,EN_FileName(login,id),rec,why)!=1' in pr and 'TP_EQUALS_2R' in pr and 'TP_BEFORE_2R' in pr and 'InpInitialSl=' in pr, 'report content'
 sw = t[t.index('void LC_Sweep('):t.index('bool LC_Startup(')]
-assert 'v==LC_V_FILLED && LC_NotedIndex(s,id)<0' in sw and sw.index('LC_Proposal(') < sw.index('LC_Remove(s,i)'), 'a fill is reported first and forgotten on a later sweep'
+assert 'v==LC_V_FILLED && LC_NotedIndex(s,id)<0' in sw and sw.index('LC_Proposal(') < sw.rindex('LC_Remove(s,i)'), 'a fill is reported first and forgotten on a later sweep'
+assert 'if(LC_UnmanagedIndex(s,id)>=0) continue;' in sw and 'if(r2==LC_SINK_CONFIRMED)' in sw, 'the sink branch'
+sink_b = sw[sw.index('int r2=sink.OnFilled('):sw.index('else if(v==LC_V_FILLED && LC_NotedIndex')]
+assert sink_b.count('LC_Remove(s,i)') == 1 and sink_b.index('r2==LC_SINK_CONFIRMED') < sink_b.index('LC_Remove(s,i)') and 'MANAGEMENT_REGISTRATION_REFUSED' in sink_b, 'a fill leaves the index only after the registration is CONFIRMED; a refusal halts'
 dk = t[t.index('bool LC_DiskCheck('):t.index('bool LC_Persist(')]
 assert 'store.Exists(' in dk and 'store.Read(' in dk and 'LC_Decode(' in dk and 'Write' not in dk and 'Delete' not in dk, 'the validation only reads'
 assert t.count('store.Write(') == 1, 'one write call site (LC_Save): no repair, no second writer'
@@ -84,15 +88,20 @@ echo "=== L3: the EA keeps every cancel event off, wires the layer, has no order
 cat > "$NEG/l3.py" <<'PYEOF'
 import re, sys
 ea = re.sub(r'//[^\n]*', '', open(sys.argv[1], encoding='ascii').read())
-for w in ('OrderSend', 'ETD_Register', 'EX_Register', 'ExitStateFile', 'ExitExecutor', 'EntryTransportReal', 'CEnRealTransport', 'TP_Authorize'):
+for w in ('OrderSend', 'ETD_Register', 'EX_Register', 'ExitStateFile', 'ExitExecutor', 'EntryTransportReal', 'ExitTransportReal', 'CEnRealTransport', 'TP_Authorize'):
     assert w not in ea, w
 for n in ('InpCancelOnSessionEnd=false', 'InpCancelOnNewsBlock=false', 'InpCancelOnDailyLimit=false', 'InpAcknowledgeLifecycleHalt=false'):
     assert n in ea, 'default not off: ' + n
-assert '#include "include/EntryLifecycle.mqh"' in ea
+assert '#include "include/EntryLifecycle.mqh"' in ea and '#include "include/EntryManagementHandoff.mqh"' in ea
+assert 'input bool InpManagementRegistration=false;' in ea and 'input string InpManagementAuthorisation="";' in ea and 'input ENUM_EO_MGMT_RPOL InpManagementRPolicy=EOI_MGMT_RPOL_UNSET;' in ea, 'registration is off and UNSET by default'
+conf = ea[ea.index('bool Configure(void)'):ea.index('SEoFeedCfg fc;')]
+assert 'if(InpManagementRegistration)' in conf and 'InpManagementAuthorisation!=EX_AUTH_PHRASE || InpManagementRPolicy!=EOI_MGMT_RPOL_R_GEOM || InpEaMagic<=0) return(false);' in conf, 'registration needs the phrase, R_GEOM and a magic'
+assert conf.count('g_sink=GetPointer(g_registrar);') == 1 and 'g_sink=NULL;' in conf and 'g_registrar.exit_tr=GetPointer(g_xtr);' in conf and 'g_registrar.selftest=false;' in conf, 'the sink is set only inside the registration branch, with the read-only transport'
 assert 'int EnabledCancelEvents(void)' in ea and 'InpCancelOnSessionEnd ? TP_EV_SESSION_END : 0' in ea
 assert ea.count('LC_Tick(') == 1 and ea.count('LC_Startup(') == 1, 'one tick and one startup'
 assert 'LC_Register(' not in ea, 'the EA never indexes after the fact: the gate hook does it before the send'
 assert 'CLcGuard g_guard;' in ea and 'CEnFakeFileStore g_lockstore;' in ea, 'guard and a dedicated lock store'
+assert 'LC_Startup(g_cfg.exec,GetPointer(g_tr),GetPointer(g_store),GetPointer(g_lockstore),InpAcknowledgeLifecycleHalt,g_guard.st,startup_notes,g_sink)' in ea and 'g_guard.st,due,enabled,notes,g_sink);' in ea, 'the registrar is the sink of startup and tick'
 assert 'LC_Startup(g_cfg.exec,GetPointer(g_tr),GetPointer(g_store),GetPointer(g_lockstore),InpAcknowledgeLifecycleHalt,g_guard.st' in ea, 'the acknowledgement is an explicit input at start; the lock store is passed'
 init = ea[ea.index('int OnInit()'):ea.index('void OnDeinit(')]
 assert init.index('Configure()') < init.index('LC_Startup(') < init.index('EventSetTimer('), 'startup after the configuration and before the first poll'
@@ -114,7 +123,34 @@ PYEOF
 python3 -I "$NEG/l3.py" $EA && echo "  PASS cancel events off by default, explicit acknowledgement, startup before polling, lifecycle before a new entry, indexed only after a record exists, executor halts only, no registration" || { echo "  FAIL"; FAIL=1; }
 
 echo "=== L4: the test uses the fake transport and store only ==="
-grep -nE 'EntryTransportReal|ExitTransportReal|OrderSend|SymbolInfo|CopyRates|AccountInfo|FileOpen' $TS >/dev/null && { echo "  FAIL the test touches the real side"; FAIL=1; } || echo "  PASS fake transport and fake store only"
+grep -nE 'EntryTransportReal|ExitTransportReal|OrderSend|SymbolInfo|CopyRates|AccountInfo|FileOpen' $TS >/dev/null && { echo "  FAIL the test touches the real side"; FAIL=1; } || echo "  PASS fake transport and fake store only (the T011 side: FAKE exit transport; selftest-prefixed files only)"
+
+echo "=== L5a: the handoff header registers only through the existing ETD_Register over a read-only transport ==="
+cat > "$NEG/l6.py" <<'PYEOF'
+import re, sys
+t = re.sub(r'//[^\n]*', '', open(sys.argv[1], encoding='ascii').read())
+assert sorted(re.findall(r'#include "([^"]+)"', t)) == ['EntryLifecycle.mqh', 'ExitTickDriver.mqh'], 'includes'
+for w in ('OrderSend', 'OrderCheck', 'OrderSendAsync', 'ESF_Save', 'ESF_WriteAll', 'FileOpen', 'FileDelete', 'FileMove', 'EX_Process', 'ETD_Tick', 'ETD_Init', 'EX_Reconcile', 'EN_Place', 'EN_Cancel', 'EN_Reconcile',
+          'ExitTransportReal', 'EntryTransportReal', 'TP_Authorize', 'PositionClosePartial', 'trade.'):
+    assert w not in t, 'forbidden: ' + w
+assert t.count('ETD_Register(') == 1, 'one registration call'
+assert t.count('EX_Register(') == 0, 'EX_Register only through ETD_Register (the per-position lock)'
+rt = t[t.index('class CMhReadTransport'):t.index('class CMhRegistrar')]
+assert 'virtual bool IsReal(void) {return(true);}' in rt, 'IsReal true keeps the authorisation and demo gates'
+assert 'virtual bool PreCheck(const SExSendRequest &req) {return(false);}' in rt, 'PreCheck refuses'
+send = rt[rt.index('virtual void Send('):]
+assert 'send_attempts++;' in send and 'returned_true=false;' in send and 'OrderSend' not in send and 'CTrade' not in send, 'Send does nothing and is counted'
+assert rt.count('PositionGetTicket(') == 1 and 'PositionsTotal()==total' in rt and 'matches==1' in rt, 'a unique, unchanged position read'
+rg = t[t.index('class CMhRegistrar'):]
+assert 'cfg.sl_initial=rec.s;' in rg and 'cfg.tp_price=rec.tp;' in rg and 'cfg.r_policy=(ENUM_EX_R_POLICY)rpol;' in rg and 'cfg.real_authorised=(phrase==EX_AUTH_PHRASE);' in rg, 'the plan of the record, the phrase, the policy'
+assert 'if(ESF_Exists(name) || ESF_Exists(name+ESF_TMP_SUFFIX)) return(Compare(' in rg and rg.index('return(Compare(') < rg.index('ETD_Register('), 'an existing record is compared and never rewritten'
+assert 'rec.state!=EN_ST_FILLED || rec.linked!=1 || rec.position_id==0' in rg and rg.index('FILL_NOT_PROVEN') < rg.index('ETD_Register('), 'only a proven fill'
+assert 'acct.login!=rec.login || acct.server!=rec.server' in rg, 'account identity'
+assert 'MH_MAX_TRIES' in rg and 'RETRIES_EXHAUSTED' in rg, 'bounded retries'
+assert 'q.level_2r=0.0;' in rg, 'the 2R level is computed by T011 itself from the real open price (R_GEOM), never supplied'
+assert 'TP_EQUALS_2R' not in t and 'tp_equals' not in t.lower(), 'the TP / 2R rule is T011 own and is not touched or interpreted here'
+PYEOF
+python3 -I "$NEG/l6.py" $MH && echo "  PASS no order call, no direct file write, one ETD_Register, read-only transport (IsReal, PreCheck refuses, Send inert), proven fill only, compare-never-rewrite, bounded retries" || { echo "  FAIL"; FAIL=1; }
 
 echo "=== L5: protected modules are untouched since $BASE ==="
 for p in src/include/EntryExecutor.mqh src/include/EntryTransport.mqh src/include/EntryTransportFake.mqh src/include/EntryTransportReal.mqh src/include/EntryStateFile.mqh \
@@ -183,6 +219,34 @@ expect_assert "$NEG/l3.py" "$NEG/S.mqh" "an index entry written by the EA after 
 
 mut Y.mqh $HD 's/ | LIVE_CHECK_REQUIRED:/ | FINAL_REGISTRATION_VERDICT:/'
 expect_assert "$NEG/l2.py" "$NEG/Y.mqh" "a planned report presented as a final verdict" "planned geometry cannot prove"
+
+mut Z1.mqh $MH 's/   virtual bool IsReal(void) {return(true);}/   virtual bool IsReal(void) {return(false);}/'
+expect_assert "$NEG/l6.py" "$NEG/Z1.mqh" "a handoff transport that drops the real gates" "IsReal true"
+mut Z2.mqh $MH 's/   virtual bool PreCheck(const SExSendRequest \&req) {return(false);}/   virtual bool PreCheck(const SExSendRequest \&req) {return(true);}/'
+expect_assert "$NEG/l6.py" "$NEG/Z2.mqh" "a handoff transport that accepts a request" "PreCheck refuses"
+mut Z3.mqh $MH 's/      send_attempts++;/      send_attempts++; OrderSend();/'
+expect_assert "$NEG/l6.py" "$NEG/Z3.mqh" "an order call in the handoff" "forbidden: OrderSend"
+mut Z4.mqh $MH 's/      ETD_Register(cfg,exit_tr,rt,name,idn,q,res);/      ETD_Register(cfg,exit_tr,rt,name,idn,q,res); ETD_Register(cfg,exit_tr,rt,name,idn,q,res);/'
+expect_assert "$NEG/l6.py" "$NEG/Z4.mqh" "a second registration call" "one registration call"
+mut Z5.mqh $MH 's/      ETD_Register(cfg,exit_tr,rt,name,idn,q,res);/      EX_Register(cfg,exit_tr,rt,name,idn,q,res);/'
+expect_assert "$NEG/l6.py" "$NEG/Z5.mqh" "a registration that skips the per-position lock" "one registration call"
+mut Z6.mqh $MH 's/      if(ESF_Exists(name) || ESF_Exists(name+ESF_TMP_SUFFIX)) return(Compare(name,idn,rec,detail));/      \/\/ none/'
+expect_assert "$NEG/l6.py" "$NEG/Z6.mqh" "a registrar that may rewrite an existing record" "compared and never rewritten"
+mut Z7.mqh $MH 's/      if(rec.state!=EN_ST_FILLED || rec.linked!=1 || rec.position_id==0)/      if(false)/'
+expect_assert "$NEG/l6.py" "$NEG/Z7.mqh" "a registration of an unproven fill" "only a proven fill"
+mut Z8.mqh $MH 's/      cfg.sl_initial=rec.s;/      cfg.sl_initial=0.0;/'
+expect_assert "$NEG/l6.py" "$NEG/Z8.mqh" "a registration that drops the asserted initial SL" "the plan of the record"
+mut Z9.mqh $MH 's/            if(tries\[k\]>=MH_MAX_TRIES)/            if(false)/'
+expect_assert "$NEG/l6.py" "$NEG/Z9.mqh" "unbounded retries" "bounded retries"
+mut ZA.mqh $EA 's/^input bool InpManagementRegistration=false;/input bool InpManagementRegistration=true;/'
+expect_assert "$NEG/l3.py" "$NEG/ZA.mqh" "registration on by default" "registration is off"
+mut ZB.mqh $EA 's/InpManagementAuthorisation!=EX_AUTH_PHRASE || //'
+expect_assert "$NEG/l3.py" "$NEG/ZB.mqh" "registration without the authorisation phrase" "needs the phrase"
+mut ZC.mqh $EA 's/LC_Tick(g_cfg.exec,GetPointer(g_tr),GetPointer(g_store),g_guard.st,due,enabled,notes,g_sink);/LC_Tick(g_cfg.exec,GetPointer(g_tr),GetPointer(g_store),g_guard.st,due,enabled,notes);/'
+expect_assert "$NEG/l3.py" "$NEG/ZC.mqh" "a tick that never reaches the registrar" "sink of startup and tick"
+
+mut ZD.mqh $HD 's/         else if(r2==LC_SINK_PENDING) LC_Note(notes,"FILL_REGISTRATION_PENDING "+id+": "+detail);/         else if(r2==LC_SINK_PENDING) {LC_Note(notes,"FILL_REGISTRATION_PENDING "+id+": "+detail); LC_Remove(s,i);}/'
+expect_assert "$NEG/l2.py" "$NEG/ZD.mqh" "a fill forgotten while its registration is pending" "only after the registration is CONFIRMED"
 
 [ $FAIL -eq 0 ] && echo "LIFECYCLE STATIC CHECKS: ALL PASS (static only; MetaEditor compile and MT5 run UNVERIFIED)" || echo "LIFECYCLE STATIC CHECKS: FAILURES"
 exit $FAIL

@@ -2,10 +2,14 @@
 import os
 import re
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import entry_reference as en  # noqa: E402
+import t011_driver_reference as dr  # noqa: E402
+import t011_executor_reference as ex  # noqa: E402
+import t011_persist_reference as t11  # noqa: E402
 import lifecycle_reference as lc  # noqa: E402
 import t007_planning_reference as tp  # noqa: E402
 import test_entry_executor as te  # noqa: E402
@@ -16,7 +20,9 @@ SIG = te.SIGNAL
 SCENARIOS = ['index_codec_and_damage', 'register_and_save_failure', 'startup_clean', 'startup_halts_on_unprovable', 'startup_keeps_open_pending', 'tick_fill_unmanaged',
              'cancel_gated_by_enabled_events', 'cancel_uncertain_halts', 'due_events_from_facts', 'damaged_state_never_overwritten',
              'index_saved_before_send', 'no_send_when_index_unusable', 'crash_windows_restart_halts', 'two_instances_no_lost_update', 'refused_instance_and_wrong_release',
-             'release_only_by_owner_on_failure_paths', 'damage_during_run_never_overwritten', 'fill_report_and_registration_inputs']
+             'release_only_by_owner_on_failure_paths', 'damage_during_run_never_overwritten', 'fill_report_and_registration_inputs',
+             'auto_registration_confirms_once', 'auto_registration_idempotent_after_crash', 'auto_registration_refusals_keep_the_t011_contracts', 'auto_registration_transient_and_locks',
+             'auto_registration_acknowledge_and_instances']
 EV_ALL_ENABLED = tp.EV_SESSION_END | tp.EV_NEWS_BLOCK | tp.EV_DAILY_LIMIT
 
 
@@ -671,6 +677,208 @@ class FillHandoff(unittest.TestCase):
             self.assertEqual(index_ids(store, w.tr.account.login), [])
 
 
+class Locks:
+    def __init__(self):
+        self.held = set()
+
+    def acquire(self, k):
+        if k in self.held:
+            return False
+        self.held.add(k)
+        return True
+
+    def release(self, k):
+        self.held.discard(k)
+
+
+EXIT_IDENT = t11.Identity('MetaQuotes-Demo', 5001234, 'XAUUSD', 7)
+
+
+class CountingRegistrar:
+    """wraps the CURRENT lc.Registrar (so the mutants of the registrar take effect) and counts the calls"""
+
+    def __init__(self, *a, **k):
+        self.inner = lc.Registrar(*a, **k)
+        self.calls = 0
+
+    def on_filled(self, login, sid):
+        self.calls += 1
+        return self.inner.on_filled(login, sid)
+
+
+class RegWorld:
+    """an entry that is FILLED (position id 7) + the T011 world of the same position; the registrar is the lifecycle's fill sink"""
+
+    def __init__(self, tc, direction, tp=None, phrase=ex.AUTH_PHRASE, pos_changes=None):
+        self.dirn = direction
+        e, sl, tp0 = (2000.0, 1995.0, 2015.0) if direction == 1 else (2000.0, 2005.0, 1985.0)
+        self.sl, self.tp = sl, (tp if tp is not None else tp0)
+        self.w = te.World(direction)
+        self.w.plan = te.plan(direction, e_out=e, s_out=sl, tp=self.tp, volume_out=0.5)
+        self.w.permit = te.permit_for(self.w.plan, self.w.tr)
+        self.w.tr.quote = en.Quote(True, 2003.0 if direction == 1 else 1997.0, 2003.3 if direction == 1 else 1997.3, self.w.tr.now)
+        self.login = self.w.tr.account.login
+        self.st = owner(self.w.store, self.login)
+        res, guard, why = guarded_place(self.w, self.st)
+        assert res.final == en.R_PLACED, (res, why)
+        self.w.tr.orders[0].state = en.OS_FILLED
+        self.w.tr.orders[0].position_id = 7
+        self.dir = tempfile.TemporaryDirectory()
+        tc.addCleanup(self.dir.cleanup)
+        self.xstore = t11.FileStore(self.dir.name)
+        self.xtr = ex.FakeTransport()
+        self.xtr.real = True                      # the registration transport reports IsReal() = true, so the authorisation phrase and the demo-account gates stay in force
+        self.xtr.position = ex.PositionW(found=True, ticket=9, identifier=7, symbol='XAUUSD', magic=777, type=0 if direction == 1 else 1, volume=0.5, price_open=2000.0, sl=sl)
+        for k, v in (pos_changes or {}).items():
+            setattr(self.xtr.position, k, v)
+        self.locks = Locks()
+        self.phrase = phrase
+        self.reg = self.make_registrar()
+        self.name = lc.exit_file_name(self.login, 7)
+
+    def make_registrar(self, **kw):
+        return CountingRegistrar(self.w.store, self.xtr, self.xstore, self.locks, magic=777, phrase=self.phrase, rpol=ex.RPOL_R_GEOM, **kw)
+
+    def tick(self, st=None, reg=None):
+        return lc.tick(self.w.cfg, self.w.tr, self.w.store, st or self.st, 0, 0, sink=reg or self.reg)
+
+    def stored(self):
+        return self.xstore.load(self.name, EXIT_IDENT)
+
+    def t11_files(self):
+        return sorted(os.listdir(self.dir.name))
+
+
+class AutoRegistration(unittest.TestCase):
+    """fill -> T011 registration by the orchestrator (the existing ex.register through the T011 driver's lock): ownership, the initial SL (accepted only while the live SL equals it), the stored plan,
+    persistence (never overwritten) and idempotency are exactly those of the explicit script; the entry transport stays FAKE; the T011 TP / 2R, break-even and cost rules are NOT changed"""
+
+    def test_auto_registration_confirms_once(self):
+        for d in (1, -1):
+            rw = RegWorld(self, d)
+            text = ' '.join(rw.tick())
+            self.assertIn('REGISTERED_WITH_T011', text)
+            for frag in ('InpRPolicy=R_GEOM', 'InpEaMagic=777', 'InpPositionId=7', 'InpSymbol=XAUUSD', 'InpDirection=' + ('BUY' if d == 1 else 'SELL'), 'InpInitialSl=%.8f' % rw.sl,
+                         'InpTpPrice=%.8f' % rw.tp, 'InpVolumeInitial=%.8f' % 0.5):
+                self.assertIn(frag, text)
+            self.assertEqual((rw.st.ids, rw.st.halted, index_ids(rw.w.store, rw.login)), ([], '', []))
+            o = rw.stored()
+            self.assertEqual((o.verdict, o.state.direction, o.state.level, o.plan_s_src, o.plan_tp, o.state.volume_initial, o.plan_rpol),
+                             (t11.USABLE_IDLE, d, 2010.0 if d == 1 else 1990.0, rw.sl, rw.tp, 0.5, ex.RPOL_R_GEOM))
+            self.assertEqual((rw.xtr.sends, rw.locks.held, rw.reg.calls), ([], set(), 1))
+            before = rw.xstore.read(rw.name)
+            self.assertEqual(rw.tick(), [])
+            self.assertEqual((rw.xstore.read(rw.name), rw.reg.calls), (before, 1), 'a registered fill is not registered again')
+            self.assertEqual(rw.w.tr.sends, 1, 'the entry transport sent exactly the one order')
+
+    def test_auto_registration_idempotent_after_crash(self):
+        for d in (1, -1):
+            rw = RegWorld(self, d)
+            rw.w.reconcile()                                       # the sweep moves the entry record to FILLED before the sink is asked
+            self.assertEqual(rw.reg.on_filled(rw.login, SIG)[0], lc.SINK_CONFIRMED)         # T011 saved; the process dies before the index is updated
+            saved = rw.xstore.read(rw.name)
+            self.assertEqual(index_ids(rw.w.store, rw.login), [SIG])
+            tr, store = new_process(rw.w, keep_book=True)
+            reg2 = CountingRegistrar(store, rw.xtr, rw.xstore, Locks(), magic=777, phrase=rw.phrase, rpol=ex.RPOL_R_GEOM)
+            st2, notes = lc.startup(rw.w.cfg, tr, store, store, False, sink=reg2)
+            self.assertIn('ALREADY_REGISTERED', ' '.join(notes))
+            self.assertEqual((st2.ids, st2.halted, rw.xstore.read(rw.name), reg2.calls), ([], '', saved, 1), 'confirmed by comparison, nothing rewritten')
+            self.assertEqual(rw.xtr.sends, [])
+
+    def test_a_conflicting_t11_record_is_never_overwritten(self):
+        for d in (1, -1):
+            rw = RegWorld(self, d)
+            other = rw.sl - 1.0 if d == 1 else rw.sl + 1.0
+            rw.xtr.position.sl = other
+            cfg = ex.Config(enabled=True, r_policy=ex.RPOL_R_GEOM, sl_initial_set=True, sl_initial=other, ea_magic=777, tp_set=True, tp_price=rw.tp, real_authorised=True, authorisation=ex.AUTH_PHRASE)
+            q = ex.Quote(d, 0.0, 0.0, 0.0, 0.5)
+            self.assertEqual(ex.register(cfg, rw.xtr, ex.Runtime(), rw.xstore, rw.name, EXIT_IDENT, q).final, ex.REGISTERED)
+            rw.xtr.position.sl = rw.sl
+            before = rw.xstore.read(rw.name)
+            text = ' '.join(rw.tick())
+            self.assertIn('T011_RECORD_CONFLICT', text)
+            self.assertEqual(rw.xstore.read(rw.name), before, 'a different record is never replaced')
+            self.assertIn('MANAGEMENT_REGISTRATION_REFUSED', rw.st.halted)
+            self.assertEqual(rw.st.ids, [SIG])
+
+    def test_auto_registration_refusals_keep_the_t011_contracts(self):
+        def run(label, frag, **kw):
+            for d in (1, -1):
+                tp = kw.get('tp')
+                tp = ({'eq': 2010.0 if d == 1 else 1990.0, 'before': 2005.0 if d == 1 else 1995.0}[tp] if tp else None)
+                rw = RegWorld(self, d, tp=tp, phrase=kw.get('phrase', ex.AUTH_PHRASE), pos_changes=kw.get('pos'))
+                if 'acct' in kw:
+                    for k, v in kw['acct'].items():
+                        setattr(rw.xtr.account, k, v)
+                if 'flip' in kw:
+                    rw.xtr.position.type = 1 - rw.xtr.position.type
+                text = ' '.join(rw.tick())
+                tag = '%s dir %d' % (label, d)
+                self.assertIn(frag, text, tag)
+                self.assertEqual(rw.t11_files(), [], tag + ': nothing is registered')
+                self.assertEqual(rw.xtr.sends, [], tag)
+                self.assertIn('MANAGEMENT_REGISTRATION_REFUSED', rw.st.halted, tag)
+                self.assertEqual(rw.st.ids, [SIG], tag + ': the fill stays indexed (unmanaged) until the owner acknowledges')
+                self.assertEqual(rw.locks.held, set(), tag)
+        run('live SL moved', 'INITIAL_SL_NOT_PROVEN', pos={'sl': 1990.0})
+        run('TP equals 2R', 'TP_EQUALS_2R', tp='eq')
+        run('TP before 2R', 'TP_BEFORE_2R', tp='before')
+        run('foreign magic', 'OWNERSHIP_NOT_PROVEN', pos={'magic': 0})
+        run('other direction', 'OWNERSHIP_NOT_PROVEN', flip=True)
+        run('netting account', 'UNSUPPORTED_ACCOUNT_MODE', acct={'margin_mode': 0})
+        run('not a demo account', 'REAL_REQUIRES_DEMO_ACCOUNT', acct={'demo': False})
+        run('no authorisation phrase', 'REAL_NOT_AUTHORISED', phrase='')
+        run('volume differs', 'POSITION_VOLUME_DIFFERS', pos={'volume': 0.4})
+        for d in (1, -1):                                       # the sink alone never trusts a record that is not a proven fill
+            rw = RegWorld(self, d)
+            self.assertEqual(rw.reg.on_filled(rw.login, SIG), (lc.SINK_REFUSED, 'FILL_NOT_PROVEN'))
+            self.assertEqual((rw.t11_files(), rw.xtr.sends), ([], []))
+
+    def test_auto_registration_transient_and_locks(self):
+        for d in (1, -1):
+            rw = RegWorld(self, d, pos_changes={'found': False})
+            for i in range(lc.Registrar.MAX_TRIES - 1):
+                notes = rw.tick()
+                self.assertTrue(any('FILL_REGISTRATION_PENDING' in n for n in notes), notes)
+                self.assertEqual((rw.st.halted, rw.st.ids, rw.t11_files()), ('', [SIG], []))
+            rw.xtr.position.found = True                                       # the position becomes visible before the retries are exhausted
+            self.assertIn('REGISTERED_WITH_T011', ' '.join(rw.tick()))
+            rw2 = RegWorld(self, d, pos_changes={'found': False})
+            texts = [' '.join(rw2.tick()) for _ in range(lc.Registrar.MAX_TRIES)]
+            self.assertIn('RETRIES_EXHAUSTED', texts[-1])
+            self.assertIn('MANAGEMENT_REGISTRATION_REFUSED', rw2.st.halted)
+            rw3 = RegWorld(self, d)
+            rw3.locks.held.add(dr.lock_key(EXIT_IDENT))                         # the T011 per-position lock is held by someone else
+            self.assertTrue(any('FILL_REGISTRATION_PENDING' in n for n in rw3.tick()))
+            self.assertEqual((rw3.t11_files(), rw3.st.halted), ([], ''))
+            rw3.locks.held.discard(dr.lock_key(EXIT_IDENT))
+            self.assertIn('REGISTERED_WITH_T011', ' '.join(rw3.tick()))
+            self.assertEqual(rw3.locks.held, set(), 'the T011 lock is released by the registrar')
+
+    def test_auto_registration_acknowledge_and_instances(self):
+        for d in (1, -1):
+            rw = RegWorld(self, d, tp=2010.0 if d == 1 else 1990.0)                   # TP == 2R: T011 refuses
+            rw.tick()
+            self.assertIn('MANAGEMENT_REGISTRATION_REFUSED', rw.st.halted)
+            rw.tick()
+            self.assertEqual(rw.reg.calls, 1, 'a refused fill is not offered to the sink again in the same process')
+            lc.release(rw.w.store, rw.st)
+            tr, store = new_process(rw.w, keep_book=True)
+            reg2 = CountingRegistrar(store, rw.xtr, rw.xstore, Locks(), magic=777, phrase=rw.phrase, rpol=ex.RPOL_R_GEOM)
+            st2, notes = lc.startup(rw.w.cfg, tr, store, store, False, sink=reg2)
+            self.assertIn('MANAGEMENT_REGISTRATION_REFUSED', st2.halted, 'the halt survives the restart')
+            lc.release(store, st2)
+            reg3 = CountingRegistrar(store, rw.xtr, rw.xstore, Locks(), magic=777, phrase=rw.phrase, rpol=ex.RPOL_R_GEOM)
+            st3, notes3 = lc.startup(rw.w.cfg, tr, store, store, True, sink=reg3)
+            self.assertEqual((st3.halted, st3.ids, rw.t11_files()), ('', [], []), 'the owner accepted the unmanaged position; the signal stays consumed, nothing was registered')
+            self.assertTrue(rw.w.has_file())
+            # an instance without the index lock never reaches the registrar
+            rw2 = RegWorld(self, d)
+            forged = lc.State(rw2.login, '', [SIG])
+            self.assertEqual(rw2.tick(forged), [])
+            self.assertEqual((rw2.reg.calls, rw2.t11_files()), (0, []))
+
+
 class Sources(unittest.TestCase):
     def test_mql_scenarios_pinned(self):
         with open(os.path.join(ROOT, 'src', 'tests', 'EntryLifecycleTest.mq5'), encoding='ascii') as f:
@@ -686,7 +894,7 @@ class Mutants(unittest.TestCase):
 
     def _suite_failures(self):
         suite = unittest.TestSuite()
-        for cls in (Index, Startup, Tick, IndexBeforeSend, Crash, Instances, DamageDuringRun, FillHandoff):
+        for cls in (Index, Startup, Tick, IndexBeforeSend, Crash, Instances, DamageDuringRun, FillHandoff, AutoRegistration):
             for n in unittest.TestLoader().getTestCaseNames(cls):
                 suite.addTest(cls(n))
         res = unittest.TestResult()
@@ -737,6 +945,14 @@ class Mutants(unittest.TestCase):
                 ("    if st.lock_owned and st.lock_key:\n        lockstore.unlock(st.lock_key)", "    if st.lock_key:\n        lockstore.unlock(st.lock_key)"),
                 ("    if not lockstore.lock(key):", "    if False:"),
                 ("    if not st.lock_owned:\n        st.halted = st.halted or 'LIFECYCLE_LOCK_NOT_OWNED'\n        return False", "    if False:\n        return False"),
+                # automatic registration
+                ("        if self.exit_store.exists(name) or self.exit_store.exists(name + '.tmp'):\n            return self._compare(name, ident, rec)", "        if False:\n            return self._compare(name, ident, rec)"),
+                ("                and o.plan_s_src == rec.s and o.plan_rpol == self.rpol):", "                and o.plan_rpol == self.rpol):"),
+                ("        return (SINK_PENDING if res.reason.startswith(self.TRANSIENT) else SINK_REFUSED), res.reason", "        return SINK_CONFIRMED, res.reason"),
+                ("            if n >= self.MAX_TRIES:", "            if False:"),
+                ("            if sid in st.unmanaged:\n                continue", "            if False:\n                continue"),
+                ("            if sid in st.unmanaged or verdict(en.reconcile(cfg, tr, store, sid)) == HALT:", "            if verdict(en.reconcile(cfg, tr, store, sid)) == HALT:"),
+                ("        if rec.state != en.ST_FILLED or rec.linked != 1 or rec.position_id <= 0:\n            return SINK_REFUSED, 'FILL_NOT_PROVEN'", "        if False:\n            return SINK_REFUSED, 'FILL_NOT_PROVEN'"),
                 # fill -> T011: reported first, forgotten on the next tick; the report states why T011 would refuse
                 ("        elif v == FILLED and sid not in st.noted:", "        elif False:"),
                 ("    elif abs(rec.tp - geo.level_2r) < sym.tick_size / 2.0:", "    elif False:"),

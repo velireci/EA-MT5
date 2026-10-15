@@ -3,14 +3,15 @@
 //   Market/account reads: closed bars, symbol / quote properties, OrderCalcProfit, calendar, deal history and T012 balance LOAD only. Only isolated FAKE entry records are written.
 //   Every source / selection / policy input is UNSET by default and UNSET blocks. Exposure: EXPLICIT inputs by default (-1 = unknown) or the opt-in READ-ONLY account reader (T018: this EA magic, hedging account, pending policy explicit); the trade counter stays an explicit input. Chart symbol only (incl. XAUUSD.fx).
 //   FAKE entry records and the T019 lifecycle index / halt flag persist in VELO_T016_FAKE_ files. The baseline is REBUILT at every start (a restart never revives a signal). The fake order book is in memory only, so after a
-//   restart a placed FAKE record cannot be proven and HALTS the layer until the owner acknowledges it. Filled orders are reported FILLED_UNMANAGED: the T011 registration is NOT connected. Not proof of broker execution.
+//   restart a placed FAKE record cannot be proven and HALTS the layer until the owner acknowledges it. A filled order is registered AUTOMATICALLY with the existing T011 executor only when InpManagementRegistration is true (default false: it is then reported FILLED_UNMANAGED); the registrar only READS the terminal (its Send does nothing) and the entry transport above stays FAKE, so no real position exists to register until a real entry transport is chosen. Not proof of broker execution.
 #property strict
-#property version "1.05"
+#property version "1.06"
 #include "include/EntryOrchestratorFeed.mqh"
 #include "include/EntryTransportFake.mqh"
 #include "include/ExposureReaderReal.mqh"
 #include "include/EntryStateFile.mqh"
 #include "include/EntryLifecycle.mqh"
+#include "include/EntryManagementHandoff.mqh"
 
 enum ENUM_EO_SOURCE {EOI_SRC_UNSELECTED=0,EOI_SRC_T003_RECONF_PROPOSAL=1,EOI_SRC_T002_TOUCH_AFTER_LOSS_PROPOSAL=2,EOI_SRC_T002_TOUCH_FIRST_ONLY_PROPOSAL=3};
 enum ENUM_EO_SWING {EOI_SWING_UNSELECTED=0,EOI_SWING_LATEST_FRACTAL_PROPOSAL=1};
@@ -24,6 +25,7 @@ enum ENUM_EO_PENDING {EOI_PENDING_UNSET=0,EOI_PENDING_COUNT_AS_POSITIONS=1,EOI_P
 enum ENUM_EO_PENDING_RISK {EOI_PENDRISK_UNSET=0,EOI_PENDRISK_INCLUDE=1,EOI_PENDRISK_EXCLUDE=2};
 enum ENUM_EO_FILLING {EOI_FILL_UNSET=0,EOI_FILL_RETURN=1};
 enum ENUM_EO_EXPIRY {EOI_EXP_UNSET=0,EOI_EXP_GTC=1,EOI_EXP_SECONDS=2};
+enum ENUM_EO_MGMT_RPOL {EOI_MGMT_RPOL_UNSET=0,EOI_MGMT_RPOL_R_GEOM=1};
 
 input ENUM_EO_SOURCE InpContextSource=EOI_SRC_UNSELECTED;
 input ENUM_EO_SWING InpM15Level=EOI_SWING_UNSELECTED;
@@ -81,6 +83,9 @@ input bool InpCancelOnSessionEnd=false;       // lifecycle: cancel an open (prov
 input bool InpCancelOnNewsBlock=false;        // lifecycle: ... when the news filter reports BLOCKED
 input bool InpCancelOnDailyLimit=false;       // lifecycle: ... when the T012 daily result says cancel_pending_due
 input bool InpAcknowledgeLifecycleHalt=false; // owner acknowledgement at the START: clears a persisted lifecycle halt and drops its unresolved ids (their records stay, the signals stay consumed). Never automatic
+input bool InpManagementRegistration=false;   // true = register a FILLED entry with the T011 executor automatically (the existing ETD_Register: ownership, initial SL, plan, never overwritten); false = report only
+input string InpManagementAuthorisation="";   // the T011 standing authorisation phrase (EX_AUTH_PHRASE); required when registration is on; the account must be a demo account (T011 gate)
+input ENUM_EO_MGMT_RPOL InpManagementRPolicy=EOI_MGMT_RPOL_UNSET; // required R_GEOM when registration is on; UNSET blocks
 input int InpPollSeconds=2;
 
 // FAKE transport: the execution side is the in-memory fake (every Send is a virtual request, logged with the label); the read side is READ-ONLY terminal state.
@@ -133,6 +138,9 @@ CEoTerminalFake g_tr;
 CEnFakeFileStore g_store;
 COrchestrator g_orch;
 SEoConfig g_cfg;
+CMhReadTransport g_xtr;               // READ-ONLY exit transport of the registrar (IsReal() = true keeps the T011 authorisation / demo gates; Send does nothing)
+CMhRegistrar g_registrar;
+CLcFillSink *g_sink=NULL;          // NULL = registration off (report only)
 CLcGuard g_guard;                  // the gate's pre-send hook + the lifecycle state (g_guard.st)
 CEnFakeFileStore g_lockstore;      // dedicated store for the index lock: the file store above holds ONE lock at a time (the executor's per-signal lock)
 ulong g_lc_filters_ms=0;
@@ -148,6 +156,19 @@ void Status(const string text)
 
 bool Configure(void)
   {
+   g_sink=NULL;
+   if(InpManagementRegistration)
+     {
+      // registration on: every input it needs is explicit, UNSET blocks, nothing is guessed
+      if(InpManagementAuthorisation!=EX_AUTH_PHRASE || InpManagementRPolicy!=EOI_MGMT_RPOL_R_GEOM || InpEaMagic<=0) return(false);
+      g_registrar.entry_store=GetPointer(g_store);
+      g_registrar.exit_tr=GetPointer(g_xtr);
+      g_registrar.magic=InpEaMagic;
+      g_registrar.phrase=InpManagementAuthorisation;
+      g_registrar.rpol=EX_RPOL_R_GEOM;
+      g_registrar.selftest=false;
+      g_sink=GetPointer(g_registrar);
+     }
    // an unknown enum value (a preset or a hand-typed number) is refused here; it must never fall through to the manual exposure inputs
    if((int)InpExposureSource!=(int)EOI_EXPOSURE_EXPLICIT && (int)InpExposureSource!=(int)EOI_EXPOSURE_ACCOUNT_READ) return(false);
    if((int)InpPendingPolicy<(int)EOI_PENDING_UNSET || (int)InpPendingPolicy>(int)EOI_PENDING_IGNORE) return(false);
@@ -251,7 +272,7 @@ void Lifecycle()
       due=LC_DueEvents(session,news,present,(present && daily.cancel_pending_due));
      }
    string notes="";
-   LC_Tick(g_cfg.exec,GetPointer(g_tr),GetPointer(g_store),g_guard.st,due,enabled,notes);
+   LC_Tick(g_cfg.exec,GetPointer(g_tr),GetPointer(g_store),g_guard.st,due,enabled,notes,g_sink);
    if(notes!="") Print("T019 LIFECYCLE | ",notes);
    SyncHalts();
   }
@@ -289,7 +310,7 @@ int OnInit()
    string startup_notes="";
    g_guard.Bind(GetPointer(g_store));
    // exclusive ownership of the index comes FIRST (the existing lock mechanism); an instance that does not get it neither reads nor writes the index and never sends or cancels (the layer stays halted)
-   if(!LC_Startup(g_cfg.exec,GetPointer(g_tr),GetPointer(g_store),GetPointer(g_lockstore),InpAcknowledgeLifecycleHalt,g_guard.st,startup_notes))
+   if(!LC_Startup(g_cfg.exec,GetPointer(g_tr),GetPointer(g_store),GetPointer(g_lockstore),InpAcknowledgeLifecycleHalt,g_guard.st,startup_notes,g_sink))
       Print("T019 LIFECYCLE startup: the account is not readable; the layer stays halted.");
    if(startup_notes!="") Print("T019 LIFECYCLE startup | ",startup_notes);
    if(g_guard.st.halted!="") g_orch.halted="LIFECYCLE: "+g_guard.st.halted;

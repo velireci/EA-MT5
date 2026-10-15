@@ -8,6 +8,8 @@
 from dataclasses import dataclass, field
 
 import entry_reference as en
+import t011_driver_reference as dr
+import t011_executor_reference as ex
 import t005_geometry_reference as tg
 import t007_planning_reference as tp
 import t011_persist_reference as p
@@ -29,6 +31,7 @@ class State:
     login: int = 0
     halted: str = ''
     ids: list = field(default_factory=list)
+    unmanaged: list = field(default_factory=list)   # fills whose T011 registration was refused in THIS process (not persisted): the sink is not asked again, the halt stays
     noted: list = field(default_factory=list)       # fills already reported in THIS process (not persisted): a fill is forgotten only on the tick after its report
     lock_owned: bool = False            # exclusive ownership of the index (the existing lock mechanism); every index access needs it
     lock_key: str = ''
@@ -213,7 +216,77 @@ def proposal(cfg, tr, store, login, sid):
     return out + ' | LIVE_CHECK_REQUIRED: actual open price, ownership, initial SL and volume are not proven by this report' + (' | PLANNED_GEOMETRY: ' + '; '.join(why) if why else '')
 
 
-def _sweep(cfg, tr, store, st, notes):
+SINK_CONFIRMED, SINK_PENDING, SINK_REFUSED = 'CONFIRMED', 'PENDING', 'REFUSED'
+
+
+def exit_file_name(login, position_id):
+    return 'VELO_T011_EXIT_%d_%d.state' % (login, position_id)
+
+
+class Registrar:
+    """the fill sink: AUTOMATIC registration of a filled entry with T011 through the EXISTING ex.register (via the T011 driver's per-position lock), with the contracts of the explicit script unchanged:
+    ownership (magic, symbol, direction, volume, hedging account), the initial SL asserted from the executor record and accepted only while the LIVE SL equals it, the stored plan, a state file that is
+    never overwritten, the authorisation phrase and the demo account (the transport reports IsReal() = true), the TP / 2R rule of T011 (TP_EQUALS_2R stays a refusal). Idempotent: an existing T011
+    record is accepted only when it matches the plan (nothing is rewritten); any other existing record is a conflict. Transient refusals are retried a bounded number of times."""
+    MAX_TRIES = 5
+    TRANSIENT = ('ACCOUNT_UNREADABLE', 'SYMBOL_UNREADABLE', 'POSITION_NOT_FOUND', 'INSTANCE_LOCK_HELD', 'ENTRY_UNAVAILABLE')
+
+    def __init__(self, entry_store, exit_tr, exit_store, locks, magic, phrase, rpol):
+        self.entry_store, self.exit_tr, self.exit_store, self.locks = entry_store, exit_tr, exit_store, locks
+        self.magic, self.phrase, self.rpol = magic, phrase, rpol
+        self.tries = {}
+
+    def inputs(self, rec):
+        return ('InpRPolicy=R_GEOM InpEaMagic=%d InpPositionId=%d InpSymbol=%s InpDirection=%s InpInitialSl=%.8f InpTpPrice=%.8f InpVolumeInitial=%.8f '
+                '(start XauUsdT011ExitManager with these; its filling, deviation and filter policy stay the owner inputs)'
+                % (rec.magic, rec.position_id, rec.symbol, 'BUY' if rec.direction == 1 else 'SELL', rec.s, rec.tp, rec.volume))
+
+    def on_filled(self, login, sid):
+        status, detail = self._attempt(login, sid)
+        if status == SINK_PENDING:
+            n = self.tries.get(sid, 0) + 1
+            self.tries[sid] = n
+            if n >= self.MAX_TRIES:
+                return SINK_REFUSED, 'RETRIES_EXHAUSTED after %d attempts: %s' % (n, detail)
+        return status, detail
+
+    def _attempt(self, login, sid):
+        ok, text = self.entry_store.read(en.file_name(login, sid))
+        ok, rec = en.decode(text) if ok else (False, None)
+        if not ok:
+            return SINK_REFUSED, 'ENTRY_RECORD_UNREADABLE'
+        if rec.state != en.ST_FILLED or rec.linked != 1 or rec.position_id <= 0:
+            return SINK_REFUSED, 'FILL_NOT_PROVEN'
+        acct = self.exit_tr.read_account()
+        if not acct.read_ok:
+            return SINK_PENDING, 'ACCOUNT_UNREADABLE'
+        if acct.login != rec.login or acct.server != rec.server:
+            return SINK_REFUSED, 'ACCOUNT_IDENTITY_MISMATCH'
+        ident = p.Identity(acct.server, acct.login, rec.symbol, rec.position_id)
+        name = exit_file_name(acct.login, rec.position_id)
+        if self.exit_store.exists(name) or self.exit_store.exists(name + '.tmp'):
+            return self._compare(name, ident, rec)
+        cfg = ex.Config(enabled=True, real_authorised=(self.phrase == ex.AUTH_PHRASE), authorisation=self.phrase, ea_magic=self.magic, tp_set=True, tp_price=rec.tp, r_policy=self.rpol,
+                        sl_initial_set=True, sl_initial=rec.s)
+        q = ex.Quote(rec.direction, 0.0, 0.0, 0.0, rec.volume)
+        res = dr.register(cfg, self.exit_tr, ex.Runtime(), self.exit_store, name, ident, q, self.locks)
+        if res.final == ex.REGISTERED:
+            return SINK_CONFIRMED, 'REGISTERED_WITH_T011 ' + self.inputs(rec)
+        if res.final == ex.RECOVERY_REQUIRED:
+            return SINK_PENDING, 'REGISTRATION_UNCERTAIN: ' + res.reason
+        return (SINK_PENDING if res.reason.startswith(self.TRANSIENT) else SINK_REFUSED), res.reason
+
+    def _compare(self, name, ident, rec):
+        if self.exit_store.exists(name + '.tmp'):
+            return SINK_REFUSED, 'T011_RECORD_CONFLICT: a leftover temporary file exists; recover by hand'
+        o = self.exit_store.load(name, ident)
+        if (o.verdict in (p.USABLE_IDLE, p.USABLE_REQUEST) and o.plan_set and o.state.direction == rec.direction and o.state.volume_initial == rec.volume and o.plan_tp == rec.tp
+                and o.plan_s_src == rec.s and o.plan_rpol == self.rpol):
+            return SINK_CONFIRMED, 'ALREADY_REGISTERED (the T011 record matches the plan; nothing is rewritten) ' + self.inputs(rec)
+        return SINK_REFUSED, 'T011_RECORD_CONFLICT: the existing T011 record is unusable or differs from the plan and is never overwritten (%s)' % o.reason
+
+
+def _sweep(cfg, tr, store, st, notes, sink=None):
     """reconcile every indexed id (never a send); returns the ids that are open pending orders"""
     open_ids = []
     for sid in list(st.ids):
@@ -225,6 +298,20 @@ def _sweep(cfg, tr, store, st, notes):
             notes.append('UNRESOLVED %s: %s %s' % (sid, res.final, res.reason))
             if not st.halted:
                 st.halted = 'UNRESOLVED_ENTRY_RECORD: %s' % _clean(res.reason)
+        elif v == FILLED and sink is not None:
+            if sid in st.unmanaged:
+                continue                                  # refused in this process: the halt stays, the sink is not asked again
+            status, detail = sink.on_filled(st.login, sid)
+            if status == SINK_CONFIRMED:
+                notes.append('%s: %s' % (sid, detail))
+                st.ids.remove(sid)
+            elif status == SINK_PENDING:
+                notes.append('FILL_REGISTRATION_PENDING %s: %s' % (sid, detail))
+            else:
+                notes.append('UNMANAGED_FILL %s: %s' % (sid, detail))
+                st.unmanaged.append(sid)
+                if not st.halted:
+                    st.halted = 'MANAGEMENT_REGISTRATION_REFUSED: %s' % _clean(detail)
         elif v == FILLED and sid not in st.noted:
             notes.append('FILLED_UNMANAGED %s: no T011 registration is connected | %s' % (sid, proposal(cfg, tr, store, st.login, sid)))
             st.noted.append(sid)                  # reported first; forgotten on the next sweep, so a restart in between reports it again
@@ -235,7 +322,7 @@ def _sweep(cfg, tr, store, st, notes):
     return open_ids
 
 
-def startup(cfg, tr, store, lockstore, acknowledge=False):
+def startup(cfg, tr, store, lockstore, acknowledge=False, sink=None):
     """-> (State, notes). The instance lock comes first: without it the index is neither read nor written and nothing is sent or cancelled.
     A damaged state file is never overwritten: it halts until the owner removes it. The lock is kept for every run that continues (halted or not) and released by release()."""
     notes = []
@@ -253,13 +340,14 @@ def startup(cfg, tr, store, lockstore, acknowledge=False):
         notes.append(st.halted)
         return st, notes
     was_halted = st.halted
-    _sweep(cfg, tr, store, st, notes)
+    _sweep(cfg, tr, store, st, notes, sink)
     if acknowledge and st.halted:
         notes.append('HALT_ACKNOWLEDGED by the owner: %s' % (was_halted or st.halted))
         # only the ids that are still unresolved are dropped from the index; their records stay on disk (the signals stay consumed)
         for sid in list(st.ids):
-            if verdict(en.reconcile(cfg, tr, store, sid)) == HALT:
+            if sid in st.unmanaged or verdict(en.reconcile(cfg, tr, store, sid)) == HALT:
                 st.ids.remove(sid)
+        st.unmanaged = []
         st.halted = ''
     if kind == 'OK' or st.ids or st.halted:
         _persist(store, st, notes)
@@ -278,7 +366,7 @@ def due_events(session, news, daily_present, daily_cancel_due):
     return ev
 
 
-def tick(cfg, tr, store, st, due, enabled):
+def tick(cfg, tr, store, st, due, enabled, sink=None):
     """-> notes. Reconcile, then cancel the open pending orders for the events that are due AND enabled."""
     notes = []
     if not st.login:
@@ -291,7 +379,7 @@ def tick(cfg, tr, store, st, due, enabled):
         notes.append(why)
         return notes
     before = (list(st.ids), st.halted)
-    open_ids = _sweep(cfg, tr, store, st, notes)
+    open_ids = _sweep(cfg, tr, store, st, notes, sink)
     events = due & enabled
     if due and not events:
         notes.append('CANCEL_DUE_NOT_ENABLED events=%d' % due)

@@ -16,6 +16,17 @@
 #define LC_V_CLOSED 1
 #define LC_V_FILLED 2
 #define LC_V_HALT 3
+#define LC_SINK_CONFIRMED 0
+#define LC_SINK_PENDING 1
+#define LC_SINK_REFUSED 2
+
+// the fill sink (implemented by the T011 registrar): CONFIRMED = the fill is registered / already registered with a matching record (the index entry is forgotten), PENDING = try again on the next
+// sweep (bounded by the sink), REFUSED = the position stays unmanaged (the layer halts until the owner acknowledges). Never called without the index lock.
+class CLcFillSink
+  {
+public:
+   virtual int OnFilled(const long login,const string signal_id,string &detail)=0;
+  };
 
 struct SLcState
   {
@@ -23,6 +34,8 @@ struct SLcState
    string halted;
    string ids[LC_MAX];
    int n;
+   string unmanaged[LC_MAX];    // fills whose T011 registration was refused in THIS process (not persisted): the sink is not asked again, the halt stays
+   int n_unmanaged;
    string noted[LC_MAX];        // fills already reported in THIS process (not persisted): a fill is forgotten only on the tick after its report
    int n_noted;
    bool lock_owned;             // exclusive ownership of the index (the existing store lock); every index access needs it
@@ -37,7 +50,8 @@ void LC_StateInit(SLcState &s,const long login)
    s.lock_owned=false;
    s.lock_key="";
    s.n_noted=0;
-   for(int i=0;i<LC_MAX;i++) {s.ids[i]=""; s.noted[i]="";}
+   s.n_unmanaged=0;
+   for(int i=0;i<LC_MAX;i++) {s.ids[i]=""; s.noted[i]=""; s.unmanaged[i]="";}
   }
 
 string LC_LockKey(const long login) {return("VELO_T013_LOCK_INDEX_"+IntegerToString(login));}
@@ -228,6 +242,13 @@ int LC_Verdict(const SEnResult &r)
    return(LC_V_HALT);
   }
 
+int LC_UnmanagedIndex(const SLcState &s,const string id)
+  {
+   for(int i=0;i<s.n_unmanaged;i++)
+      if(s.unmanaged[i]==id) return(i);
+   return(-1);
+  }
+
 int LC_NotedIndex(const SLcState &s,const string id)
   {
    for(int i=0;i<s.n_noted;i++)
@@ -266,7 +287,7 @@ string LC_Proposal(CEnTransport *tr,CEnStore *store,const long login,const strin
   }
 
 // reconcile every indexed id (never a send); the open pending orders are returned
-void LC_Sweep(const SEnConfig &cfg,CEnTransport *tr,CEnStore *store,SLcState &s,string &open_ids[],int &n_open,string &notes)
+void LC_Sweep(const SEnConfig &cfg,CEnTransport *tr,CEnStore *store,SLcState &s,string &open_ids[],int &n_open,string &notes,CLcFillSink *sink=NULL)
   {
    n_open=0;
    ArrayResize(open_ids,LC_MAX);
@@ -281,6 +302,25 @@ void LC_Sweep(const SEnConfig &cfg,CEnTransport *tr,CEnStore *store,SLcState &s,
         {
          LC_Note(notes,"UNRESOLVED "+id+": "+EN_ResultName(r.outcome)+" "+r.reason);
          if(s.halted=="") s.halted="UNRESOLVED_ENTRY_RECORD: "+LC_Clean(r.reason);
+        }
+      else if(v==LC_V_FILLED && sink!=NULL)
+        {
+         if(LC_UnmanagedIndex(s,id)>=0) continue;           // refused in this process: the halt stays, the sink is not asked again
+         string detail;
+         int r2=sink.OnFilled(s.login,id,detail);
+         if(r2==LC_SINK_CONFIRMED)
+           {
+            LC_Note(notes,id+": "+detail);
+            LC_Remove(s,i);
+           }
+         else if(r2==LC_SINK_PENDING) LC_Note(notes,"FILL_REGISTRATION_PENDING "+id+": "+detail);
+         else
+           {
+            LC_Note(notes,"UNMANAGED_FILL "+id+": "+detail);
+            s.unmanaged[s.n_unmanaged]=id;
+            s.n_unmanaged++;
+            if(s.halted=="") s.halted="MANAGEMENT_REGISTRATION_REFUSED: "+LC_Clean(detail);
+           }
         }
       else if(v==LC_V_FILLED && LC_NotedIndex(s,id)<0)
         {
@@ -299,7 +339,7 @@ void LC_Sweep(const SEnConfig &cfg,CEnTransport *tr,CEnStore *store,SLcState &s,
 
 // The instance lock comes first: without it the index is neither read nor written and nothing is sent or cancelled. Returns false when the account is unreadable (nothing acquired).
 // A damaged state file is never overwritten. The lock is kept for every run that continues (halted or not) and released by LC_Release.
-bool LC_Startup(const SEnConfig &cfg,CEnTransport *tr,CEnStore *store,CEnStore *lockstore,const bool acknowledge,SLcState &s,string &notes)
+bool LC_Startup(const SEnConfig &cfg,CEnTransport *tr,CEnStore *store,CEnStore *lockstore,const bool acknowledge,SLcState &s,string &notes,CLcFillSink *sink=NULL)
   {
    notes="";
    SEnAccount acct;
@@ -322,16 +362,18 @@ bool LC_Startup(const SEnConfig &cfg,CEnTransport *tr,CEnStore *store,CEnStore *
    string was=s.halted;
    string open_ids[];
    int n_open=0;
-   LC_Sweep(cfg,tr,store,s,open_ids,n_open,notes);
+   LC_Sweep(cfg,tr,store,s,open_ids,n_open,notes,sink);
    if(acknowledge && s.halted!="")
      {
       LC_Note(notes,"HALT_ACKNOWLEDGED by the owner: "+(was!="" ? was : s.halted));
       for(int i=s.n-1;i>=0;i--)
         {
          SEnResult r;
+         if(LC_UnmanagedIndex(s,s.ids[i])>=0) {LC_Remove(s,i); continue;}      // the owner accepts the unmanaged position; the record stays: the signal stays consumed
          EN_Reconcile(cfg,tr,store,s.ids[i],r);
          if(LC_Verdict(r)==LC_V_HALT) LC_Remove(s,i);         // the record stays on disk: the signal stays consumed
         }
+      s.n_unmanaged=0;
       s.halted="";
      }
    if(kind==LC_OK || s.n>0 || s.halted!="") LC_Persist(store,s,notes);
@@ -347,7 +389,7 @@ int LC_DueEvents(const int session,const int news,const bool daily_present,const
    return(ev);
   }
 
-void LC_Tick(const SEnConfig &cfg,CEnTransport *tr,CEnStore *store,SLcState &s,const int due,const int enabled,string &notes)
+void LC_Tick(const SEnConfig &cfg,CEnTransport *tr,CEnStore *store,SLcState &s,const int due,const int enabled,string &notes,CLcFillSink *sink=NULL)
   {
    notes="";
    if(s.login<=0) return;
@@ -363,7 +405,7 @@ void LC_Tick(const SEnConfig &cfg,CEnTransport *tr,CEnStore *store,SLcState &s,c
    int before_n=s.n;
    string open_ids[];
    int n_open=0;
-   LC_Sweep(cfg,tr,store,s,open_ids,n_open,notes);
+   LC_Sweep(cfg,tr,store,s,open_ids,n_open,notes,sink);
    int events=(due & enabled);
    bool changed=(s.n!=before_n || s.halted!=before_halt);
    if(due!=0 && events==0) LC_Note(notes,"CANCEL_DUE_NOT_ENABLED events="+IntegerToString(due));

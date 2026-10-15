@@ -1,12 +1,14 @@
 // T019 entry-lifecycle test (FAKE transport and FAKE store only): persistent index + halt, index saved BEFORE every send, exclusive ownership of the index (the existing lock), startup reconcile,
 // tick (fill / gated cancel), events from facts. Never a send of its own. Mirrors tests/test_lifecycle.py (the scenario names are pinned equal by a Python test); the gate / orchestrator wiring of the
-// pre-send hook is tested in EntryGateTest and EntryOrchestratorTest. NEVER includes the real transport; no terminal read, no file, no order, no trade.
+// pre-send hook is tested in EntryGateTest and EntryOrchestratorTest. NEVER includes the real transport; no order, no trade. The five auto_registration_* scenarios use the T011 state-file code, so they write ONLY terminal files named VELO_T019_SELFTEST_VELO_T011_EXIT_* (deleted at the start and the end) and one temporary lock variable VELO_T011_LOCK_*; everything else is fake.
 // NOT YET COMPILED OR RUN (UNVERIFIED): Codex compiles it, the owner runs it in MT5.
 #property strict
 #property script_show_inputs
-#property version "1.01"
+#property version "1.02"
 #include "../include/EntryLifecycle.mqh"
 #include "../include/EntryTransportFake.mqh"
+#include "../include/ExitTransportFake.mqh"
+#include "../include/EntryManagementHandoff.mqh"
 int g_pass=0,g_fail=0;
 void Check(const bool ok,const string message)
   {
@@ -743,6 +745,247 @@ void Scenario_fill_report_and_registration_inputs(void)
      }
   }
 
+// ---- automatic fill -> T011 registration (CMhRegistrar through the existing ETD_Register); the exit transport is the FAKE one with real=true (the gates of a real transport stay in force)
+#define REG_POS 7
+void RegClean(const long login)
+  {
+   string n="VELO_T019_SELFTEST_"+ESF_FileName(login,REG_POS);
+   FileDelete(n);
+   FileDelete(n+ESF_TMP_SUFFIX);
+   GlobalVariableDel(EL_Key(login,REG_POS));
+  }
+
+class CRegWorld
+  {
+public:
+   CWorld w;
+   CFakeTransport x;
+   CMhRegistrar reg;
+   int dir;
+   double tp;
+   long login;
+   bool ok;
+   int calls;
+   void Build(const int direction,const double tp_beyond,const string phrase)
+     {
+      dir=direction;
+      tp=tp_beyond;
+      w.InitTp(direction,tp_beyond);
+      w.Own();
+      login=w.t.account.login;
+      RegClean(login);
+      ok=(w.Seq() && w.r.outcome==EN_R_PLACED);
+      w.t.orders[0].state=EN_OS_FILLED;
+      w.t.orders[0].position_id=REG_POS;
+      x.real=true;
+      x.position.found=true;
+      x.position.ticket=9;
+      x.position.identifier=REG_POS;
+      x.position.symbol="XAUUSD";
+      x.position.magic=777;
+      x.position.type=(direction==1 ? 0 : 1);
+      x.position.volume=0.1;
+      x.position.price_open=w.plan.e_out;
+      x.position.sl=w.plan.s_out;
+      Bind(phrase);
+     }
+   void Bind(const string phrase)
+     {
+      reg.entry_store=GetPointer(w.s);
+      reg.exit_tr=GetPointer(x);
+      reg.magic=777;
+      reg.phrase=phrase;
+      reg.rpol=EX_RPOL_R_GEOM;
+      reg.selftest=true;
+     }
+   string Tick(void)
+     {
+      string notes;
+      LC_Tick(w.cfg,GetPointer(w.t),GetPointer(w.s),w.g.st,0,0,notes,GetPointer(reg));
+      return(notes);
+     }
+   string File(void)
+     {
+      string text;
+      return(ESF_ReadAll(reg.Name(login,REG_POS),text) ? text : "");
+     }
+   bool Locked(void) {return(GlobalVariableCheck(EL_Key(login,REG_POS)) && GlobalVariableGet(EL_Key(login,REG_POS))!=0.0);}
+  };
+
+void Scenario_auto_registration_confirms_once(void)
+  {
+   for(int d=0;d<2;d++)
+     {
+      int dir=(d==0 ? 1 : -1);
+      CRegWorld r;
+      r.Build(dir,(d==0 ? 2005.0 : 1995.0),EX_AUTH_PHRASE);
+      string text=r.Tick();
+      Check(r.ok && Has(text,"REGISTERED_WITH_T011") && Has(text,"InpRPolicy=R_GEOM") && Has(text,"InpEaMagic=777") && Has(text,"InpPositionId=7") && Has(text,"InpInitialSl="+DoubleToString(r.w.plan.s_out,8)) &&
+            Has(text,"InpTpPrice="+DoubleToString(r.tp,8)) && Has(text,"InpDirection="+(d==0 ? "BUY" : "SELL")) && r.w.g.st.n==0 && r.w.g.st.halted=="",StringFormat("dir %d: a filled entry is registered with T011 and forgotten",dir));
+      string saved=r.File();
+      Check(saved!="" && r.x.sends==0 && !r.Locked(),StringFormat("dir %d: the T011 record exists, nothing was sent, the T011 lock is released",dir));
+      string again=r.Tick();
+      Check(again=="" && r.File()==saved && r.w.t.sends==1,StringFormat("dir %d: a registered fill is not registered again; the entry transport sent only the one order",dir));
+      RegClean(r.login);
+     }
+  }
+
+void Scenario_auto_registration_idempotent_after_crash(void)
+  {
+   for(int d=0;d<2;d++)
+     {
+      int dir=(d==0 ? 1 : -1);
+      CRegWorld r;
+      r.Build(dir,(d==0 ? 2005.0 : 1995.0),EX_AUTH_PHRASE);
+      string detail;
+      string n0;
+      LC_Tick(r.w.cfg,GetPointer(r.w.t),GetPointer(r.w.s),r.w.g.st,0,0,n0,NULL);           // the sweep moves the record to FILLED before the sink is asked (no sink: reported only)
+      int first=r.reg.OnFilled(r.login,SIG,detail);
+      string saved=r.File();
+      LC_Release(GetPointer(r.w.s),r.w.g.st);
+      CEnFakeStore s2;
+      CloneDisk(r.w.s,s2);
+      CMhRegistrar reg2;
+      reg2.entry_store=GetPointer(s2);
+      reg2.exit_tr=GetPointer(r.x);
+      reg2.magic=777;
+      reg2.phrase=EX_AUTH_PHRASE;
+      reg2.rpol=EX_RPOL_R_GEOM;
+      reg2.selftest=true;
+      SLcState st2;
+      string notes;
+      LC_Startup(r.w.cfg,GetPointer(r.w.t),GetPointer(s2),GetPointer(s2),false,st2,notes,GetPointer(reg2));
+      Check(first==LC_SINK_CONFIRMED && saved!="" && Has(notes,"ALREADY_REGISTERED") && st2.n==0 && st2.halted=="" && r.File()==saved && r.x.sends==0,
+            StringFormat("dir %d: T011 saved, the process died before the index update: confirmed by comparison after the restart, nothing rewritten",dir));
+      // a different existing record is a conflict and is never overwritten
+      CMhRegistrar reg3;
+      reg3.entry_store=GetPointer(s2);
+      reg3.exit_tr=GetPointer(r.x);
+      reg3.magic=777;
+      reg3.phrase=EX_AUTH_PHRASE;
+      reg3.rpol=EX_RPOL_R_GEOM;
+      reg3.selftest=true;
+      string tampered=saved+"x";                                          // any edit breaks the record check: unusable
+      ESF_WriteAll(reg3.Name(r.login,REG_POS),tampered);
+      string d3;
+      int res3=reg3.OnFilled(r.login,SIG,d3);
+      Check(res3==LC_SINK_REFUSED && Has(d3,"T011_RECORD_CONFLICT"),StringFormat("dir %d: a record that differs or is damaged is a conflict, never overwritten",dir));
+      RegClean(r.login);
+     }
+  }
+
+void Scenario_auto_registration_refusals_keep_the_t011_contracts(void)
+  {
+   string label[9]={"live SL moved","TP equals 2R","TP before 2R","foreign magic","other direction","netting account","not a demo account","no authorisation phrase","volume differs"};
+   string frag[9]={"INITIAL_SL_NOT_PROVEN","TP_EQUALS_2R","TP_BEFORE_2R","OWNERSHIP_NOT_PROVEN","OWNERSHIP_NOT_PROVEN","UNSUPPORTED_ACCOUNT_MODE","REAL_REQUIRES_DEMO_ACCOUNT","REAL_NOT_AUTHORISED","POSITION_VOLUME_DIFFERS"};
+   for(int k=0;k<9;k++)
+      for(int d=0;d<2;d++)
+        {
+         int dir=(d==0 ? 1 : -1);
+         double beyond=(d==0 ? 2005.0 : 1995.0);
+         double eq=(d==0 ? 2000.0 : 2000.0);
+         double before=(d==0 ? 1999.0 : 2001.0);
+         CRegWorld r;
+         r.Build(dir,(k==1 ? eq : (k==2 ? before : beyond)),(k==7 ? "" : EX_AUTH_PHRASE));
+         if(k==0) r.x.position.sl=r.w.plan.s_out-dir*5.0;
+         if(k==3) r.x.position.magic=0;
+         if(k==4) r.x.position.type=1-r.x.position.type;
+         if(k==5) r.x.account.margin_mode=0;
+         if(k==6) r.x.account.demo=false;
+         if(k==8) r.x.position.volume=0.04;
+         string text=r.Tick();
+         Check(r.ok && Has(text,frag[k]) && r.File()=="" && r.x.sends==0 && Has(r.w.g.st.halted,"MANAGEMENT_REGISTRATION_REFUSED") && r.w.g.st.n==1 && !r.Locked(),
+               StringFormat("%s dir %d: refused (%s), nothing registered, the fill stays indexed (unmanaged), the lock is released",label[k],dir,frag[k]));
+         RegClean(r.login);
+        }
+   for(int d=0;d<2;d++)
+     {
+      CRegWorld r;
+      r.Build((d==0 ? 1 : -1),(d==0 ? 2005.0 : 1995.0),EX_AUTH_PHRASE);
+      string detail;
+      int res=r.reg.OnFilled(r.login,SIG,detail);
+      Check(res==LC_SINK_REFUSED && detail=="FILL_NOT_PROVEN" && r.File()=="" && r.x.sends==0,"the sink alone never trusts a record that is not a proven fill");
+      RegClean(r.login);
+     }
+  }
+
+void Scenario_auto_registration_transient_and_locks(void)
+  {
+   for(int d=0;d<2;d++)
+     {
+      int dir=(d==0 ? 1 : -1);
+      double beyond=(d==0 ? 2005.0 : 1995.0);
+      CRegWorld r;
+      r.Build(dir,beyond,EX_AUTH_PHRASE);
+      r.x.position.found=false;
+      bool pending=true;
+      for(int i=0;i<MH_MAX_TRIES-1;i++)
+        {
+         string n=r.Tick();
+         if(!Has(n,"FILL_REGISTRATION_PENDING") || r.w.g.st.halted!="" || r.w.g.st.n!=1 || r.File()!="") pending=false;
+        }
+      r.x.position.found=true;
+      Check(pending && Has(r.Tick(),"REGISTERED_WITH_T011"),StringFormat("dir %d: a transient refusal is retried and registers once the position is visible",dir));
+      RegClean(r.login);
+      CRegWorld e;
+      e.Build(dir,beyond,EX_AUTH_PHRASE);
+      e.x.position.found=false;
+      string last="";
+      for(int i=0;i<MH_MAX_TRIES;i++) last=e.Tick();
+      Check(Has(last,"RETRIES_EXHAUSTED") && Has(e.w.g.st.halted,"MANAGEMENT_REGISTRATION_REFUSED"),StringFormat("dir %d: retries are bounded; exhaustion halts",dir));
+      RegClean(e.login);
+      CRegWorld l;
+      l.Build(dir,beyond,EX_AUTH_PHRASE);
+      string key=EL_Key(l.login,REG_POS);
+      GlobalVariableTemp(key);
+      GlobalVariableSet(key,1.0);
+      string held=l.Tick();
+      bool pend=(Has(held,"FILL_REGISTRATION_PENDING") && l.File()=="" && l.w.g.st.halted=="");
+      GlobalVariableSet(key,0.0);
+      Check(pend && Has(l.Tick(),"REGISTERED_WITH_T011") && !l.Locked(),StringFormat("dir %d: a held T011 per-position lock is a retry, and the registrar releases its own lock",dir));
+      RegClean(l.login);
+     }
+  }
+
+void Scenario_auto_registration_acknowledge_and_instances(void)
+  {
+   for(int d=0;d<2;d++)
+     {
+      int dir=(d==0 ? 1 : -1);
+      CRegWorld r;
+      r.Build(dir,2000.0,EX_AUTH_PHRASE);                                  // TP == 2R: T011 refuses
+      r.Tick();
+      bool halted=Has(r.w.g.st.halted,"MANAGEMENT_REGISTRATION_REFUSED");
+      r.Tick();
+      Check(halted && r.w.g.st.n_unmanaged==1,StringFormat("dir %d: a refused fill halts and is not offered to the sink again in this process",dir));
+      LC_Release(GetPointer(r.w.s),r.w.g.st);
+      CEnFakeStore s2;
+      CloneDisk(r.w.s,s2);
+      SLcState st2;
+      string n2;
+      LC_Startup(r.w.cfg,GetPointer(r.w.t),GetPointer(s2),GetPointer(s2),false,st2,n2,GetPointer(r.reg));
+      bool survives=Has(st2.halted,"MANAGEMENT_REGISTRATION_REFUSED");
+      LC_Release(GetPointer(s2),st2);
+      SLcState st3;
+      string n3;
+      LC_Startup(r.w.cfg,GetPointer(r.w.t),GetPointer(s2),GetPointer(s2),true,st3,n3,GetPointer(r.reg));
+      Check(survives && st3.halted=="" && st3.n==0 && r.File()=="" && s2.Exists(EN_FileName(r.login,SIG)),StringFormat("dir %d: the halt survives a restart; the acknowledgement accepts the unmanaged position, registers nothing, keeps the entry record",dir));
+      LC_Release(GetPointer(s2),st3);
+      // an instance without the index lock never reaches the registrar
+      CRegWorld f;
+      f.Build(dir,(d==0 ? 2005.0 : 1995.0),EX_AUTH_PHRASE);
+      SLcState forged;
+      LC_StateInit(forged,f.login);
+      forged.ids[0]=SIG;
+      forged.n=1;
+      string nf;
+      LC_Tick(f.w.cfg,GetPointer(f.w.t),GetPointer(f.w.s),forged,0,0,nf,GetPointer(f.reg));
+      Check(nf=="" && f.File()=="" && f.x.sends==0,StringFormat("dir %d: without the index lock the registrar is never reached",dir));
+      RegClean(f.login);
+      RegClean(r.login);
+     }
+  }
+
 void OnStart()
   {
    Print("T019 ENTRY LIFECYCLE TEST: fake transport and fake store only; no terminal read, no order, no file.");
@@ -764,6 +1007,11 @@ void OnStart()
    Scenario_release_only_by_owner_on_failure_paths();
    Scenario_damage_during_run_never_overwritten();
    Scenario_fill_report_and_registration_inputs();
+   Scenario_auto_registration_confirms_once();
+   Scenario_auto_registration_idempotent_after_crash();
+   Scenario_auto_registration_refusals_keep_the_t011_contracts();
+   Scenario_auto_registration_transient_and_locks();
+   Scenario_auto_registration_acknowledge_and_instances();
    PrintFormat("T019 ENTRY LIFECYCLE TEST finished: %d passed, %d failed",g_pass,g_fail);
   }
 
