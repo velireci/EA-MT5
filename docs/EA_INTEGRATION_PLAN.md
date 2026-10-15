@@ -133,3 +133,14 @@ Pasoja e dokumentuar: me planin e sotëm (`NONE_2R_MINIMUM`, TP planifikuar = 2R
 
 
 **Codex correction, 15.10.2026 (on 6ef9533):** planned TP/2R diagnostics require live verification, without definitive T011 refusal. BUY/SELL improved-fill regressions failed before the correction. Targeted Python: 74 passed. Lifecycle test and orchestrator EA: each compiled with 0 errors / 0 warnings. Lifecycle static checks and the new negative control passed; Git-base comparisons skipped in this source export. Owner MT5 rerun pending; automatic T011 registration remains unimplemented.
+
+## Marrëveshja e pronarit: DEMO kundrejt LIVE (15.10.2026)
+
+Kjo marrëveshje zëvendëson kërkesën që çdo sqarim strategjik të bllokojë edhe provat demo. Për demo lejohen konfigurime të përkohshme, të etiketuara e të dokumentuara; ato nuk janë përgjigje të klientit dhe nuk kalojnë automatikisht në live. Çdo zgjedhje e pambuluar nga një konfigurim prove mbetet UNSET/BLOCK. Kjo nuk aktivizon transportin real dhe nuk autorizon dërgim urdhrash.
+
+- D2 mbetet PYETJE PËR KLIENTIN PARA LIVE: baza e riskut 1% (balanca aktuale / fillim dite / equity) dhe përfshirja e kostove. Për provën demo është pranuar përkohësisht 1% e balancës aktuale. `InpRiskBudget` mbetet shumë në monedhën e llogarisë; kodi sot nuk e përditëson automatikisht si përqindje. Preseti i dorëzuar FAKE ende ka -1; ky shënim nuk e ndryshon presetin ose kodin.
+- Lista B D1–D13 mbetet burimi i vetëm i sqarimeve të klientit (D9 është lidhje teknike e zgjidhur). Para live duhen zgjidhur: konflikti 2/3 trade; baza/kostot e riskut; rezervimi nga pending; H4/MSS/FVG dhe përzgjedhja; struktura/buffer-i i SL; targeti; break-even/+0.2% dhe TP=2R; pozicionet jashtë orarit/para lajmit; sinjali i kundërt; rezultati neto, partial dhe breakeven në numërues; filtri i range-it. Nuk i kërkojmë përsëri klientit rregullat që janë të konfirmuara në A.
+- Për çdo alternativë të përdorur në demo regjistrohen vlera, arsyeja, devijimi nga kërkesa dhe statusi 'vetëm provë'. Pranimi i kësaj ndarjeje nuk miraton në bllok rekomandimet e tabelës B.
+- Para aktivizimit LIVE: përgjigjet e klientit për pikat që ndikojnë sjelljen reale regjistrohen në këtë listë, zbatimi dhe konfigurimi krahasohen me to dhe verifikohen. Llogaritë reale mbeten të refuzuara nga kodi aktual; heqja e këtij kufizimi kërkon punë dhe autorizim të veçantë.
+
+Evidencë e përcjellë nga pronari: EntryLifecycleTest-d5f7460 në XAUUSD.fx M15, 23:13:25: 231 passed / 0 failed. Orkestruesi 6eab15d u nis FAKE/READ_ONLY; në 23:20:19 raportoi vetëm CONFIG_UNSET: risk_budget, virtual requests 0, lifecycle open 0. Kjo provon testin dhe nisjen, jo cikël tregtimi real.

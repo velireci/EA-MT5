@@ -127,3 +127,9 @@ Updated: 2026-10-15 (Europe/Tirane). Snapshot, not a transcript.
 
 
 
+
+## Owner agreement recorded 2026-10-15: demo assumptions / live clarifications
+
+See EA_INTEGRATION_PLAN.md, 'Marrëveshja e pronarit: DEMO kundrejt LIVE'. Temporary documented demo choices do not constitute client approval for live. For demo, 1% of current balance is accepted provisionally; D2 (base and costs) stays open for client confirmation before live. No code/preset/transport change here; the delivered FAKE work preset still blocks on risk_budget. The remaining D1–D13 questions stay in the existing single list (D9 already technical/resolved); recommendations are not blanket-approved.
+
+Owner-relayed MT5 evidence (not assistant execution): EntryLifecycleTest-d5f7460, XAUUSD.fx M15, 23:13:25: 231 passed / 0 failed. Orchestrator 6eab15d started FAKE/READ_ONLY; 23:20:19 CONFIG_UNSET risk_budget, virtual requests 0, lifecycle open 0. No real-trading proof.
