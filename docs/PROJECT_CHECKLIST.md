@@ -209,7 +209,8 @@ Mbetet: orari nuk dërgon ende anulime ose mbyllje; persistence/catchup/lajmet t
 - [x] T013 (e përcjellë): ekzekutuesi i hyrjes LIMIT — Codex 0/0 + 62 Python, MT5 EntryExecutorTest 170/0; transporti real i paprovuar
 - [x] T015: porta e hyrjes (plani T014 + TP_CheckPermit + kontrolli i humbjes së brokerit + rezultati ditor T012 i detyrueshëm → leje vetëm për të njëjtin plan → EntryExecutor); bllokimi nuk thërret ekzekutuesin; pa regjistrim sinjali; sandbox me transport fake, kompilimi/MT5 UNVERIFIED (docs/T015-entry-gate.md)
 - [x] T016: orkestruesi FAKE i korrigjuar: rikuperimi i të dhënave rinis baseline, M4ContextEqual krahason kontekstin e plotë, sizing-u përdor sondën e brokerit pas gjeometrisë. Codex: 128 Python OK, pesë kompilime 0 errors / 0 warnings, kontrollet statike me 23 kontrolle negative kalojnë; kontrollet e bazës Git u kapërcyen në eksportin lokal.
-- [ ] T016: pronari riekzekuton EntryOrchestratorTest dhe SetupPlanBridgeTest në MT5. Pa transport real, pa integrim T011.
+- [x] T016: pronari MT5 në fe53c06, XAUUSD.fx M15: EntryOrchestratorTest 97/0 (19:05:58), SetupPlanBridgeTest 77/0 (19:06:09), 15.10.2026. Evidencë e përcjellë; FAKE vetëm, pa provë live të EA-së dhe pa integrim T011.
+- [ ] Propozimi T017: ruajtje e rekordeve FAKE pas rinisjes; projektimi pret miratimin e pronarit, kodi nuk ka nisur.
 - [x] T014 (e përcjellë): Codex 0/0 + 27 Python, MT5 SetupPlanBridgeTest 77/0
 
 ## T012 — kufijtë ditorë

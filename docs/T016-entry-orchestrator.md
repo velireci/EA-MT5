@@ -1,6 +1,6 @@
 # T016 Entry orchestrator EA (FAKE execution only)
 
-Status: corrected after cf9d92a. Codex compiled the EA and four entry-chain tests with 0 errors / 0 warnings each. Revised MT5 tests await the owner. FAKE execution only; not live-ready.
+Status: corrected after cf9d92a. Codex compiled the EA and four entry-chain tests with 0 errors / 0 warnings each. Owner-relayed revised MT5 tests passed: EntryOrchestratorTest 97/0 and SetupPlanBridgeTest 77/0 on fe53c06 (2026-10-15). FAKE execution only; not live-ready.
 
 ## What it is
 One EA, `src/XauUsdEntryOrchestrator.mq5`, that wires the EXISTING flow end to end:
@@ -45,7 +45,7 @@ It is not a diagnostic panel. It draws nothing; it logs one status line and sets
 - Orchestrator/bridge static scripts passed, including 17 and 6 negative controls. Git-baseline sections were SKIPPED because the local source export has no Git objects.
 - Market/quote failures mark the baseline for recovery. Full context comparison replaces IDs alone. Daily offset is checked within +/-50400 and on a 900-second grid before narrowing; 99999 and overflow-shaped values are rejected without a zero-offset fallback.
 - Independent review of the correction found no actionable issues.
-- Owner MT5 execution of the revised tests remains UNVERIFIED. No EA was attached and no trade was made by Codex.
+- Owner-relayed MT5 on fe53c06, XAUUSD.fx M15: EntryOrchestratorTest 97/0 at 19:05:58 and SetupPlanBridgeTest 77/0 at 19:06:09. These are owner runs, not Codex runs. No EA was attached and no trade was made by Codex.
 
 ## Next action
-Owner runs the revised EntryOrchestratorTest and SetupPlanBridgeTest in MT5 and relays their final lines. The EA remains FAKE only. No real entry transport, persistent storage or T011 management integration was added.
+Revised MT5 tests have passed per the owner logs. Next proposed technical block: docs/T017-entry-persistence-design.md; approval pending. The EA remains FAKE only. No real entry transport, persistent storage or T011 management integration was added.
