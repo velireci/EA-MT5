@@ -73,7 +73,7 @@ The executor makes ONE trading call per request and never repeats it (no retry l
 3. How an uncertain send is resolved and whether a verified discovery rule (for example by order history) may ever link an order to a request.
 4. Execution parameters of the close: order type, deviation (slippage), filling type, behaviour when the price is beyond the level at send time; whether spread / news / session filters apply to an exit.
 5. Ownership model for existing positions (magic reuse, positions opened before the executor, manual intervention) and who may clear a RECOVERY_REQUIRED.
-6. Cost / +0.2% / breakeven handling and the move of the stop-loss after the partial close (not part of this contract; not built).
+6. Cost / +0.2% / breakeven handling and the move of the stop-loss after the partial close (not part of this contract; not built; STILL OPEN). DECIDED (2026-10-15, owner message): the remainder runs to its TP/SL with no trailing.
 
 ## 9. Corrections (executor stage, base a70fde6)
 * SAVE = false does NOT prove the old file stayed on disk: the move may have happened and the read-back may have failed. The executor therefore treats ANY save failure (INTENT or MAP) as RECOVERY_REQUIRED,

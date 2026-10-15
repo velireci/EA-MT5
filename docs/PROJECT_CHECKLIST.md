@@ -97,7 +97,7 @@ Status: moduli i pastër i sizing-ut i verifikuar (Python, MetaEditor, MT5); 10 
 - [x] Ekzekutuesi që regjistron biletat, harta kërkesë→urdhër dhe rinisja: provuar në UNË cikël real demo (të përcjella nga pronari: BUY 0.05, urdhri mbyllës 58913523110, DONE, ALREADY_DONE pas rihapjes së MT5, sends 0). Jo SELL, jo rrugë dështimi, jo llogari live.
 - [ ] Mbyllja e 80% në 2R në broker: u provua në prag DIAGNOSTIK 4140.00 (jo aktivizim strategjik në 2R); politika kur ndarja nuk realizohet (SPLIT_POLICY_UNSET) mbetet vendim klienti
 - [ ] Pajtimi i entry plus kosto me +0.2%
-- [ ] Mbetja deri te TP/SL, pa trailing
+- [x] Vendim: mbetja pas pjesëmbylljes mbahet deri te TP/SL, pa trailing (vendosur; BE dhe pajtimi +0.2% mbeten të hapura në rreshtin më sipër; asnjë modul i ri për mbetjen)
 
 ### 6. Kufijtë ditorë dhe ekspozimi — NISUR (vetëm kontrolli i pastër T007; kufijtë vijnë si numra ose UNSET)
 - [x] Kontrolli i pozicioneve, trade/ditë dhe riskut të kombinuar me kufij të furnizuar; kufi UNSET bllokon (POLICY_UNSET); kufijtë e testit (3, 5, 5000) janë arbitrarë, jo të klientit (Python)

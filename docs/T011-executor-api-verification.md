@@ -1,4 +1,8 @@
-# T011 executor: trading API verification status (UNVERIFIED) and limits
+# T011 executor: trading API verification status and limits
+
+RELAYED 2026-10-15 (owner/Codex, details not seen by me): Codex has read the official OrderSend and MqlTradeRequest pages. Status below: from my side the pages stay unread and the item list is the checklist Codex compared; I do not know which items were confirmed beyond that statement.
+
+Historical text (state at 129a267, written when no page could be read):
 
 ## What could and could not be verified
 The two official pages requested were NOT readable from the build environment: `https://www.mql5.com/en/docs/trading/ordersend` and
