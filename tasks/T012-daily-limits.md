@@ -18,3 +18,6 @@ Files: src/include/DailyLimits.mqh, src/tests/T012_DailyLimitsTest.mq5, tests/t0
 
 ## Integration (preview v1.04)
 See docs/T012-daily-limits.md: opt-in InpDailySource (MANUAL default), explicit inputs only, UTC like T009 and refused in tester, the daily BLOCK joins the final preview result (DG_FinalPreview), cancel_pending_due is a diagnostic flag only, trade count / limit reuse InpTradesToday / InpMaxTrades (limit default unset), no history or account read, T007 and T008-T010 unchanged. Files: src/include/DailyPreviewGate.mqh, src/XauUsdTradePreview.mq5, src/tests/T012_GateTest.mq5, tests/t012_gate_*.py, tests/test_t012_gate.py, tools/t012-gate-static-checks.sh, src/presets/XauUsdTradePreview_T012_hypothetical_daily_block.set.
+
+## Read-only daily history facts
+See docs/T012-daily-history.md: facts only (no trade count, no win/loss/breakeven, no result formula, no balance reconstruction), day window from T009, ownership by the opening deal's magic, money fields kept separate, UNKNOWN/BLOCK carry no facts, not wired to the permit. Files: src/include/DailyHistory.mqh, src/XauUsdDailyHistoryDiag.mq5, src/tests/T012_HistoryTest.mq5, tests/t012_history_*.py, tests/test_t012_history.py, tools/t012-history-static-checks.sh.

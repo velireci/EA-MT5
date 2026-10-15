@@ -1,0 +1,26 @@
+# T012 - leximi vetem-lexim i historikut ditor te robotit (FAKTE, jo politike)
+
+Skedaret: src/include/DailyHistory.mqh (berthama e paster DH_Build + lexuesi i hollesishem DH_ReadRaw), skripti diagnostik src/XauUsdDailyHistoryDiag.mq5, testet tests/t012_history_*.py, tests/test_t012_history.py, src/tests/T012_HistoryTest.mq5, tools/t012-history-static-checks.sh. Nuk lidhet me lejen reale: te dhenat e paklasifikuara nuk behen zero ose CLEAR. Pa urdhra, persistence ose reset real. Kontrolli ditor DailyLimits mbetet i pandryshuar.
+
+## Ndarja fakte / politike
+Mbledh VETEM fakte. NUK: numeron trade (nje deal nuk eshte trade), NUK cakton fitore/humbje/breakeven, NUK zgjedh formulen e rezultatit ditor (result_formula = UNSET; tre kandidate shfaqen krahas dhe asnje nuk zgjidhet: profit; profit+commission+swap; profit+commission+swap+fee), NUK rinderton balancen ne fillim te dites (balance_start_known = false: "balance aktual minus profit" injoron depozitat, terheqjet, kreditet dhe kostot). Keto jane pyetje te hapura te klientit dhe vendime politikash qe do te marren vecmas.
+
+## Dita
+Kufijte nga T009 (SP_Evaluate, Europe/Tirane/DST): [mesnata e Tiranes, mesnata e dites tjeter) ne UTC; dita e tjeter vleresohet 30 ore pas fillimit (dite 23-25 ore). Kohet e deal-eve jane ora e SERVERIT: utc = koha - server_offset_seconds. Offset-i eshte input i shprehur (shumefish i 900 s, |x| <= 14 ore); diagnostiku e merr nga TimeTradeServer()-TimeGMT() vetem si propozim. KUFIZIM: nese ora e serverit te brokerit ndryshon (DST) BRENDA dites Tirane, kjo nuk zbulohet nga te dhenat e deal-eve; pronari duhet ta verifikoje offset-in me terminalin.
+
+## Pronesia (kufijte e magic dhe lidhja me position identifier)
+Identiteti i EA-se eshte magic i shprehur (> 0; 0 = urdhra manuale/mobile/web, refuzohet). Nje POZICION eshte i robotit nese deal-i i tij i hapjes (DEAL_ENTRY_IN i pare, gjetur me HistorySelectByPosition(identifier)) ka DEAL_MAGIC = magic i EA-se; te gjitha deal-et e atij position identifier (dalje, dalje te pjesshme, SL/TP) jane deal-e te pozicionit te robotit. Lidhja eshte me position identifier (jo ticket). Kufizime qe mbeten: (1) magic nuk eshte prove unike e EA-se (nje EA tjeter, skript ose person mund te perdore te njejtin numer; perplasja nuk zbulohet); (2) magic i deal-it te daljes NUK perdoret per pronesi: mbyllja manuale e nje pozicioni te robotit mbetet pozicion i robotit dhe numerohet vecmas ne exits_not_by_ea_magic; (3) deal-i i hapjes duhet te gjendet, perndryshe UNKNOWN (OWNERSHIP_UNPROVABLE); (4) llogari NETTING/EXCHANGE nuk mbeshteten (BLOCK): atje tregtite e robotit dhe ato manuale bashkohen ne nje pozicion.
+Tregtite manuale dhe te EA-ve te tjera numerohen vetem si other_trade_deals dhe perjashtohen.
+
+## Faktet
+Per deal-et e pozicioneve te robotit brenda dites, sipas klases se hyrjes IN / OUT / INOUT / OUT_BY / OTHER: count, volume, profit, commission, swap, fee (fusha te ndara). Deal-et jo-tregtare (balance, credit, charge, correction, bonus ... ku jetojne depozitat dhe terheqjet) mblidhen vecmas dhe nuk perzihen kurre me shumat e robotit. Per cdo pozicion robot te prekur: sa deal-e hyrjeje/daljeje, volumi, kater fushat monetare dhe gjendja: OPEN_NO_EXIT, OPEN_PARTIALLY_CLOSED, CLOSED (volumi i daljeve gjithe-kohe = volumi i hyrjeve ne hapa volumi; perndryshe UNKNOWN). Hyrjet e pozicioneve te hapura dje dhe te mbyllura sot nuk kane kosto hyrjeje brenda dites (fakt, jo politike).
+Deduplikim sipas deal ticket (e njejta permbajtje = nje; permbajtje ndryshe = UNKNOWN). Deal-et jashte dritares numerohen si outside_window.
+
+## Verdikti
+READY (fakte; complete = true vetem kur pronari pohon se historiku eshte ngarkuar plotesisht DHE kontrollet e zbulueshme kaluan: terminali nuk mund ta provoje plotesine e historikut), UNKNOWN (konfigurim i pavlefshem, gabim API, histori/pozicione te palexueshme, kapacitet (200 deal-e, 32 pozicione), dy lexime te ndryshme, ticket i dyfishte me permbajtje tjeter, deal hapjeje i pagjetur, volume pozicioni te papajtueshme), BLOCK (mode llogarie jo HEDGING). UNKNOWN/BLOCK nuk kane asnje fakt (jo zero).
+
+## Verifikimi i semantikes se API-ve
+Faqet zyrtare mql5.com nuk hapen nga mjedisi i ndertimit. Nga kerkimi (fragmente te dokumentacionit): DEAL_FEE "fee for the deal which is charged immediately after the deal"; DEAL_SWAP "accumulated swap at close"; DEAL_COMMISSION dhe DEAL_PROFIT jane double; DEAL_POSITION_ID identifikon pozicionin e hapur/modifikuar/mbyllur nga deal-i; DEAL_MAGIC "see ORDER_MAGIC"; HistoryDealGetTicket kerkon HistorySelect() ose HistorySelectByPosition() paraprakisht dhe kthen 0 ne deshtim; cdo mbyllje e pjesshme krijon deal OUT te vecante me te njejtin position id. UNVERIFIED (nuk u lexuan faqet e plota ose nuk u ekzekutuan): vlerat e ENUM_DEAL_TYPE jo-tregtare, nese deal-et SL/TP mbajne DEAL_MAGIC te pozicionit, sjellja e HistorySelect ne kufijte e intervalit, ngarkimi i historikut ne cache te terminalit.
+
+## Prova
+Python: tests/test_t012_history.py. MQL5: src/tests/T012_HistoryTest.mq5 (ekzekutoje nga Scripts; kontrollon edhe konstantet e pasqyruara kundrejt terminalit). Diagnostik: XauUsdDailyHistoryDiag.mq5 mbi llogari demo ekzistuese (pa krijuar tregti): vendos InpEaMagic dhe, nese dihet, InpServerOffsetSeconds; dergo rreshtat "T012 HISTORY DIAG" dhe krahaso me skeden History te terminalit.
