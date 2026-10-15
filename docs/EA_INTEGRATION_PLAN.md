@@ -38,3 +38,36 @@ Skica minimale (pa kod ende): sedra e re `CEntryTransport` (nuk prek `ExitTransp
 Kriteri i përfundimit: Python + MQL5 me fake: (i) zero dërgime pa permit/skadim/intent të ruajtur; (ii) një dërgim për sinjal, përsëritja nuk dërgon; (iii) rikuperimi pas restart-it në çdo pikë të dështimit nuk dërgon të dytin; (iv) anulimi prek vetëm pending-et e EA-së; (v) skedarët e rinj kompilohen 0/0 te Codex dhe testet kalojnë në MT5 të pronarit; mbetet UNVERIFIED çdo semantikë e `OrderSend` pending derisa pronari të autorizojë një provë demo.
 
 Pyetje për pronarin vetëm për këtë hap: të autorizohet ndërtimi i ekzekutuesit të hyrjes (jo aktivizimi) dhe të konfirmohet që regjistrimi automatik pas mbushjes (lidhja 7a) do të diskutohet veçmas më vonë.
+
+## Gjendja e integrimit (15.10.2026, mbi 21f7ade) dhe lista e vetme e vendimeve që bllokojnë
+
+**Ndërtuar dhe në EA-në `XauUsdEntryOrchestrator.mq5` (transport FAKE i fiksuar):** H4/M15 → SetupPlanBridge → EntryGate → EntryExecutor (T014–T016), rekordet e hyrjeve në disk (T017), ekspozimi i llogarisë vetëm-lexim (T018), cikli i jetës (T019): indeks + flamur ndalese të ruajtur, reconcile në nisje dhe në çdo timer, anulim i pending-it të provuar vetëm për ngjarje të dalë E të aktivizuar nga pronari, mbushje e raportuar FILLED_UNMANAGED. Baseline rindërtohet në çdo nisje.
+
+**Teknikisht ende jo e lidhur (kërkon marrëveshje të pronarit, jo vendim strategjik):** regjistrimi automatik në T011 pas mbushjes (ndryshon rregullin e SL-së së ruajtur dhe pronësinë), dhe transporti real. Tiketat FAKE nuk lidhen kurrë me pozicione reale.
+
+**Vendimet që bllokojnë (çdo rresht = një input që sot është UNSET dhe bllokon; asnjë nuk është zgjedhur nga Claude):**
+
+| # | Vendimi | Input / vendi | Pyetja |
+|---|---|---|---|
+| 1 | Burimi i kontekstit H4 dhe politika kur kundërshtohen | `InpContextSource` | Q01–Q03 |
+| 2 | Swing-u M15 për MSS | `InpM15Level` | Q04 |
+| 3 | Kohëzimi i FVG M15 (forming/mbyllur) | `InpFvgTiming` | Q04 |
+| 4 | Cili FVG kur ka disa | `InpCandidate` | Q04 |
+| 5 | Skaji i FVG si hyrje (afër/larg) | `InpEntryEdge` | Q05 |
+| 6 | SL: ekstremi i strukturës së thyer + buffer | `InpSlRule`, `InpSlBuffer` | Q05 |
+| 7 | Targeti përtej minimumit 2R | `InpTargetRule` | Q05, Q07 |
+| 8 | Baza e 1% (balancë/equity/fillim dite), kostot, kapaku i lotit | `InpRiskBudget`, `InpLotCap` | Q08 |
+| 9 | Kufijtë: 2 apo 3 trade, kufiri i kombinuar i riskut, pozicione maksimale | `InpMaxPositions`, `InpMaxTrades`, `InpCombinedRiskCap` | Q08 |
+| 10 | A rezervon një pending pozicion; a hyn risku i tij në riskun ekzistues | `InpPendingPolicy`, `InpPendingRiskPolicy` | Q11 |
+| 11 | Orari i seancës, mbyllja e së Premtes, veprimi në fund të orarit | `InpSessionClock` + minutat | Q11 |
+| 12 | Dritarja e lajmeve dhe veprimi mbi pending/pozicion | `InpNewsCalendar` | Q11 |
+| 13 | Pragu i spread-it dhe refuzimi | `InpMaxSpreadPoints` | Q09 |
+| 14 | Rezultati ditor: formula, klasifikimi trade/win/loss, humbje radhazi, rivendosja | `InpDailyResultFormula`, `InpDailyClassification`, `InpTradesToday`, `InpDailyWins`, `InpDailyConsecutiveLosses` | Q10 |
+| 15 | Skadimi i pending-it, ri-hyrja, cooldown, sinjal i kundërt | `InpExpiryMode`, `InpExpirySeconds` (+ asgjë tjetër ende) | Q09 |
+| 16 | Cilat ngjarje anulojnë pending-in: fund seance, lajm, kufi ditor; si dhe zhvlerësimi i FVG / ndryshimi i drejtimit (nuk ka ende ngjarje) | `InpCancelOnSessionEnd`, `InpCancelOnNewsBlock`, `InpCancelOnDailyLimit` | Q09, Q11 |
+| 17 | Menaxhimi pas mbushjes: 80% në 2R kundrejt niveleve, kuptimi i +0.2%/break-even, TP | T011 (jashtë EA-së së hyrjes) | Q07 |
+| 18 | Marrëveshje: regjistrimi automatik i T011 pas mbushjes me SL nga plani i ruajtur; ndarja nga pozicionet manuale (magic, hedging) | kontratë e ndryshueshme vetëm me pronarin | Q07, Q11 |
+| 19 | Aktivizimi i transportit real / prova demo me tregti | vendim i veçantë i pronarit | - |
+
+Pa 1–9 EA-ja nuk prodhon plan; pa 10–14 porta bllokon; 15 dhe 16 nuk ndalojnë hyrjen, por pa to një pending mbetet pa skadim dhe pa anulim automatik; 17–19 janë të ndara nga hyrja.
+

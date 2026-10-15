@@ -2,13 +2,15 @@
 //   FAKE EXECUTION: a virtual request is logged and counted in memory; NOTHING is sent to the terminal. The real transport is NOT included in this file and is NOT selectable by any input.
 //   Market/account reads: closed bars, symbol / quote properties, OrderCalcProfit, calendar, deal history and T012 balance LOAD only. Only isolated FAKE entry records are written.
 //   Every source / selection / policy input is UNSET by default and UNSET blocks. Exposure: EXPLICIT inputs by default (-1 = unknown) or the opt-in READ-ONLY account reader (T018: this EA magic, hedging account, pending policy explicit); the trade counter stays an explicit input. Chart symbol only (incl. XAUUSD.fx).
-//   FAKE entry records persist in VELO_T016_FAKE_ files. Baseline, halt and fake orders remain in memory; this is not complete orchestrator recovery or proof of broker execution.
+//   FAKE entry records and the T019 lifecycle index / halt flag persist in VELO_T016_FAKE_ files. The baseline is REBUILT at every start (a restart never revives a signal). The fake order book is in memory only, so after a
+//   restart a placed FAKE record cannot be proven and HALTS the layer until the owner acknowledges it. Filled orders are reported FILLED_UNMANAGED: the T011 registration is NOT connected. Not proof of broker execution.
 #property strict
-#property version "1.03"
+#property version "1.04"
 #include "include/EntryOrchestratorFeed.mqh"
 #include "include/EntryTransportFake.mqh"
 #include "include/ExposureReaderReal.mqh"
 #include "include/EntryStateFile.mqh"
+#include "include/EntryLifecycle.mqh"
 
 enum ENUM_EO_SOURCE {EOI_SRC_UNSELECTED=0,EOI_SRC_T003_RECONF_PROPOSAL=1,EOI_SRC_T002_TOUCH_AFTER_LOSS_PROPOSAL=2,EOI_SRC_T002_TOUCH_FIRST_ONLY_PROPOSAL=3};
 enum ENUM_EO_SWING {EOI_SWING_UNSELECTED=0,EOI_SWING_LATEST_FRACTAL_PROPOSAL=1};
@@ -75,6 +77,10 @@ input int InpM15ReplayBars=512;
 input int InpM15LookbackBars=300;
 input int InpM15LeftBars=2;
 input int InpM15RightBars=2;
+input bool InpCancelOnSessionEnd=false;       // lifecycle: cancel an open (proven) pending order when the session filter reports CLOSED. false = never (owner decision)
+input bool InpCancelOnNewsBlock=false;        // lifecycle: ... when the news filter reports BLOCKED
+input bool InpCancelOnDailyLimit=false;       // lifecycle: ... when the T012 daily result says cancel_pending_due
+input bool InpAcknowledgeLifecycleHalt=false; // owner acknowledgement at the START: clears a persisted lifecycle halt and drops its unresolved ids (their records stay, the signals stay consumed). Never automatic
 input int InpPollSeconds=2;
 
 // FAKE transport: the execution side is the in-memory fake (every Send is a virtual request, logged with the label); the read side is READ-ONLY terminal state.
@@ -127,6 +133,8 @@ CEoTerminalFake g_tr;
 CEnFakeFileStore g_store;
 COrchestrator g_orch;
 SEoConfig g_cfg;
+SLcState g_lc;
+ulong g_lc_filters_ms=0;
 string g_last="";
 
 void Status(const string text)
@@ -209,8 +217,52 @@ bool Configure(void)
    return(true);
   }
 
+bool EntryTouched(const ENUM_EN_RESULT f)
+  {
+   return(f==EN_R_PLACED || f==EN_R_FILLED || f==EN_R_REJECTED || f==EN_R_RECOVERY || f==EN_R_BLOCKED || f==EN_R_PRECHECK_REFUSED || f==EN_R_CANCELLED || f==EN_R_CANCEL_UNCERTAIN || f==EN_R_EXPIRED);
+  }
+
+int EnabledCancelEvents(void)
+  {
+   return((InpCancelOnSessionEnd ? TP_EV_SESSION_END : 0)|(InpCancelOnNewsBlock ? TP_EV_NEWS_BLOCK : 0)|(InpCancelOnDailyLimit ? TP_EV_DAILY_LIMIT : 0));
+  }
+
+// the two layers share ONE halt: whichever halts first stops new entries; the lifecycle halt is persisted
+void SyncHalts(void)
+  {
+   string notes="";
+   // only a halt caused by an executor outcome is persisted (a full handled list, for instance, is cured by the restart itself)
+   if(g_lc.login>0 && StringFind(g_orch.halted,"HALTED after")==0 && g_lc.halted=="") LC_Halt(GetPointer(g_store),g_lc,g_orch.halted,notes);
+   if(g_lc.halted!="" && g_orch.halted=="") g_orch.halted="LIFECYCLE: "+g_lc.halted;
+   if(notes!="") Print("T019 ",notes);
+  }
+
+// every timer tick: reconcile the indexed signals; cancel an open pending order only for an event that is due AND enabled by the owner (the filters are read at most every 10 s, only when an event is enabled and a signal is open)
+void Lifecycle()
+  {
+   if(g_lc.login<=0) return;
+   int enabled=EnabledCancelEvents();
+   int due=0;
+   if(enabled!=0 && g_lc.n>0 && (g_lc_filters_ms==0 || GetTickCount64()-g_lc_filters_ms>=10000))
+     {
+      g_lc_filters_ms=GetTickCount64();
+      int session=TP_SESSION_UNKNOWN,news=TP_NEWS_UNKNOWN,spread=TP_SPREAD_UNKNOWN;
+      g_market.Filters(session,news,spread);
+      STpPlan none;
+      TP_PlanReset(none,"-","-",1);
+      SDbResult daily;
+      bool present=g_market.Daily(none,daily);
+      due=LC_DueEvents(session,news,present,(present && daily.cancel_pending_due));
+     }
+   string notes="";
+   LC_Tick(g_cfg.exec,GetPointer(g_tr),GetPointer(g_store),g_lc,due,enabled,notes);
+   if(notes!="") Print("T019 LIFECYCLE | ",notes);
+   SyncHalts();
+  }
+
 void Poll()
   {
+   Lifecycle();
    bool feed_ok=false;
    if(!g_feed.Poll(feed_ok)) return;                // nothing new on the closed bars
    if(InpExposureSource==EOI_EXPOSURE_ACCOUNT_READ)
@@ -225,8 +277,13 @@ void Poll()
      }
    SEoOutcome out;
    g_orch.Step(g_cfg,GetPointer(g_market),feed_ok,g_feed.st,g_feed.f,g_feed.broken,g_feed.cut,GetPointer(g_tr),GetPointer(g_store),out);
+   string lnotes="";
+   if(out.status=="EXECUTOR" && g_lc.login>0 && EntryTouched(out.res.outcome) && !LC_Register(GetPointer(g_store),g_lc,out.spb.signal_id,lnotes))
+      LC_Halt(GetPointer(g_store),g_lc,"LIFECYCLE_INDEX_NOT_UPDATED after "+EN_ResultName(out.res.outcome),lnotes);
+   if(lnotes!="") Print("T019 ",lnotes);
+   SyncHalts();
    string text=out.status+" | "+out.reason+" | cut "+TimeToString(g_feed.cut,TIME_DATE|TIME_MINUTES)+" | baseline "+TimeToString((datetime)g_orch.baseline,TIME_DATE|TIME_MINUTES)+
-               " | virtual requests "+IntegerToString(g_tr.sends);
+               " | virtual requests "+IntegerToString(g_tr.sends)+" | lifecycle open "+IntegerToString(g_lc.n)+(g_lc.halted!="" ? " HALTED" : "");
    if(out.request) text+=" | "+out.label+" | "+out.spb.signal_id;
    Status(text);
   }
@@ -236,6 +293,11 @@ int OnInit()
    if(MQLInfoInteger(MQL_TESTER)) {Print("T016 REFUSED: the Strategy Tester is not a supported environment (terminal reads)."); return(INIT_FAILED);}
    if(!Configure()) {Print("T016 INIT FAILED: invalid or UNSET source / feed inputs (see docs/T016-entry-orchestrator.md)."); return(INIT_PARAMETERS_INCORRECT);}
    Print("T016 FAKE EXECUTION ONLY: this EA has no order-sending call, the real transport is not included. Symbol ",_Symbol);
+   string startup_notes="";
+   if(!LC_Startup(g_cfg.exec,GetPointer(g_tr),GetPointer(g_store),InpAcknowledgeLifecycleHalt,g_lc,startup_notes))
+      Print("T019 LIFECYCLE startup: the account is not readable; the layer stays halted.");
+   if(startup_notes!="") Print("T019 LIFECYCLE startup | ",startup_notes);
+   if(g_lc.halted!="") g_orch.halted="LIFECYCLE: "+g_lc.halted;
    if(!EventSetTimer(InpPollSeconds)) return(INIT_FAILED);
    Poll();
    return(INIT_SUCCEEDED);
