@@ -220,12 +220,14 @@ void Evaluate()
       hbalance.day=InpDailySnapshotDay;
       hbalance.amount=InpDailyBalanceStart;
       string hbalance_text="";
+      string hbalance_source="MANUAL";
       if(balance_store)       // READ-ONLY: DBS_Load never writes, locks or creates a file; ALL THREE balance fields are overwritten (no manual value survives, no fallback)
         {
          CDbsRealPort hport(InpDailyEaMagic,(InpDailyServerOffsetSeconds==99999 ? 0 : InpDailyServerOffsetSeconds),InpDailyHistoryComplete,_Symbol);
          SDbsResult hstore;
          DBS_Load(hport,hstore);
          hbalance_text=DBS_ForBridge(hstore,hbalance);
+         hbalance_source="STORE_"+DBS_StatusName(hstore.status)+(hstore.status==DBS_USABLE ? ":"+hstore.source : "");
         }
       SDbPolicy hpolicy;
       hpolicy.result_formula=InpDailyResultFormula;
@@ -252,9 +254,9 @@ void Evaluate()
          daily_text+=" | BALANCE "+hbalance_text;
          PrintFormat("T012 DAILY BALANCE source=STORE (read-only, DBS_Load) known=%d day=%d amount=%.2f | %s | the manual balance inputs are ignored, nothing is written",(int)hbalance.known,hbalance.day,hbalance.amount,hbalance_text);
         }
-      PrintFormat("T012 DAILY source=HISTORY_BRIDGE history_verdict=%s history_reason=%s allowed=%d primary=%s reasons=%s daily_check_called=%d closed_result=%.2f cancel_pending_due=%d daily_limit_reached=%d | formula=%s classification=%s balance_start=%.2f balance_day=%d trades=%I64d wins=%I64d consecutive_losses=%I64d max_trades=%I64d | read-only, nothing cancelled or sent",
+      PrintFormat("T012 DAILY source=HISTORY_BRIDGE history_verdict=%s history_reason=%s allowed=%d primary=%s reasons=%s daily_check_called=%d closed_result=%.2f cancel_pending_due=%d daily_limit_reached=%d | formula=%s classification=%s balance_start=%.2f balance_day=%d balance_known=%d balance_source=%s trades=%I64d wins=%I64d consecutive_losses=%I64d max_trades=%I64d | read-only, nothing cancelled or sent",
                   DH_VerdictName(hverdict),hreason,(int)hbridge.entry_allowed,hbridge.primary,DB_Joined(hbridge),(int)hbridge.dl_called,hbridge.closed_result,
-                  (int)hbridge.cancel_pending_due,(int)hbridge.daily_limit_reached,InpDailyResultFormula,InpDailyClassification,InpDailyBalanceStart,InpDailySnapshotDay,
+                  (int)hbridge.cancel_pending_due,(int)hbridge.daily_limit_reached,InpDailyResultFormula,InpDailyClassification,hbalance.amount,hbalance.day,(int)hbalance.known,hbalance_source,
                   InpTradesToday,InpDailyWins,InpDailyConsecutiveLosses,InpMaxTrades);
      }
    snap.news_state=(InpNewsState==STATE_CLEAR ? TP_NEWS_CLEAR : InpNewsState==STATE_BLOCK ? TP_NEWS_BLOCKED : TP_NEWS_UNKNOWN);

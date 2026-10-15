@@ -136,6 +136,59 @@ class MqlTest(unittest.TestCase):
         self.assertIn('fb.amount=55.0;', src)
 
 
+class MainLog(unittest.TestCase):
+    """the main HISTORY_BRIDGE log line must show what was PASSED to DB_Check (hbalance), never the manual inputs, with the source and the known flag"""
+
+    def render(self, ea_text, manual, store):
+        ea = hw.strip_comments(ea_text)
+        i = ea.index('PrintFormat("T012 DAILY source=HISTORY_BRIDGE')
+        j = ea.index(');', i)
+        call = ea[i + len('PrintFormat('):j]
+        m = re.match(r'"((?:[^"\\]|\\.)*)",(.*)$', call, re.S)
+        fmt, args = m.group(1), [a.strip() for a in m.group(2).split(',')]
+        env = {'InpDailyBalanceStart': manual['amount'], 'InpDailySnapshotDay': manual['day'], 'hbalance.amount': store['amount'], 'hbalance.day': store['day'],
+               '(int)hbalance.known': int(store['known']), 'hbalance_source': store['source']}
+        specs = re.findall(r'%[.\d]*(?:I64)?[a-z]', fmt)
+        self.assertEqual(len(specs), len(args), 'format / argument count')
+        vals = []
+        for a in args:
+            vals.append(env.get(a, 0 if not a.startswith('"') else a))
+        py = re.sub(r'%I64d', '%d', fmt)
+        return py % tuple(vals), args
+
+    def test_the_log_shows_the_store_balance_day_known_and_origin_not_the_manual_inputs(self):
+        manual = {'amount': 111.11, 'day': 20200101}
+        for source, known, amount, day in (('STORE_USABLE:OWNER_ASSERTED', True, 777.0, 20261015), ('STORE_USABLE:WINDOW_EMPTY', True, 999.0, 20261015), ('STORE_NONE', False, 0.0, 0)):
+            line, args = self.render(_read(*EA), manual, {'amount': amount, 'day': day, 'known': known, 'source': source})
+            self.assertIn('balance_start=%.2f ' % amount, line)
+            self.assertIn('balance_day=%d ' % day, line)
+            self.assertIn('balance_known=%d ' % int(known), line)
+            self.assertIn('balance_source=%s ' % source, line)
+            self.assertNotIn('111.11', line)
+            self.assertNotIn('20200101', line)
+            self.assertNotIn('InpDailyBalanceStart', args)
+            self.assertNotIn('InpDailySnapshotDay', args)
+        self.assertNotEqual(manual['amount'], 777.0)
+
+    def test_an_unknown_balance_is_not_shown_as_a_confirmed_zero(self):
+        line, _ = self.render(_read(*EA), {'amount': 5.0, 'day': 1}, {'amount': 0.0, 'day': 0, 'known': False, 'source': 'STORE_NONE'})
+        self.assertIn('balance_known=0 ', line)
+        self.assertIn('balance_source=STORE_NONE ', line)
+
+    def test_the_old_log_form_is_caught(self):
+        old = _read(*EA).replace('hbalance.amount,hbalance.day,(int)hbalance.known,hbalance_source,', 'InpDailyBalanceStart,InpDailySnapshotDay,(int)hbalance.known,hbalance_source,', 1)
+        self.assertNotEqual(old, _read(*EA))
+        with self.assertRaises(AssertionError):
+            line, args = self.render(old, {'amount': 111.11, 'day': 20200101}, {'amount': 777.0, 'day': 20261015, 'known': True, 'source': 'STORE_USABLE:OWNER_ASSERTED'})
+            self.assertIn('balance_start=777.00 ', line)
+            self.assertNotIn('InpDailyBalanceStart', args)
+
+    def test_the_origin_text_keeps_the_two_sources_apart_and_manual_is_named(self):
+        ea = hw.strip_comments(_read(*EA))
+        self.assertIn('string hbalance_source="MANUAL";', ea)
+        self.assertIn('hbalance_source="STORE_"+DBS_StatusName(hstore.status)+(hstore.status==DBS_USABLE ? ":"+hstore.source : "");', ea)
+
+
 class Sources(unittest.TestCase):
     def setUp(self):
         self.ea = hw.strip_comments(_read(*EA))
@@ -186,7 +239,7 @@ class Sources(unittest.TestCase):
         self.assertIn('hbalance.known=(InpDailyBalanceStart>0.0);', self.ea)
         self.assertEqual(self.ea.count('DG_Evaluate('), 1)
         code = re.sub(r'"[^"\n]*"', '""', self.ea)             # string literals are text, not calls
-        self.assertEqual(code.count('DBS_'), code.count('DBS_Load(') + code.count('DBS_ForBridge('))
+        self.assertEqual(code.count('DBS_'), code.count('DBS_Load(') + code.count('DBS_ForBridge(') + code.count('DBS_StatusName(') + code.count('DBS_USABLE'))
 
     def test_the_policies_stay_explicit_inputs(self):
         blk = self.block()
