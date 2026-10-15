@@ -240,6 +240,7 @@ class Registrar:
         self.entry_store, self.exit_tr, self.exit_store, self.locks = entry_store, exit_tr, exit_store, locks
         self.magic, self.phrase, self.rpol, self.provenance = magic, phrase, rpol, provenance
         self.tries = {}
+        self.obs = None                      # optional Observer: PROVEN facts about the owned position (volume, SL, TP, closed)
         self.manager = None                  # optional Manager: after a registration is confirmed the position is handed to the T011 driver
 
     def absent(self, position_id):
@@ -324,12 +325,16 @@ class Registrar:
         pos = self.exit_tr.find_position(ident.position_id)
         if not pos.found or pos.ticket <= 0 or pos.identifier != ident.position_id:
             if self.absent(ident.position_id):
+                if self.obs is not None:
+                    self.obs.on_closed(rec.login, rec.signal_id, ident.position_id)
                 o = self.exit_store.load(name, ident)
                 if o.verdict in (p.USABLE_IDLE, p.USABLE_REQUEST, p.USABLE_BLOCKED) and o.plan_set and o.state.status in (act.IDLE, act.DONE):
                     return SINK_CONFIRMED, 'POSITION_CLOSED: the position is proven absent (stable list); a record that is IDLE or DONE has nothing left to manage; the file is untouched'
             return SINK_PENDING, 'POSITION_NOT_FOUND: the open price of the position cannot be proven, so the stored base cannot be compared'
         if pos.symbol != ident.symbol or pos.magic != self.magic or pos.type != (0 if rec.direction == 1 else 1):
             return SINK_REFUSED, 'OWNERSHIP_NOT_PROVEN: symbol, magic or direction of the live position differ from the record / configuration'
+        if self.obs is not None:
+            self.obs.on_position(rec.login, rec.signal_id, ident.position_id, pos.volume, pos.sl)         # an OWNED position, read once, proven by identifier + magic + symbol + direction
         o = self.exit_store.load(name, ident)
         if o.verdict not in (p.USABLE_IDLE, p.USABLE_REQUEST, p.USABLE_BLOCKED) or not o.plan_set:
             return SINK_REFUSED, 'T011_RECORD_CONFLICT: the existing T011 record is unusable and is never overwritten (%s)' % o.reason
@@ -436,12 +441,111 @@ class Manager:
         return out
 
 
-def _sweep(cfg, tr, store, st, notes, sink=None):
+NT_SENT, NT_RETRY_LATER, NT_FAILED = 'SENT', 'RETRY_LATER', 'FAILED'
+
+
+class Observer:
+    """what the lifecycle / registrar report about PROVEN facts of OWNED objects (nothing here decides, sends or cancels); the default observer does nothing"""
+
+    def on_verdict(self, login, sid, v, res):
+        pass
+
+    def on_position(self, login, sid, position_id, volume, sl):
+        pass
+
+    def on_closed(self, login, sid, position_id):
+        pass
+
+
+class Notifier(Observer):
+    """PUSH notifications for the PROVEN facts only: a pending order seen ACTIVE in the broker facts (not OrderSend=true), a position that exists because a tracked order is FILLED, a partial close (the owned
+    position's volume DECREASED while it is still there), a modification (its SL changed; the exit transport's position read has no TP), a final close (the position list is readable, stable and holds no such position), a pending removed
+    (cancelled / expired). Ownership is the record's magic and symbol: a manual trade never reaches this class. Every event has a key and is sent once (polls and reconciles repeat the same facts);
+    a failed send is retried by the next observation up to MAX_TRIES and then dropped; a failure never changes any decision and never resends an order. While `baseline` is on, the facts are only
+    remembered (a restart never repeats an old event; an event that happened while the robot was down is not announced)."""
+    MAX_TRIES = 3
+
+    def __init__(self, sink, store, magic, symbol, prefix=''):
+        self.sink, self.store, self.magic, self.symbol, self.prefix = sink, store, magic, symbol, prefix
+        self.baseline = False
+        self.done = set()
+        self.tries = {}
+        self.last = {}                       # position id -> (volume, sl) of the last COMPLETED observation
+
+    def _record(self, login, sid):
+        ok, text = self.store.read(en.file_name(login, sid))
+        ok, rec = en.decode(text) if ok else (False, None)
+        if not ok or rec.magic != self.magic or rec.symbol != self.symbol:
+            return None
+        return rec
+
+    def _emit(self, key, text):
+        """True when the event is settled (sent, dropped or remembered in the baseline); False when it must be tried again by the next observation"""
+        if key in self.done:
+            return True
+        if self.baseline:
+            self.done.add(key)
+            return True
+        status = self.sink.send((self.prefix + text)[:250])
+        if status == NT_SENT:
+            self.done.add(key)
+            return True
+        if status == NT_RETRY_LATER:
+            return False
+        n = self.tries.get(key, 0) + 1
+        self.tries[key] = n
+        if n >= self.MAX_TRIES:
+            self.done.add(key)
+            return True
+        return False
+
+    def _side(self, rec):
+        return 'BUY' if rec.direction == 1 else 'SELL'
+
+    def on_verdict(self, login, sid, v, res):
+        if v not in (OPEN, FILLED, CLOSED):
+            return
+        rec = self._record(login, sid)
+        if rec is None:
+            return
+        if v == OPEN:
+            self._emit(('placed', sid), 'PENDING PLACED %s %s %.2f SL %.2f TP %.2f vol %.2f (%s)' % (rec.symbol, self._side(rec), rec.e, rec.s, rec.tp, rec.volume, sid))
+        elif v == FILLED:
+            self._emit(('filled', sid), 'POSITION OPENED %s %s vol %.2f SL %.2f TP %.2f pos %d (%s)' % (rec.symbol, self._side(rec), rec.volume, rec.s, rec.tp, rec.position_id, sid))
+        elif res.final in (en.R_CANCELLED, en.R_EXPIRED) or res.state in (en.ST_CANCELLED, en.ST_EXPIRED):
+            self._emit(('removed', sid), 'PENDING %s %s %s (%s)' % ('EXPIRED' if res.state == en.ST_EXPIRED or res.final == en.R_EXPIRED else 'CANCELLED', rec.symbol, self._side(rec), sid))
+
+    def on_position(self, login, sid, position_id, volume, sl):
+        rec = self._record(login, sid)
+        if rec is None:
+            return
+        prev = self.last.get(position_id)
+        if prev is None:
+            self.last[position_id] = (volume, sl)             # the first observation is the opening (announced by the FILLED verdict)
+            return
+        ok = True
+        if volume < prev[0] - 1e-9:
+            ok = self._emit(('partial', position_id, round(volume, 8)), 'POSITION PARTIAL CLOSE %s %s vol %.2f -> %.2f (%s)' % (rec.symbol, self._side(rec), prev[0], volume, sid)) and ok
+        if abs(sl - prev[1]) > 1e-9:
+            ok = self._emit(('modified', position_id, round(sl, 8)), 'POSITION MODIFIED %s %s SL %.2f -> %.2f (%s)' % (rec.symbol, self._side(rec), prev[1], sl, sid)) and ok
+        if ok:
+            self.last[position_id] = (volume, sl)
+
+    def on_closed(self, login, sid, position_id):
+        rec = self._record(login, sid)
+        if rec is None:
+            return
+        self._emit(('closed', position_id), 'POSITION CLOSED %s %s (%s)' % (rec.symbol, self._side(rec), sid))
+
+
+def _sweep(cfg, tr, store, st, notes, sink=None, obs=None):
     """reconcile every indexed id (never a send); returns the ids that are open pending orders"""
     open_ids = []
     for sid in list(st.ids):
         res = en.reconcile(cfg, tr, store, sid)
         v = verdict(res)
+        if obs is not None:
+            obs.on_verdict(st.login, sid, v, res)
         if v == OPEN:
             open_ids.append(sid)
         elif v == HALT:
@@ -475,7 +579,7 @@ def _sweep(cfg, tr, store, st, notes, sink=None):
     return open_ids
 
 
-def startup(cfg, tr, store, lockstore, acknowledge=False, sink=None):
+def startup(cfg, tr, store, lockstore, acknowledge=False, sink=None, obs=None):
     """-> (State, notes). The instance lock comes first: without it the index is neither read nor written and nothing is sent or cancelled.
     A damaged state file is never overwritten: it halts until the owner removes it. The lock is kept for every run that continues (halted or not) and released by release()."""
     notes = []
@@ -493,7 +597,7 @@ def startup(cfg, tr, store, lockstore, acknowledge=False, sink=None):
         notes.append(st.halted)
         return st, notes
     was_halted = st.halted
-    _sweep(cfg, tr, store, st, notes, sink)
+    _sweep(cfg, tr, store, st, notes, sink, obs)
     if acknowledge and st.halted:
         notes.append('HALT_ACKNOWLEDGED by the owner: %s' % (was_halted or st.halted))
         # only the ids that are still unresolved are dropped from the index; their records stay on disk (the signals stay consumed)
@@ -519,8 +623,38 @@ def due_events(session, news, daily_present, daily_cancel_due):
     return ev
 
 
-def tick(cfg, tr, store, st, due, enabled, sink=None):
-    """-> notes. Reconcile, then cancel the open pending orders for the events that are due AND enabled."""
+@dataclass
+class Facts:
+    """what the orchestrator knows NOW about the direction (one set per step, copied from the closed-bar feed): unknown or incomplete data never proves a change"""
+    valid: bool = False
+    ctx_direction: int = 0            # +1 / -1 only when the H4 context is ready, reliable and selected; else 0
+    signal_direction: int = 0         # +1 / -1 only when a live signal exists in this step; else 0
+    signal_id: str = ''
+    time: int = 0
+
+
+def record_events(cfg, tr, store, login, sid, facts, dir_enabled):
+    """the cancel events of ONE record, evaluated against ITS direction: DIRECTION_CHANGE when the known context is opposite, OPPOSITE_SIGNAL when a live signal of the opposite direction exists.
+    Unreadable record, other magic, no / stale / incomplete facts -> 0 (nothing is proven)."""
+    if not dir_enabled or facts is None or not facts.valid:
+        return 0
+    age = tr.server_time() - facts.time
+    if age < 0 or age > cfg.quote_max_age:
+        return 0
+    ok, text = store.read(en.file_name(login, sid))
+    ok, rec = en.decode(text) if ok else (False, None)
+    if not ok or rec.direction not in (1, -1) or rec.magic != cfg.ea_magic or cfg.ea_magic <= 0:
+        return 0
+    ev = 0
+    if dir_enabled & tp.EV_DIRECTION_CHANGE and facts.ctx_direction in (1, -1) and facts.ctx_direction == -rec.direction:
+        ev |= tp.EV_DIRECTION_CHANGE
+    if dir_enabled & tp.EV_OPPOSITE_SIGNAL and facts.signal_direction in (1, -1) and facts.signal_direction == -rec.direction and facts.signal_id != sid:
+        ev |= tp.EV_OPPOSITE_SIGNAL
+    return ev
+
+
+def tick(cfg, tr, store, st, due, enabled, sink=None, facts=None, dir_enabled=0, obs=None):
+    """-> notes. Reconcile, then cancel the open pending orders for the events that are due AND enabled (global events) or that THIS record's direction proves (per-record events)."""
     notes = []
     if not st.login:
         return notes
@@ -532,18 +666,20 @@ def tick(cfg, tr, store, st, due, enabled, sink=None):
         notes.append(why)
         return notes
     before = (list(st.ids), st.halted)
-    open_ids = _sweep(cfg, tr, store, st, notes, sink)
+    open_ids = _sweep(cfg, tr, store, st, notes, sink, obs)
     events = due & enabled
     if due and not events:
         notes.append('CANCEL_DUE_NOT_ENABLED events=%d' % due)
-    if events:
+    if events or (dir_enabled and facts is not None):
         for sid in open_ids:
-            dec = tp.cancel_decision(True, sid, False, events)
+            dec = tp.cancel_decision(True, sid, False, events | record_events(cfg, tr, store, st.login, sid, facts, dir_enabled))
             if dec.status != tp.CANCEL_REQUEST:
                 continue
             res = en.cancel(cfg, tr, store, en.Runtime(), sid, dec)
             if res.final == en.R_CANCELLED:
                 st.ids.remove(sid)
+                if obs is not None:
+                    obs.on_verdict(st.login, sid, CLOSED, res)       # the cancel is confirmed by the broker facts (EN_Cancel): the pending is gone
                 notes.append('CANCELLED %s: %s' % (sid, dec.reason))
             else:
                 notes.append('CANCEL_NOT_CONFIRMED %s: %s %s' % (sid, res.final, res.reason))

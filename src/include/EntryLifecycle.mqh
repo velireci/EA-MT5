@@ -23,6 +23,15 @@
 
 // the fill sink (implemented by the T011 registrar): CONFIRMED = the fill is registered / already registered with a matching record (the index entry is forgotten), PENDING = try again on the next
 // sweep (bounded by the sink), REFUSED = the position stays unmanaged (the layer halts until the owner acknowledges). Never called without the index lock.
+// what the lifecycle / registrar report about PROVEN facts of OWNED objects (they decide, send and cancel nothing); the default observer does nothing. removed_kind: 0 none, 1 cancelled, 2 expired.
+class CLcObserver
+  {
+public:
+   virtual void OnVerdict(const long login,const string sid,const int verdict,const int removed_kind) {}
+   virtual void OnPosition(const long login,const string sid,const ulong position_id,const double volume,const double sl) {}
+   virtual void OnClosed(const long login,const string sid,const ulong position_id) {}
+  };
+
 class CLcFillSink
   {
 public:
@@ -288,7 +297,7 @@ string LC_Proposal(CEnTransport *tr,CEnStore *store,const long login,const strin
   }
 
 // reconcile every indexed id (never a send); the open pending orders are returned
-void LC_Sweep(const SEnConfig &cfg,CEnTransport *tr,CEnStore *store,SLcState &s,string &open_ids[],int &n_open,string &notes,CLcFillSink *sink=NULL)
+void LC_Sweep(const SEnConfig &cfg,CEnTransport *tr,CEnStore *store,SLcState &s,string &open_ids[],int &n_open,string &notes,CLcFillSink *sink=NULL,CLcObserver *obs=NULL)
   {
    n_open=0;
    ArrayResize(open_ids,LC_MAX);
@@ -298,6 +307,16 @@ void LC_Sweep(const SEnConfig &cfg,CEnTransport *tr,CEnStore *store,SLcState &s,
       SEnResult r;
       EN_Reconcile(cfg,tr,store,id,r);
       int v=LC_Verdict(r);
+      if(obs!=NULL)
+        {
+         int rk=0;
+         if(v==LC_V_CLOSED)
+           {
+            if(r.outcome==EN_R_CANCELLED || r.state==EN_ST_CANCELLED) rk=1;
+            if(r.outcome==EN_R_EXPIRED || r.state==EN_ST_EXPIRED) rk=2;
+           }
+         obs.OnVerdict(s.login,id,v,rk);
+        }
       if(v==LC_V_OPEN) {open_ids[n_open]=id; n_open++;}
       else if(v==LC_V_HALT)
         {
@@ -344,7 +363,7 @@ void LC_Sweep(const SEnConfig &cfg,CEnTransport *tr,CEnStore *store,SLcState &s,
 
 // The instance lock comes first: without it the index is neither read nor written and nothing is sent or cancelled. Returns false when the account is unreadable (nothing acquired).
 // A damaged state file is never overwritten. The lock is kept for every run that continues (halted or not) and released by LC_Release.
-bool LC_Startup(const SEnConfig &cfg,CEnTransport *tr,CEnStore *store,CEnStore *lockstore,const bool acknowledge,SLcState &s,string &notes,CLcFillSink *sink=NULL)
+bool LC_Startup(const SEnConfig &cfg,CEnTransport *tr,CEnStore *store,CEnStore *lockstore,const bool acknowledge,SLcState &s,string &notes,CLcFillSink *sink=NULL,CLcObserver *obs=NULL)
   {
    notes="";
    SEnAccount acct;
@@ -367,7 +386,7 @@ bool LC_Startup(const SEnConfig &cfg,CEnTransport *tr,CEnStore *store,CEnStore *
    string was=s.halted;
    string open_ids[];
    int n_open=0;
-   LC_Sweep(cfg,tr,store,s,open_ids,n_open,notes,sink);
+   LC_Sweep(cfg,tr,store,s,open_ids,n_open,notes,sink,obs);
    if(acknowledge && s.halted!="")
      {
       LC_Note(notes,"HALT_ACKNOWLEDGED by the owner: "+(was!="" ? was : s.halted));
@@ -394,7 +413,43 @@ int LC_DueEvents(const int session,const int news,const bool daily_present,const
    return(ev);
   }
 
-void LC_Tick(const SEnConfig &cfg,CEnTransport *tr,CEnStore *store,SLcState &s,const int due,const int enabled,string &notes,CLcFillSink *sink=NULL)
+// what the orchestrator knows NOW about the direction (one set per step): unknown or incomplete data never proves a change
+struct SLcFacts
+  {
+   bool valid;
+   int ctx_direction;
+   int signal_direction;
+   string signal_id;
+   long time;
+  };
+
+void LC_FactsInit(SLcFacts &f)
+  {
+   f.valid=false;
+   f.ctx_direction=0;
+   f.signal_direction=0;
+   f.signal_id="";
+   f.time=0;
+  }
+
+// the cancel events of ONE record, judged against ITS direction: DIRECTION_CHANGE when the known context is opposite, OPPOSITE_SIGNAL when a live signal of the opposite direction exists.
+// An unreadable record, another magic, no / stale / incomplete facts -> 0 (nothing is proven). Mirrors record_events in tests/lifecycle_reference.py.
+int LC_RecordEvents(const SEnConfig &cfg,CEnTransport *tr,CEnStore *store,const long login,const string sid,const SLcFacts &facts,const int dir_enabled)
+  {
+   if(dir_enabled==0 || !facts.valid) return(0);
+   long age=tr.ServerTime()-facts.time;
+   if(age<0 || age>cfg.quote_max_age) return(0);
+   SEnRecord rec;
+   string why;
+   if(EN_Load(store,EN_FileName(login,sid),rec,why)!=1) return(0);
+   if(!(rec.direction==1 || rec.direction==-1) || rec.magic!=cfg.ea_magic || cfg.ea_magic<=0) return(0);
+   int ev=0;
+   if((dir_enabled & TP_EV_DIRECTION_CHANGE)!=0 && (facts.ctx_direction==1 || facts.ctx_direction==-1) && facts.ctx_direction==-rec.direction) ev|=TP_EV_DIRECTION_CHANGE;
+   if((dir_enabled & TP_EV_OPPOSITE_SIGNAL)!=0 && (facts.signal_direction==1 || facts.signal_direction==-1) && facts.signal_direction==-rec.direction && facts.signal_id!=sid) ev|=TP_EV_OPPOSITE_SIGNAL;
+   return(ev);
+  }
+
+void LC_TickEx(const SEnConfig &cfg,CEnTransport *tr,CEnStore *store,SLcState &s,const int due,const int enabled,const SLcFacts &facts,const int dir_enabled,string &notes,CLcFillSink *sink=NULL,CLcObserver *obs=NULL)
   {
    notes="";
    if(s.login<=0) return;
@@ -410,16 +465,16 @@ void LC_Tick(const SEnConfig &cfg,CEnTransport *tr,CEnStore *store,SLcState &s,c
    int before_n=s.n;
    string open_ids[];
    int n_open=0;
-   LC_Sweep(cfg,tr,store,s,open_ids,n_open,notes,sink);
+   LC_Sweep(cfg,tr,store,s,open_ids,n_open,notes,sink,obs);
    int events=(due & enabled);
    bool changed=(s.n!=before_n || s.halted!=before_halt);
    if(due!=0 && events==0) LC_Note(notes,"CANCEL_DUE_NOT_ENABLED events="+IntegerToString(due));
-   if(events!=0)
+   if(events!=0 || (dir_enabled!=0 && facts.valid))
      {
       for(int i=0;i<n_open;i++)
         {
          STpCancel dec;
-         TP_CancelDecision(true,open_ids[i],false,events,dec);
+         TP_CancelDecision(true,open_ids[i],false,events|LC_RecordEvents(cfg,tr,store,s.login,open_ids[i],facts,dir_enabled),dec);
          if(dec.status!=TP_CANCEL_REQUEST) continue;
          SEnRuntime rt;
          EN_RuntimeInit(rt);
@@ -429,6 +484,7 @@ void LC_Tick(const SEnConfig &cfg,CEnTransport *tr,CEnStore *store,SLcState &s,c
            {
             int k=LC_IndexOf(s,open_ids[i]);
             if(k>=0) LC_Remove(s,k);
+            if(obs!=NULL) obs.OnVerdict(s.login,open_ids[i],LC_V_CLOSED,1);      // the cancel is confirmed by the broker facts (EN_Cancel): the pending is gone
             LC_Note(notes,"CANCELLED "+open_ids[i]+": "+dec.reason);
             changed=true;
            }
@@ -441,6 +497,13 @@ void LC_Tick(const SEnConfig &cfg,CEnTransport *tr,CEnStore *store,SLcState &s,c
         }
      }
    if(changed) LC_Persist(store,s,notes);
+  }
+
+void LC_Tick(const SEnConfig &cfg,CEnTransport *tr,CEnStore *store,SLcState &s,const int due,const int enabled,string &notes,CLcFillSink *sink=NULL,CLcObserver *obs=NULL)
+  {
+   SLcFacts none;
+   LC_FactsInit(none);
+   LC_TickEx(cfg,tr,store,s,due,enabled,none,0,notes,sink,obs);
   }
 
 // the gate's pre-send hook: the index entry is saved and read back BEFORE the executor can create an intent or send

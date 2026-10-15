@@ -76,6 +76,11 @@ Limits: the entry transport stays FAKE, so no real position exists to register; 
 - `src/presets/XauUsdEntryOrchestrator_demo_fake.set`: complete, labelled, FAKE / READ_ONLY. `python3 tests/preset_check.py` lists what would still block, offline.
 
 
+
+### Direction cancel and push notifications (EA v1.11; compile and MT5 UNVERIFIED)
+- **Cancel (S:29-30).** `InpCancelOnDirectionChange` / `InpCancelOnOppositeSignal` (default false; the demo preset turns both on). The facts come from the step (context direction only when ready + reliable + selected; the signal only when the geometry produced one) and are judged PER RECORD by `LC_RecordEvents`: a pending order is cancelled only when ITS direction is opposite to the known context / to a live signal. Unknown, stale or incomplete data cancels nothing. The decision is `TP_CancelDecision`, the cancel `EN_Cancel`; an uncertain cancel halts and is never retried, also not after a restart. Open positions, manual orders and other magics are not part of the index and are never touched.
+- **Push (S:100, S:173).** `InpPushNotifications` (default false). Proven facts only (see docs/STATE.md); once per key; the startup sweep only remembers; a failure changes nothing. `SendNotification` is called only by `CNtPushSink`; the tests use a FAKE receiver and nothing was pushed.
+
 ## Timer market re-evaluation (Codex correction on e4cde2e)
 
 The closed H4/M15 feed still rebuilds only when its existing timeline policy requires it. The EA timer now evaluates the orchestrator on every Poll, even when the feed reused its cached state. A feed failure still passes feed_ok=false and blocks; quote recovery still resets the baseline and cannot revive an old candidate. Gate recovery may reconsider an unconsumed eligible signal; executor records continue to prevent duplicate requests. Unchanged exposure messages are logged only once per change.

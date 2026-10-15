@@ -147,9 +147,29 @@ string EO_UnsetConfig(const SEoConfig &c)
    return(bad);
   }
 
+// what the step knows about the direction (the lifecycle judges it per record): unknown or incomplete data is valid=false / direction 0 and proves nothing
+struct SEoFacts
+  {
+   bool valid;
+   int ctx_direction;           // +1 / -1 only when the H4 context is ready, reliable and selected
+   int signal_direction;        // +1 / -1 only when a live signal exists in this step
+   string signal_id;
+   long time;
+  };
+
+void EO_FactsInit(SEoFacts &f)
+  {
+   f.valid=false;
+   f.ctx_direction=0;
+   f.signal_direction=0;
+   f.signal_id="";
+   f.time=0;
+  }
+
 class COrchestrator
   {
 public:
+   SEoFacts facts;              // refreshed by every step
    long baseline;
    bool rebase;
    string key;
@@ -169,6 +189,7 @@ public:
       n_handled=0;
       halted="";
       signals=0;
+      EO_FactsInit(facts);
      }
    // a data defect or a recovery: the next successful build starts a new baseline (an old signal is never revived)
    void Defect(void) {rebase=true;}
@@ -186,6 +207,7 @@ public:
    void Step(const SEoConfig &c,CEoMarket *mk,const bool feed_ok,const SM4State &st,const SM4Candidate &f[],const SM4Level &broken,const datetime cut,CEnTransport *tr,CEnStore *store,SEoOutcome &out,CEgPreSend *pre_send=NULL)
      {
       EO_OutcomeInit(out);
+      EO_FactsInit(facts);
       if(!feed_ok)
         {
          Defect();
@@ -201,6 +223,12 @@ public:
         {
          baseline=MathMax(baseline,(long)cut);
          rebase=false;
+        }
+      if(st.has_context && st.context.ready && st.context.reliable && st.context.selected && (st.context.direction==1 || st.context.direction==-1))
+        {
+         facts.valid=true;                                   // the context is KNOWN: only then does a direction prove a change
+         facts.ctx_direction=st.context.direction;
+         facts.time=mk.Now();
         }
       if(halted!="") {EO_Set(out,"HALTED",halted); return;}
       string bad=EO_UnsetConfig(c);
@@ -248,6 +276,7 @@ public:
       bool geometry_ok=SPB_Geometry(sel,m,st,f,broken,cut,r1,geo);
       out.spb=r1;
       if(!geometry_ok) {EO_Set(out,"NO_PLAN",r1.reason); return;}
+      if(facts.valid) {facts.signal_direction=st.context.direction; facts.signal_id=r1.signal_id;}      // a live signal exists in this step
       if(Handled(r1.signal_id)) {EO_Set(out,"ALREADY_HANDLED",r1.signal_id); return;}
       bool buy=(st.context.direction==1);
       long stop_ticks=(long)MathRound(geo.r_geom/sym.tick_size);

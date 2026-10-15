@@ -47,6 +47,10 @@ assert 'RESERVATION_FAILED' in step and step.index('GATE_BLOCKED') < step.index(
 assert 'EN_R_CANCEL_UNCERTAIN' in step and 'EN_R_RECOVERY' in step and 'EN_R_BLOCKED' in step, 'halt results'
 assert 'EO_FAKE_LABEL' in step and 'out.request=true' in step, 'label'
 assert re.search(r'out\.request=true;\s*out\.label=EO_FAKE_LABEL', step), 'request without label'
+assert 'EO_FactsInit(facts);' in step and step.index('EO_FactsInit(facts);') < step.index('if(!feed_ok)'), 'the facts are cleared at every step'
+assert 'st.context.ready && st.context.reliable && st.context.selected && (st.context.direction==1 || st.context.direction==-1)' in step, 'the context direction is a fact only when the context is known'
+assert 'if(facts.valid) {facts.signal_direction=st.context.direction; facts.signal_id=r1.signal_id;}' in step, 'a signal fact exists only when the geometry produced a live signal'
+assert step.index('facts.valid=true;') < step.index('if(halted!="")') and step.index('facts.signal_id=r1.signal_id;') < step.index('Handled(r1.signal_id)'), 'order of the facts'
 assert 'EO_RISK_PCT_DEMO 1.0' in t, 'the demo policy is exactly 1%'
 assert 'if(c.risk_source==EO_RISK_SOURCE_DEMO_BALANCE_PCT)' in step and 'mk.Balance(bal);' in step, 'the balance is read at every step, inside the policy branch only'
 assert 'bal.read_ok && bal.demo && TG_Finite(bal.amount) && bal.amount>0.0 && now-bal.time>=0 && now-bal.time<=c.max_quote_age' in step, 'read ok, demo, finite, positive and fresh'
@@ -107,7 +111,7 @@ for n in ('InpContextSource=EOI_SRC_UNSELECTED', 'InpM15Level=EOI_SWING_UNSELECT
           'InpPermitMaxAgeSeconds=-1', 'InpOpenPositions=-1', 'InpTradesToday=-1', 'InpExistingRisk=-1', 'InpMaxPositions=-1', 'InpMaxTrades=-1', 'InpCombinedRiskCap=-1', 'InpSessionClock=false',
           'InpNewsCalendar=false', 'InpMaxSpreadPoints=-1', 'InpDailyHistoryBridge=false', 'InpDailyServerOffsetSeconds=99999', 'InpDailyHistoryComplete=false', 'InpFilling=EOI_FILL_UNSET', 'InpExpiryMode=EOI_EXP_UNSET'):
     assert n in ea, 'default not UNSET: ' + n
-assert sorted(re.findall(r'#include "([^"]+)"', ea)) == sorted(['include/EntryOrchestratorFeed.mqh', 'include/EntryStateFile.mqh', 'include/EntryTransportFake.mqh', 'include/EntryLifecycle.mqh', 'include/EntryManagementHandoff.mqh', 'include/EntryTransportReal.mqh', 'include/ExitTransportReal.mqh', 'include/ExposureReaderReal.mqh']), 'EA includes'
+assert sorted(re.findall(r'#include "([^"]+)"', ea)) == sorted(['include/EntryOrchestratorFeed.mqh', 'include/EntryStateFile.mqh', 'include/EntryTransportFake.mqh', 'include/EntryLifecycle.mqh', 'include/EntryManagementHandoff.mqh', 'include/EntryNotify.mqh', 'include/EntryTransportReal.mqh', 'include/ExitTransportReal.mqh', 'include/ExposureReaderReal.mqh']), 'EA includes'
 assert 'daily_on=InpDailyHistoryBridge' in ea
 daily = fd[fd.index('virtual bool Daily('):]
 assert 'EO_OffsetSeconds(mc.daily_offset_seconds,daily_offset)' in daily, 'offset validation'
@@ -198,6 +202,11 @@ expect_assert "$NEG/o3.py" "$NEG/S5.mqh $FEED" "the demo balance policy on by de
 
 mut S6.mqh $EA 's/   g_feed.Poll(feed_ok);/   if(!g_feed.Poll(feed_ok)) return;/'
 expect_assert "$NEG/o3.py" "$NEG/S6.mqh $FEED" "a stale quote waiting for the next closed bar" "timer must recheck"
+
+mut F1.mqh $CORE 's/st.context.ready \&\& st.context.reliable \&\& st.context.selected \&\& (st.context.direction==1/st.context.reliable \&\& (st.context.direction==1/'
+expect_assert "$NEG/o2.py" "$NEG/F1.mqh" "a direction taken from an unready context" "known"
+mut F2.mqh $CORE 's/      EO_FactsInit(facts);\n      if(!feed_ok)/      if(!feed_ok)/;s/^      EO_FactsInit(facts);$/      \/\/ none/'
+expect_assert "$NEG/o2.py" "$NEG/F2.mqh" "facts that survive a defect" "cleared at every step"
 
 [ $FAIL -eq 0 ] && echo "ENTRY ORCHESTRATOR STATIC CHECKS: ALL PASS (static only; MetaEditor compile and MT5 run UNVERIFIED)" || echo "ENTRY ORCHESTRATOR STATIC CHECKS: FAILURES"
 exit $FAIL

@@ -24,7 +24,10 @@ SCENARIOS = ['index_codec_and_damage', 'register_and_save_failure', 'startup_cle
              'auto_registration_confirms_once', 'auto_registration_idempotent_after_crash', 'auto_registration_refusals_keep_the_t011_contracts', 'auto_registration_transient_and_locks',
              'auto_registration_acknowledge_and_instances', 'auto_registration_existing_record_needs_the_full_base', 'auto_registration_idempotent_after_management_started',
         'auto_registration_synthetic_fill_is_rejected', 'managed_fill_registration_management_to_done', 'managed_restart_in_every_critical_window',
-        'managed_closed_position_released_without_management', 'managed_manual_foreign_and_synthetic_untouched', 'managed_failures_block_and_lock_at_the_level', 'managed_slots_released_and_capacity']
+        'managed_closed_position_released_without_management', 'managed_manual_foreign_and_synthetic_untouched', 'managed_failures_block_and_lock_at_the_level', 'managed_slots_released_and_capacity',
+             'direction_cancel_only_opposite_records', 'opposite_signal_cancel_per_record', 'direction_unknown_data_proves_nothing', 'direction_cancel_leaves_positions_and_foreign',
+             'direction_cancel_uncertain_halts_no_retry', 'notify_pending_placed_then_filled_once', 'notify_unproven_order_send_is_silent', 'notify_removed_pending_once',
+             'notify_partial_modified_closed_are_distinct', 'notify_failure_changes_no_decision', 'notify_manual_foreign_unreadable_silent', 'notify_restart_repeats_nothing']
 EV_ALL_ENABLED = tp.EV_SESSION_END | tp.EV_NEWS_BLOCK | tp.EV_DAILY_LIMIT
 
 
@@ -743,7 +746,7 @@ class RegWorld:
         return CountingRegistrar(self.w.store, self.xtr, self.xstore, self.locks, magic=777, phrase=self.phrase, rpol=ex.RPOL_R_GEOM, **kw)
 
     def tick(self, st=None, reg=None):
-        return lc.tick(self.w.cfg, self.w.tr, self.w.store, st or self.st, 0, 0, sink=reg or self.reg)
+        return lc.tick(self.w.cfg, self.w.tr, self.w.store, st or self.st, 0, 0, sink=reg or self.reg, obs=getattr(self, 'obs', None))
 
     def stored(self):
         return self.xstore.load(self.name, EXIT_IDENT)
@@ -1180,6 +1183,373 @@ class ManagedFlow(unittest.TestCase):
             self.assertEqual(len(rw.xtr.sends), 1)
 
 
+def multi(specs):
+    """several PENDING orders of one robot in one store: specs = [(signal_id, direction), ...]; returns (world, state)"""
+    w = te.World(1)
+    st = owner(w.store, w.tr.account.login)
+    guard = lc.Guard(w.store, st)
+    for k, (sid, d) in enumerate(specs):
+        ok, why = guard.reserve(sid)
+        assert ok, why
+        base = te.plan(d, signal=sid)
+        shift = -0.5 * k * d                                          # distinct prices: the executor refuses an identical pending order
+        pl = te.plan(d, signal=sid, e_out=base.e_out + shift, s_out=base.s_out + shift)
+        res = w.place(pl=pl, permit=te.permit_for(pl, w.tr), rt=en.Runtime())
+        assert res.final == en.R_PLACED, res
+        guard.settled(sid, res)
+    return w, st
+
+
+def facts_for(w, ctx=0, sig=0, sid='', valid=True, age=0):
+    return lc.Facts(valid, ctx, sig, sid, w.tr.now - age)
+
+
+def state_of(w, sid):
+    ok, rec = en.decode(w.store.read(en.file_name(w.tr.account.login, sid))[1])
+    return rec.state
+
+
+DIR_BOTH = tp.EV_DIRECTION_CHANGE | tp.EV_OPPOSITE_SIGNAL
+
+
+class DirectionCancel(unittest.TestCase):
+    """client S:29-30: a pending order is cancelled when the direction changes or an opposite signal appears. The event is judged PER RECORD against ITS direction (never one global flag), through the
+    existing TP_CancelDecision + EN_Cancel; unknown or incomplete data proves nothing; positions, manual orders and other magics are never touched; an uncertain cancel halts and is never retried."""
+
+    SPECS = [('SIG-A', 1), ('SIG-B', -1), ('SIG-C', 1)]
+
+    def test_a_direction_change_cancels_only_the_records_of_the_other_direction(self):
+        for ctx in (-1, 1):
+            w, st = multi(self.SPECS)
+            notes = lc.tick(w.cfg, w.tr, w.store, st, 0, 0, facts=facts_for(w, ctx=ctx), dir_enabled=tp.EV_DIRECTION_CHANGE)
+            opposite = [sid for sid, d in self.SPECS if d == -ctx]
+            kept = [sid for sid, d in self.SPECS if d == ctx]
+            self.assertEqual((w.tr.cancels, sorted(st.ids), st.halted), (len(opposite), sorted(kept), ''), 'ctx %d' % ctx)
+            for sid in opposite:
+                self.assertEqual(state_of(w, sid), en.ST_CANCELLED)
+                self.assertTrue(any(n.startswith('CANCELLED %s: CANCEL_REQUEST: DIRECTION_CHANGE' % sid) for n in notes), notes)
+            for sid in kept:
+                self.assertEqual(state_of(w, sid), en.ST_PLACED)
+            self.assertEqual(w.tr.sends, 3)
+
+    def test_an_opposite_signal_cancels_only_the_other_direction_and_never_the_signal_itself(self):
+        for sd in (-1, 1):
+            w, st = multi(self.SPECS)
+            lc.tick(w.cfg, w.tr, w.store, st, 0, 0, facts=facts_for(w, sig=sd, sid='SIG-NEW'), dir_enabled=tp.EV_OPPOSITE_SIGNAL)
+            expected = sorted(sid for sid, d in self.SPECS if d == sd)
+            self.assertEqual(sorted(st.ids), expected, 'signal %d' % sd)
+            w2, st2 = multi(self.SPECS)                                    # the signal of an existing record is that record, not a reason to cancel it
+            lc.tick(w2.cfg, w2.tr, w2.store, st2, 0, 0, facts=facts_for(w2, sig=-1, sid='SIG-B'), dir_enabled=tp.EV_OPPOSITE_SIGNAL)
+            self.assertEqual(sorted(st2.ids), ['SIG-B'], 'SIG-B is its own signal; the BUY records are opposite to it')
+            w3, st3 = multi([('SIG-A', 1)])                                   # inconsistent data (the signal id of the record with the other direction) proves nothing
+            lc.tick(w3.cfg, w3.tr, w3.store, st3, 0, 0, facts=facts_for(w3, sig=-1, sid='SIG-A'), dir_enabled=tp.EV_OPPOSITE_SIGNAL)
+            self.assertEqual((w3.tr.cancels, st3.ids), (0, ['SIG-A']))
+
+    def test_unknown_or_incomplete_data_proves_no_change(self):
+        cases = [('no facts', None), ('invalid', facts_for(None or te.World(1), valid=False, ctx=-1)), ('unknown context', None), ('stale', 'stale'), ('future', 'future')]
+        for label, f in cases:
+            w, st = multi(self.SPECS)
+            if label == 'no facts' or label == 'unknown context':
+                f = None if label == 'no facts' else facts_for(w, ctx=0, sig=0)
+            elif label == 'invalid':
+                f = facts_for(w, ctx=-1, valid=False)
+            elif label == 'stale':
+                f = facts_for(w, ctx=-1, age=w.cfg.quote_max_age + 1)
+            elif label == 'future':
+                f = facts_for(w, ctx=-1, age=-5)
+            lc.tick(w.cfg, w.tr, w.store, st, 0, 0, facts=f, dir_enabled=DIR_BOTH)
+            self.assertEqual((w.tr.cancels, sorted(st.ids)), (0, ['SIG-A', 'SIG-B', 'SIG-C']), label)
+        w, st = multi(self.SPECS)
+        lc.tick(w.cfg, w.tr, w.store, st, 0, 0, facts=facts_for(w, ctx=-1), dir_enabled=0)
+        self.assertEqual(w.tr.cancels, 0, 'the direction events are enabled by the owner; off = never')
+        w, st = multi(self.SPECS)
+        lc.tick(w.cfg, w.tr, w.store, st, 0, 0, facts=facts_for(w, ctx=-1), dir_enabled=tp.EV_OPPOSITE_SIGNAL)
+        self.assertEqual(w.tr.cancels, 0, 'a context fact is not an opposite SIGNAL')
+        w, st = multi(self.SPECS)
+        lc.tick(w.cfg, w.tr, w.store, st, 0, 0, facts=facts_for(w, sig=-1, sid='SIG-NEW'), dir_enabled=tp.EV_DIRECTION_CHANGE)
+        self.assertEqual(w.tr.cancels, 0, 'a signal fact is not a context change')
+
+    def test_an_unreadable_record_or_another_magic_is_not_judged(self):
+        w, st = multi(self.SPECS)
+        w.cfg.ea_magic = 778                                              # the records were written with 777
+        lc.tick(w.cfg, w.tr, w.store, st, 0, 0, facts=facts_for(w, ctx=-1), dir_enabled=DIR_BOTH)
+        self.assertEqual(w.tr.cancels, 0)
+        w, st = multi(self.SPECS)
+        name = en.file_name(w.tr.account.login, 'SIG-A')
+        w.store.files[name] = 'garbage'
+        lc.tick(w.cfg, w.tr, w.store, st, 0, 0, facts=facts_for(w, ctx=-1), dir_enabled=DIR_BOTH)
+        self.assertEqual((w.tr.cancels, sorted(st.ids)), (1, ['SIG-A', 'SIG-B']), 'only the readable BUY record SIG-C is judged and cancelled; the unreadable SIG-A is left alone')
+        self.assertIn('UNRESOLVED', ' '.join(lc.tick(w.cfg, w.tr, w.store, st, 0, 0)), 'the unreadable record halts through the sweep, it is not cancelled')
+
+    def test_open_positions_manual_orders_and_other_magics_are_never_touched(self):
+        for ctx in (-1, 1):
+            w, st = multi([('SIG-A', 1), ('SIG-B', -1)])
+            filled = [o for o in w.tr.orders if o.ticket][0]
+            w.tr.orders[0].state = en.OS_FILLED                              # SIG-A became a position
+            w.tr.orders[0].position_id = 4242
+            manual = en.Order(found=True, ticket=9001, symbol='XAUUSD', type=en.TYPE_SELL_LIMIT, state=en.OS_ACTIVE, price=2100.0, sl=2105.0, tp=2090.0, volume=0.1, magic=0, comment='manual')
+            other = en.Order(found=True, ticket=9002, symbol='XAUUSD', type=en.TYPE_BUY_LIMIT, state=en.OS_ACTIVE, price=1900.0, sl=1895.0, tp=1910.0, volume=0.1, magic=999, comment='other EA')
+            w.tr.orders += [manual, other]
+            lc.tick(w.cfg, w.tr, w.store, st, 0, 0, facts=facts_for(w, ctx=ctx), dir_enabled=DIR_BOTH)
+            lc.tick(w.cfg, w.tr, w.store, st, 0, 0, facts=facts_for(w, ctx=ctx), dir_enabled=DIR_BOTH)
+            self.assertEqual((manual.state, other.state), (en.OS_ACTIVE, en.OS_ACTIVE), 'ctx %d' % ctx)
+            self.assertNotIn(9001, [c for c in getattr(w.tr, 'cancelled_tickets', [])])
+            self.assertEqual(w.tr.orders[0].state, en.OS_FILLED, 'the open position is not touched')
+            self.assertEqual(w.tr.cancels, 1 if ctx == 1 else 0, 'only the pending of the opposite direction (SELL when the context turned BUY); a filled BUY is a position')
+
+    def test_an_uncertain_cancel_halts_and_is_never_retried_even_after_a_restart(self):
+        for mode in ('lost', 'not_effective', 'fails'):
+            w, st = multi(self.SPECS)
+            w.tr.cancel_mode = mode
+            lc.tick(w.cfg, w.tr, w.store, st, 0, 0, facts=facts_for(w, ctx=-1), dir_enabled=tp.EV_DIRECTION_CHANGE)
+            self.assertIn('CANCEL_NOT_CONFIRMED', st.halted, mode)
+            first = w.tr.cancels
+            self.assertGreaterEqual(first, 1, mode)
+            lc.tick(w.cfg, w.tr, w.store, st, 0, 0, facts=facts_for(w, ctx=-1), dir_enabled=tp.EV_DIRECTION_CHANGE)
+            self.assertEqual(w.tr.cancels, first, mode + ': no automatic second cancellation')
+            lc.release(w.store, st)
+            tr2, store2 = new_process(w, keep_book=True)                     # a restart: the halt is persisted, the stored intent blocks a second cancel
+            st2, notes = lc.startup(w.cfg, tr2, store2, store2)
+            lc.tick(w.cfg, tr2, store2, st2, 0, 0, facts=facts_for(w, ctx=-1), dir_enabled=tp.EV_DIRECTION_CHANGE)
+            self.assertEqual(w.tr.cancels, first, mode + ': still no second cancellation after the restart')
+            self.assertTrue(st2.halted, mode)
+
+    def test_a_cancelled_record_is_not_cancelled_twice_and_a_restart_does_not_revive_it(self):
+        w, st = multi(self.SPECS)
+        lc.tick(w.cfg, w.tr, w.store, st, 0, 0, facts=facts_for(w, ctx=-1), dir_enabled=DIR_BOTH)
+        n = w.tr.cancels
+        lc.tick(w.cfg, w.tr, w.store, st, 0, 0, facts=facts_for(w, ctx=-1), dir_enabled=DIR_BOTH)
+        self.assertEqual(w.tr.cancels, n)
+        lc.release(w.store, st)
+        tr2, store2 = new_process(w, keep_book=True)
+        st2, notes = lc.startup(w.cfg, tr2, store2, store2)
+        self.assertEqual(sorted(st2.ids), ['SIG-B'])
+        lc.tick(w.cfg, tr2, store2, st2, 0, 0, facts=facts_for(w, ctx=-1), dir_enabled=DIR_BOTH)
+        self.assertEqual((w.tr.cancels, sorted(st2.ids)), (n, ['SIG-B']))
+
+    def test_global_events_and_direction_events_combine_per_record(self):
+        w, st = multi(self.SPECS)
+        lc.tick(w.cfg, w.tr, w.store, st, tp.EV_SESSION_END, tp.EV_SESSION_END, facts=facts_for(w, ctx=-1), dir_enabled=tp.EV_DIRECTION_CHANGE)
+        self.assertEqual((w.tr.cancels, st.ids), (3, []), 'session end cancels every pending; the direction event adds its reason for the opposite ones')
+
+
+class OrchestratorFacts(unittest.TestCase):
+    def test_the_orchestrator_exposes_the_direction_it_knows_and_nothing_else(self):
+        for d in (1, -1):
+            w = teo.World(d)
+            o1, l1 = teo.observer_n(d, 2)
+            w.step(o1, l1)
+            self.assertEqual((w.o.facts.valid, w.o.facts.ctx_direction, w.o.facts.signal_direction), (True, d, 0), 'a known context, no signal yet')
+            o2, l2 = teo.observer_n(d, 3)
+            w.step(o2, l2)
+            self.assertEqual((w.o.facts.valid, w.o.facts.ctx_direction, w.o.facts.signal_direction), (True, d, d))
+            self.assertTrue(w.o.facts.signal_id)
+            w.step(None, None, feed_ok=False)
+            self.assertEqual((w.o.facts.valid, w.o.facts.ctx_direction, w.o.facts.signal_direction), (False, 0, 0), 'no confirmed data proves nothing')
+            o3, l3 = teo.observer_n(d, 3)
+            o3.set_context(teo.ts.context(d, ready=False), o3.last_asof + 900)
+            w.step(o3, l3)
+            self.assertEqual((w.o.facts.valid, w.o.facts.ctx_direction), (False, 0), 'a lost context proves nothing')
+
+
+
+class FakeSink:
+    """the FAKE push receiver: records the texts; a mode scripts the answer (no real notification is ever sent)"""
+
+    def __init__(self):
+        self.texts, self.calls, self.mode = [], 0, lc.NT_SENT
+
+    def send(self, text):
+        self.calls += 1
+        if self.mode == lc.NT_SENT:
+            self.texts.append(text)
+        return self.mode
+
+    def has(self, frag):
+        return [t for t in self.texts if frag in t]
+
+
+class Notifications(unittest.TestCase):
+    """push notifications for PROVEN facts of OWNED objects: placed pending (broker facts, never OrderSend=true), filled position, partial close vs final close, modification; once each; a failed
+    notification changes nothing (no decision, no order); a manual trade never notifies; a restart repeats nothing"""
+
+    def notifier(self, w, sink=None, magic=777, baseline=False):
+        n = lc.Notifier(sink or FakeSink(), w.store, magic, 'XAUUSD', prefix='[FAKE] ')
+        n.baseline = baseline
+        return n
+
+    def test_a_pending_is_announced_when_the_broker_facts_show_it_and_a_fill_when_it_is_a_position(self):
+        for d in (1, -1):
+            w, st = placed(d)
+            sink = FakeSink()
+            n = self.notifier(w, sink)
+            for _ in range(4):                                                    # polls and reconciles repeat the same fact
+                lc.tick(w.cfg, w.tr, w.store, st, 0, 0, obs=n)
+            self.assertEqual(len(sink.has('PENDING PLACED')), 1, 'dir %d' % d)
+            self.assertIn('BUY' if d == 1 else 'SELL', sink.texts[0])
+            self.assertTrue(sink.texts[0].startswith('[FAKE] '), 'the FAKE provenance is in the text')
+            w.tr.orders[0].state = en.OS_FILLED
+            w.tr.orders[0].position_id = 4242
+            for _ in range(4):
+                lc.tick(w.cfg, w.tr, w.store, st, 0, 0, obs=n)
+            self.assertEqual((len(sink.has('POSITION OPENED')), len(sink.texts), w.tr.sends), (1, 2, 1))
+
+    def test_an_order_send_that_returned_true_but_is_not_proven_is_not_announced(self):
+        for mode in ('uncertain_not_created', 'placed_unreadable', 'rejected'):
+            w = te.World(1)
+            w.tr.send_mode = mode
+            st = owner(w.store, w.tr.account.login)
+            guard = lc.Guard(w.store, st)
+            ok, why = guard.reserve(SIG)
+            res = w.place()
+            guard.settled(SIG, res)
+            sink = FakeSink()
+            n = self.notifier(w, sink)
+            lc.tick(w.cfg, w.tr, w.store, st, 0, 0, obs=n)
+            lc.tick(w.cfg, w.tr, w.store, st, 0, 0, obs=n)
+            self.assertEqual(sink.texts, [], mode)
+
+    def test_a_removed_pending_is_announced_once(self):
+        for d in (1, -1):
+            w, st = placed(d)
+            sink = FakeSink()
+            n = self.notifier(w, sink)
+            lc.tick(w.cfg, w.tr, w.store, st, 0, 0, obs=n)
+            lc.tick(w.cfg, w.tr, w.store, st, tp.EV_SESSION_END, tp.EV_SESSION_END, obs=n)
+            lc.tick(w.cfg, w.tr, w.store, st, tp.EV_SESSION_END, tp.EV_SESSION_END, obs=n)
+            self.assertEqual((len(sink.has('PENDING PLACED')), len(sink.has('PENDING CANCELLED'))), (1, 1), 'dir %d' % d)
+
+    def test_partial_close_modification_and_final_close_are_distinct_and_announced_once(self):
+        for d in (1, -1):
+            rw = MgmtWorld(self, d)
+            sink = FakeSink()
+            rw.obs = n = self.notifier(rw.w, sink)
+            rw.reg.inner.obs = n
+            rw.tick()
+            self.assertEqual(len(sink.has('POSITION OPENED')), 1, 'dir %d' % d)
+            self.assertEqual(len(sink.texts), 1, 'the first observation of the position is the opening, not a modification')
+            for _ in range(3):
+                rw.tick()
+            self.assertEqual(len(sink.texts), 1, 'unchanged facts are not repeated by the polls')
+            rw.xtr.position.sl = 2000.0                                           # the stop moved to the entry
+            for _ in range(3):
+                rw.tick()
+            self.assertEqual((len(sink.has('POSITION MODIFIED')), len(sink.has('PARTIAL'))), (1, 0), 'dir %d: an SL change is a modification, not a partial close' % d)
+            rw.xtr.position.volume = 0.1                                          # the 80% part was closed
+            for _ in range(3):
+                rw.tick()
+            self.assertEqual((len(sink.has('POSITION MODIFIED')), len(sink.has('PARTIAL')), len(sink.has('POSITION CLOSED'))), (1, 1, 0), 'a partial close is not a final close')
+            rw.xtr.position.volume = 0.3                                          # a volume that INCREASES is not a partial close
+            rw.tick()
+            self.assertEqual(len(sink.has('PARTIAL')), 1)
+            rw.xtr.position.found = False
+            rw.closed = True                                                      # the list is readable and stable and holds no such position
+            for _ in range(3):
+                rw.tick()
+            self.assertEqual((len(sink.has('POSITION CLOSED')), len(sink.texts)), (1, 4), 'dir %d' % d)
+
+    def test_an_unreadable_position_is_not_a_close(self):
+        for d in (1, -1):
+            rw = MgmtWorld(self, d)
+            sink = FakeSink()
+            rw.obs = n = self.notifier(rw.w, sink)
+            rw.reg.inner.obs = n
+            rw.tick()
+            rw.xtr.position.found = False                                         # unreadable, not proven absent
+            rw.tick()
+            self.assertEqual(sink.has('POSITION CLOSED'), [])
+
+    def test_a_failing_notification_changes_no_decision_and_sends_no_order(self):
+        for mode in (lc.NT_FAILED, lc.NT_RETRY_LATER):
+            for d in (1, -1):
+                w, st = placed(d)
+                sink = FakeSink()
+                sink.mode = mode
+                n = self.notifier(w, sink)
+                before = (w.tr.sends, w.tr.cancels)
+                for _ in range(6):
+                    lc.tick(w.cfg, w.tr, w.store, st, 0, 0, obs=n)
+                self.assertEqual(((w.tr.sends, w.tr.cancels), st.ids, st.halted), (before, [SIG], ''), 'the trading state is unchanged')
+                if mode == lc.NT_FAILED:
+                    self.assertEqual(sink.calls, lc.Notifier.MAX_TRIES, 'bounded retries, then the event is dropped')
+                else:
+                    self.assertEqual(sink.calls, 6, 'a throttled sink is asked again at every observation and does not consume attempts')
+                    sink.mode = lc.NT_SENT
+                    lc.tick(w.cfg, w.tr, w.store, st, 0, 0, obs=n)
+                    self.assertEqual(len(sink.has('PENDING PLACED')), 1)
+
+    def test_a_throttled_position_event_is_delivered_by_a_later_observation(self):
+        for d in (1, -1):
+            rw = MgmtWorld(self, d)
+            sink = FakeSink()
+            rw.obs = n = self.notifier(rw.w, sink)
+            rw.reg.inner.obs = n
+            rw.tick()
+            rw.tick()
+            sink.mode = lc.NT_RETRY_LATER
+            rw.xtr.position.volume = 0.1
+            rw.xtr.position.sl = 2000.0
+            for _ in range(3):
+                rw.tick()
+            self.assertTrue(all('POSITION OPENED' in t for t in sink.texts), 'nothing but the opening was delivered while the sink was throttled')
+            sink.mode = lc.NT_SENT
+            rw.tick()
+            rw.tick()
+            self.assertEqual((len(sink.has('PARTIAL')), len(sink.has('POSITION MODIFIED'))), (1, 1), 'delivered once after the throttle')
+
+    def test_manual_trades_and_foreign_records_never_notify(self):
+        for d in (1, -1):
+            rw = MgmtWorld(self, d)
+            sink = FakeSink()
+            rw.obs = n = self.notifier(rw.w, sink, magic=778)                      # another magic: the records of this robot are not owned by this notifier
+            rw.reg.inner.obs = n
+            rw.tick()
+            self.assertEqual(sink.texts, [])
+            rw2 = MgmtWorld(self, d)
+            sink2 = FakeSink()
+            rw2.obs = n2 = self.notifier(rw2.w, sink2)
+            rw2.reg.inner.obs = n2
+            rw2.xtr.position = ex.PositionW(found=True, ticket=99, identifier=99, symbol='XAUUSD', magic=0, type=0 if d == 1 else 1, volume=0.5, price_open=2000.0, sl=rw2.sl)     # a manual position
+            rw2.w.tr.orders.append(en.Order(found=True, ticket=9001, symbol='XAUUSD', type=en.TYPE_SELL_LIMIT, state=en.OS_ACTIVE, price=2100.0, sl=2105.0, tp=2090.0, volume=0.1, magic=0, comment='manual'))
+            rw2.tick()
+            self.assertEqual(sink2.has('POSITION PARTIAL') + sink2.has('POSITION MODIFIED') + sink2.has('POSITION CLOSED') + sink2.has('PENDING'), [], 'the manual pending and the manual position are not announced')
+
+    def test_a_restart_repeats_nothing_and_new_events_are_announced(self):
+        for d in (1, -1):
+            w, st = placed(d)
+            sink = FakeSink()
+            n = self.notifier(w, sink)
+            lc.tick(w.cfg, w.tr, w.store, st, 0, 0, obs=n)
+            self.assertEqual(len(sink.texts), 1)
+            lc.release(w.store, st)
+            tr2, store2 = new_process(w, keep_book=True)
+            n2 = lc.Notifier(sink, store2, 777, 'XAUUSD', prefix='[FAKE] ')
+            n2.baseline = True                                                       # the startup sweep only remembers
+            st2, notes = lc.startup(w.cfg, tr2, store2, store2, obs=n2)
+            n2.baseline = False
+            for _ in range(3):
+                lc.tick(w.cfg, tr2, store2, st2, 0, 0, obs=n2)
+            self.assertEqual(len(sink.texts), 1, 'dir %d: the restart does not repeat the placement' % d)
+            tr2.orders[0].state = en.OS_FILLED
+            tr2.orders[0].position_id = 4242
+            lc.tick(w.cfg, tr2, store2, st2, 0, 0, obs=n2)
+            self.assertEqual((len(sink.has('POSITION OPENED')), len(sink.texts)), (1, 2), 'a new fact after the restart is announced')
+
+    def test_an_event_during_the_downtime_is_not_announced_after_the_restart(self):
+        w, st = placed(1)
+        w.tr.orders[0].state = en.OS_FILLED                                            # filled while the robot was down
+        w.tr.orders[0].position_id = 4242
+        lc.release(w.store, st)
+        sink = FakeSink()
+        n = lc.Notifier(sink, w.store, 777, 'XAUUSD')
+        n.baseline = True
+        st2, notes = lc.startup(w.cfg, w.tr, w.store, w.store, obs=n)
+        n.baseline = False
+        lc.tick(w.cfg, w.tr, w.store, st2, 0, 0, obs=n)
+        self.assertEqual(sink.texts, [])
+        self.assertTrue(any('FILLED_UNMANAGED' in x for x in notes), 'the fill is still reported in the log')
+
+
 class Sources(unittest.TestCase):
     def test_regagain_uses_scripted_absence_instead_of_live_positions(self):
         with open(os.path.join(ROOT, 'src', 'tests', 'EntryLifecycleTest.mq5'), encoding='ascii') as f:
@@ -1203,7 +1573,7 @@ class Mutants(unittest.TestCase):
 
     def _suite_failures(self):
         suite = unittest.TestSuite()
-        for cls in (Index, Startup, Tick, IndexBeforeSend, Crash, Instances, DamageDuringRun, FillHandoff, AutoRegistration, ManagedFlow):
+        for cls in (Index, Startup, Tick, IndexBeforeSend, Crash, Instances, DamageDuringRun, FillHandoff, AutoRegistration, ManagedFlow, DirectionCancel, Notifications):
             for n in unittest.TestLoader().getTestCaseNames(cls):
                 suite.addTest(cls(n))
         res = unittest.TestResult()
@@ -1268,6 +1638,20 @@ class Mutants(unittest.TestCase):
                 ("            if sid in st.unmanaged:\n                continue", "            if False:\n                continue"),
                 ("            if sid in st.unmanaged or verdict(en.reconcile(cfg, tr, store, sid)) == HALT:", "            if verdict(en.reconcile(cfg, tr, store, sid)) == HALT:"),
                 ("        if rec.state != en.ST_FILLED or rec.linked != 1 or rec.position_id <= 0:\n            return SINK_REFUSED, 'FILL_NOT_PROVEN'", "        if False:\n            return SINK_REFUSED, 'FILL_NOT_PROVEN'"),
+                # per-record direction events
+                ("facts.ctx_direction in (1, -1) and facts.ctx_direction == -rec.direction", "facts.ctx_direction == -rec.direction or True"),
+                ("facts.ctx_direction in (1, -1) and facts.ctx_direction == -rec.direction", "facts.ctx_direction != rec.direction"),
+                ("facts.signal_direction in (1, -1) and facts.signal_direction == -rec.direction and facts.signal_id != sid", "facts.signal_direction in (1, -1) and facts.signal_direction == -rec.direction"),
+                ("    if age < 0 or age > cfg.quote_max_age:\n        return 0\n", ""),
+                ("    if not dir_enabled or facts is None or not facts.valid:\n        return 0\n", "    if not dir_enabled or facts is None:\n        return 0\n"),
+                # push notifications
+                ("        if key in self.done:\n            return True\n        if self.baseline:", "        if self.baseline:"),
+                ("        if self.baseline:\n            self.done.add(key)\n            return True\n", ""),
+                ("        if not ok or rec.magic != self.magic or rec.symbol != self.symbol:\n            return None", "        if not ok:\n            return None"),
+                ("        if n >= self.MAX_TRIES:\n            self.done.add(key)", "        if False:\n            self.done.add(key)"),
+                ("        if status == NT_RETRY_LATER:\n            return False\n", ""),
+                ("        if volume < prev[0] - 1e-9:", "        if volume != prev[0]:"),
+                ("        if ok:\n            self.last[position_id] = (volume, sl)", "        if True:\n            self.last[position_id] = (volume, sl)"),
                 # management inside the orchestrator
                 ("            self.manager.forget(rec.position_id)       # finished: the slot is released (the T011 record stays; a restart before the index is saved recovers the DONE from it)\n", ""),
                 ("            if len(self.slots) >= self.MAX_SLOTS:\n                return SINK_REFUSED, 'MANAGEMENT_SLOTS_FULL'\n", ""),

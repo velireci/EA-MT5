@@ -16,6 +16,7 @@ Kjo përmbledhje zëvendëson shënimet historike më poshtë. [x] vlen për bll
 - [x] Nisja reale e programit në grafik demo, me transport FAKE / READ_ONLY: log-u 23:16:26 konfirmon mënyrën. Në 23:20:19: CONFIG_UNSET vetëm risk_budget; virtual requests 0, lifecycle open 0. Kjo provon nisjen, jo tregti te brokeri.
 - [x] Ndarja DEMO/LIVE është ruajtur në EA_INTEGRATION_PLAN.md dhe STATE.md, commit 2703927.
 - [ ] Paketa demo (EA v1.08): buxheti = 1% e ACCOUNT_BALANCE aktuale (vetëm demo, pa fallback, i lidhur me planin dhe provat), preseti i plotë FAKE/READ_ONLY `src/presets/XauUsdEntryOrchestrator_demo_fake.set` dhe kontrolli offline `tests/preset_check.py`: ndërtuar në sandbox (787 teste Python), kompilimi/MT5 UNVERIFIED; zgjedhjet e përkohshme janë propozime demo (tabela te EA_INTEGRATION_PLAN), jo përgjigje klienti; pyetjet para live mbeten në listën B.
+- [ ] Anulimi i pending-it për drejtim të kundërt / sinjal të kundërt (S:29-30) dhe njoftimet push për fakte të provuara (S:100, S:173), EA v1.11: ndërtuar në sandbox me regresione BUY/SELL, disa pending me drejtime të ndryshme, restart dhe përgjigje të pasigurta; marrës FAKE; kompilimi/MT5 UNVERIFIED; asnjë njoftim real nuk u dërgua.
 
 ### Puna aktive — konfigurimi demo funksional
 - [ ] Lidhja automatike e buxhetit demo: 1% e ACCOUNT_BALANCE aktuale, me dështim leximi → BLOCK. Kjo është zgjedhje e përkohshme demo, jo përgjigje e klientit për live. Sot InpRiskBudget është ende shumë monetare e dhënë si input.

@@ -4,11 +4,12 @@
 // NOT YET COMPILED OR RUN (UNVERIFIED): Codex compiles it, the owner runs it in MT5.
 #property strict
 #property script_show_inputs
-#property version "1.05"
+#property version "1.06"
 #include "../include/EntryLifecycle.mqh"
 #include "../include/EntryTransportFake.mqh"
 #include "../include/ExitTransportFake.mqh"
 #include "../include/EntryManagementHandoff.mqh"
+#include "../include/EntryNotify.mqh"
 #include "../include/ExitSnapshotAdapter.mqh"
 int g_pass=0,g_fail=0;
 void Check(const bool ok,const string message)
@@ -821,6 +822,7 @@ public:
    CFakeTransport m;                              // the MANAGEMENT transport (fixtures for the reconcile, scripted sends)
    CTestRegistrar reg;
    CMhManager mgr;
+   CLcObserver *obs;
    int dir;
    double tp;
    long login;
@@ -828,6 +830,7 @@ public:
    int calls;
    void Build(const int direction,const double tp_beyond,const string phrase)
      {
+      obs=NULL;
       dir=direction;
       tp=tp_beyond;
       w.InitTp(direction,tp_beyond);
@@ -884,7 +887,7 @@ public:
    string Tick(void)
      {
       string notes;
-      LC_Tick(w.cfg,GetPointer(w.t),GetPointer(w.s),w.g.st,0,0,notes,GetPointer(reg));
+      LC_Tick(w.cfg,GetPointer(w.t),GetPointer(w.s),w.g.st,0,0,notes,GetPointer(reg),obs);
       return(notes);
      }
    string File(void)
@@ -1479,6 +1482,426 @@ void Scenario_managed_slots_released_and_capacity(void)
      }
   }
 
+// ---- per-record direction events (S:29-30): several pending orders of different directions in one store
+class CMulti
+  {
+public:
+   CWorld w;
+   int k;
+   CMulti(void) {k=0;}
+   bool Add(const string sid,const int dir)
+     {
+      w.Init(dir);
+      TP_PlanReset(w.plan,sid,"SET-1",dir);
+      double shift=-0.5*k*dir;                                  // distinct prices: the executor refuses an identical pending order
+      w.plan.e_out=(dir==1 ? 1990.0 : 2010.0)+shift;
+      w.plan.s_out=(dir==1 ? 1985.0 : 2015.0)+shift;
+      w.plan.tp=2000.0;
+      w.plan.volume_out=0.1;
+      STpPermit tpm;
+      tpm.allow=true;
+      tpm.primary_reason="";
+      tpm.reason_count=0;
+      tpm.registered=false;
+      EN_PermitFrom(w.plan,tpm,w.t.now,w.pm);
+      if(k==0) w.Own();
+      k++;
+      string why;
+      if(!w.g.Reserve(sid,why)) return(false);
+      EN_RuntimeInit(w.rt);
+      EN_Place(w.cfg,GetPointer(w.t),GetPointer(w.s),w.rt,w.plan,w.pm,w.r);
+      w.g.Settled(sid,w.r);
+      return(w.r.outcome==EN_R_PLACED);
+     }
+   bool Three(void) {return(Add("SIG-A",1) && Add("SIG-B",-1) && Add("SIG-C",1));}
+   void Facts(SLcFacts &f,const int ctx,const int sig,const string sid,const bool valid=true,const long age=0)
+     {
+      LC_FactsInit(f);
+      f.valid=valid;
+      f.ctx_direction=ctx;
+      f.signal_direction=sig;
+      f.signal_id=sid;
+      f.time=w.t.now-age;
+     }
+   string Tick(const SLcFacts &f,const int dir_enabled)
+     {
+      string n;
+      LC_TickEx(w.cfg,GetPointer(w.t),GetPointer(w.s),w.g.st,0,0,f,dir_enabled,n);
+      return(n);
+     }
+   bool Open(const string sid) {return(LC_IndexOf(w.g.st,sid)>=0);}
+   string StateOf(const string sid)
+     {
+      SEnRecord rec;
+      string why;
+      return(EN_Load(GetPointer(w.s),EN_FileName(w.t.account.login,sid),rec,why)==1 ? rec.state : "NO_RECORD");
+     }
+  };
+
+void Scenario_direction_cancel_only_opposite_records(void)
+  {
+   for(int c=0;c<2;c++)
+     {
+      int ctx=(c==0 ? -1 : 1);
+      CMulti m;
+      bool ok=m.Three();
+      SLcFacts f;
+      m.Facts(f,ctx,0,"");
+      string n=m.Tick(f,TP_EV_DIRECTION_CHANGE);
+      bool a=(ctx==-1 ? !m.Open("SIG-A") && !m.Open("SIG-C") && m.Open("SIG-B") : m.Open("SIG-A") && m.Open("SIG-C") && !m.Open("SIG-B"));
+      bool st=(ctx==-1 ? m.StateOf("SIG-A")==EN_ST_CANCELLED && m.StateOf("SIG-C")==EN_ST_CANCELLED && m.StateOf("SIG-B")==EN_ST_PLACED : m.StateOf("SIG-B")==EN_ST_CANCELLED && m.StateOf("SIG-A")==EN_ST_PLACED);
+      Check(ok && a && st && m.w.t.cancels==(ctx==-1 ? 2 : 1) && m.w.g.st.halted=="" && Has(n,"CANCEL_REQUEST: DIRECTION_CHANGE"),StringFormat("context %d: only the records of the opposite direction are cancelled, the others stay pending",ctx));
+     }
+  }
+
+void Scenario_opposite_signal_cancel_per_record(void)
+  {
+   for(int c=0;c<2;c++)
+     {
+      int sd=(c==0 ? -1 : 1);
+      CMulti m;
+      bool ok=m.Three();
+      SLcFacts f;
+      m.Facts(f,0,sd,"SIG-NEW");
+      m.Tick(f,TP_EV_OPPOSITE_SIGNAL);
+      bool a=(sd==-1 ? !m.Open("SIG-A") && !m.Open("SIG-C") && m.Open("SIG-B") : !m.Open("SIG-B") && m.Open("SIG-A") && m.Open("SIG-C"));
+      CMulti x;                                                  // inconsistent data: the signal id of the record itself with the other direction proves nothing
+      bool ok2=x.Add("SIG-A",1);
+      SLcFacts g;
+      x.Facts(g,0,-1,"SIG-A");
+      x.Tick(g,TP_EV_OPPOSITE_SIGNAL);
+      Check(ok && a && ok2 && x.w.t.cancels==0 && x.Open("SIG-A"),StringFormat("signal %d: only the opposite records are cancelled; inconsistent data cancels nothing",sd));
+     }
+  }
+
+void Scenario_direction_unknown_data_proves_nothing(void)
+  {
+   for(int k=0;k<7;k++)
+     {
+      CMulti m;
+      bool ok=m.Three();
+      SLcFacts f;
+      int dir_enabled=TP_EV_DIRECTION_CHANGE|TP_EV_OPPOSITE_SIGNAL;
+      if(k==0) m.Facts(f,0,0,"");                                           // unknown context
+      if(k==1) m.Facts(f,-1,0,"",false);                                    // invalid facts
+      if(k==2) m.Facts(f,-1,0,"",true,m.w.cfg.quote_max_age+1);             // stale
+      if(k==3) m.Facts(f,-1,0,"",true,-5);                                  // from the future
+      if(k==4) {m.Facts(f,-1,0,""); dir_enabled=0;}                         // not enabled by the owner
+      if(k==5) {m.Facts(f,-1,0,""); dir_enabled=TP_EV_OPPOSITE_SIGNAL;}     // a context is not a signal
+      if(k==6) {m.Facts(f,0,-1,"SIG-NEW"); dir_enabled=TP_EV_DIRECTION_CHANGE;}  // a signal is not a context change
+      m.Tick(f,dir_enabled);
+      Check(ok && m.w.t.cancels==0 && m.w.g.st.n==3 && m.w.g.st.halted=="",StringFormat("case %d: unknown, incomplete, stale or not enabled data cancels nothing",k));
+     }
+  }
+
+void Scenario_direction_cancel_leaves_positions_and_foreign(void)
+  {
+   for(int c=0;c<2;c++)
+     {
+      int ctx=(c==0 ? -1 : 1);
+      CMulti m;
+      bool ok=m.Add("SIG-A",1) && m.Add("SIG-B",-1);
+      m.w.t.orders[0].state=EN_OS_FILLED;                                  // SIG-A became a position
+      m.w.t.orders[0].position_id=4242;
+      SEnOrder manual,other;
+      manual=m.w.t.orders[1];
+      other=m.w.t.orders[1];
+      manual.ticket=9001;
+      manual.magic=0;
+      manual.comment="manual";
+      other.ticket=9002;
+      other.magic=999;
+      other.comment="other EA";
+      m.w.t.orders[m.w.t.n_orders]=manual;
+      m.w.t.n_orders++;
+      m.w.t.orders[m.w.t.n_orders]=other;
+      m.w.t.n_orders++;
+      SLcFacts f;
+      m.Facts(f,ctx,0,"");
+      m.Tick(f,TP_EV_DIRECTION_CHANGE|TP_EV_OPPOSITE_SIGNAL);
+      m.Tick(f,TP_EV_DIRECTION_CHANGE|TP_EV_OPPOSITE_SIGNAL);
+      Check(ok && m.w.t.orders[2].state==EN_OS_ACTIVE && m.w.t.orders[3].state==EN_OS_ACTIVE && m.w.t.orders[0].state==EN_OS_FILLED && m.w.t.cancels==(ctx==1 ? 1 : 0),
+            StringFormat("context %d: the open position, the manual order and the other magic are never touched; only the opposite pending of ours",ctx));
+     }
+  }
+
+void Scenario_direction_cancel_uncertain_halts_no_retry(void)
+  {
+   int modes[3]={EN_CM_LOST,EN_CM_NOT_EFFECTIVE,EN_CM_FAILS};
+   for(int k=0;k<3;k++)
+     {
+      CMulti m;
+      bool ok=m.Three();
+      m.w.t.cancel_mode=modes[k];
+      SLcFacts f;
+      m.Facts(f,-1,0,"");
+      m.Tick(f,TP_EV_DIRECTION_CHANGE);
+      bool halted=Has(m.w.g.st.halted,"CANCEL_NOT_CONFIRMED");
+      int first=m.w.t.cancels;
+      m.Tick(f,TP_EV_DIRECTION_CHANGE);
+      LC_Release(GetPointer(m.w.s),m.w.g.st);
+      CEnFakeStore s2;
+      CloneDisk(m.w.s,s2);
+      SLcState st2;
+      string notes;
+      LC_Startup(m.w.cfg,GetPointer(m.w.t),GetPointer(s2),GetPointer(s2),false,st2,notes);
+      string n2;
+      LC_TickEx(m.w.cfg,GetPointer(m.w.t),GetPointer(s2),st2,0,0,f,TP_EV_DIRECTION_CHANGE,n2);
+      Check(ok && halted && first>=1 && m.w.t.cancels==first && st2.halted!="",StringFormat("cancel mode %d: an uncertain cancel halts; no second cancellation, not even after a restart",modes[k]));
+     }
+  }
+
+// ---- push notifications for PROVEN facts of OWNED objects (FAKE sink only: nothing is ever pushed by a test)
+class CNtFakeSink : public CNtSink
+  {
+public:
+   string texts[64];
+   int n;
+   int calls;
+   int mode;
+   CNtFakeSink(void) {n=0; calls=0; mode=NT_SENT;}
+   virtual int Send(const string text)
+     {
+      calls++;
+      if(mode==NT_SENT && n<64) {texts[n]=text; n++;}
+      return(mode);
+     }
+   int Count(const string frag)
+     {
+      int c=0;
+      for(int i=0;i<n;i++)
+         if(Has(texts[i],frag)) c++;
+      return(c);
+     }
+  };
+
+void NtBind(CNtNotifier &nf,CNtFakeSink &sink,CEnStore *store,const long magic,const bool baseline=false)
+  {
+   nf.sink=GetPointer(sink);
+   nf.store=store;
+   nf.magic=magic;
+   nf.symbol="XAUUSD";
+   nf.prefix="[FAKE] ";
+   nf.baseline=baseline;
+  }
+
+void NtTick(CWorld &w,CLcObserver *o)
+  {
+   string n;
+   LC_Tick(w.cfg,GetPointer(w.t),GetPointer(w.s),w.g.st,0,0,n,NULL,o);
+  }
+
+void Scenario_notify_pending_placed_then_filled_once(void)
+  {
+   for(int d=0;d<2;d++)
+     {
+      int dir=(d==0 ? 1 : -1);
+      CWorld w;
+      bool placed=w.Placed(dir);
+      CNtFakeSink sink;
+      CNtNotifier nf;
+      NtBind(nf,sink,GetPointer(w.s),777);
+      for(int i=0;i<4;i++) NtTick(w,GetPointer(nf));
+      bool first=(sink.Count("PENDING PLACED")==1 && sink.n==1 && Has(sink.texts[0],(dir==1 ? "BUY" : "SELL")) && StringFind(sink.texts[0],"[FAKE] ")==0);
+      w.t.orders[0].state=EN_OS_FILLED;
+      w.t.orders[0].position_id=4242;
+      for(int i=0;i<4;i++) NtTick(w,GetPointer(nf));
+      Check(placed && first && sink.Count("POSITION OPENED")==1 && sink.n==2 && w.t.sends==1,StringFormat("dir %d: placed and opened are announced once each; polls and reconciles repeat nothing",dir));
+     }
+  }
+
+void Scenario_notify_unproven_order_send_is_silent(void)
+  {
+   int modes[3]={EN_SM_UNCERTAIN_NOT_CREATED,EN_SM_PLACED_UNREADABLE,EN_SM_REJECTED};
+   for(int k=0;k<3;k++)
+     {
+      CWorld w;
+      w.Init(1);
+      w.Own();
+      w.t.send_mode=modes[k];
+      w.Seq();
+      CNtFakeSink sink;
+      CNtNotifier nf;
+      NtBind(nf,sink,GetPointer(w.s),777);
+      NtTick(w,GetPointer(nf));
+      NtTick(w,GetPointer(nf));
+      Check(sink.n==0,StringFormat("send mode %d: an order the broker facts do not show is never announced",modes[k]));
+     }
+  }
+
+void Scenario_notify_removed_pending_once(void)
+  {
+   for(int d=0;d<2;d++)
+     {
+      int dir=(d==0 ? 1 : -1);
+      CWorld w;
+      bool placed=w.Placed(dir);
+      CNtFakeSink sink;
+      CNtNotifier nf;
+      NtBind(nf,sink,GetPointer(w.s),777);
+      string n;
+      LC_Tick(w.cfg,GetPointer(w.t),GetPointer(w.s),w.g.st,0,0,n,NULL,GetPointer(nf));
+      LC_Tick(w.cfg,GetPointer(w.t),GetPointer(w.s),w.g.st,TP_EV_SESSION_END,TP_EV_SESSION_END,n,NULL,GetPointer(nf));
+      LC_Tick(w.cfg,GetPointer(w.t),GetPointer(w.s),w.g.st,TP_EV_SESSION_END,TP_EV_SESSION_END,n,NULL,GetPointer(nf));
+      Check(placed && sink.Count("PENDING PLACED")==1 && sink.Count("PENDING CANCELLED")==1,StringFormat("dir %d: a cancelled pending is announced once",dir));
+     }
+  }
+
+void Scenario_notify_partial_modified_closed_are_distinct(void)
+  {
+   for(int d=0;d<2;d++)
+     {
+      int dir=(d==0 ? 1 : -1);
+      CRegWorld r;
+      r.Build(dir,(d==0 ? 2005.0 : 1995.0),EX_AUTH_PHRASE);
+      CNtFakeSink sink;
+      CNtNotifier nf;
+      NtBind(nf,sink,GetPointer(r.w.s),777);
+      r.obs=GetPointer(nf);
+      r.reg.obs=GetPointer(nf);
+      r.reg.manager=GetPointer(r.mgr);
+      r.Tick();
+      bool opened=(sink.Count("POSITION OPENED")==1 && sink.n==1);
+      for(int i=0;i<3;i++) r.Tick();
+      bool quiet=(sink.n==1);
+      r.x.position.sl=r.w.plan.e_out;                          // the stop moved to the entry
+      for(int i=0;i<3;i++) r.Tick();
+      bool mod=(sink.Count("POSITION MODIFIED")==1 && sink.Count("PARTIAL")==0);
+      r.x.position.volume=0.02;                                // the 80% part closed
+      for(int i=0;i<3;i++) r.Tick();
+      bool part=(sink.Count("POSITION MODIFIED")==1 && sink.Count("PARTIAL")==1 && sink.Count("POSITION CLOSED")==0);
+      r.x.position.found=false;
+      r.reg.closed=true;                                       // readable, stable, no such position
+      for(int i=0;i<3;i++) r.Tick();
+      Check(r.ok && opened && quiet && mod && part && sink.Count("POSITION CLOSED")==1 && sink.n==4,StringFormat("dir %d: opening, modification, partial and final close are distinct and announced once",dir));
+      RegClean(r.login);
+      CRegWorld u;                                             // an unreadable position is not a close
+      u.Build(dir,(d==0 ? 2005.0 : 1995.0),EX_AUTH_PHRASE);
+      CNtFakeSink sink2;
+      CNtNotifier nf2;
+      NtBind(nf2,sink2,GetPointer(u.w.s),777);
+      u.obs=GetPointer(nf2);
+      u.reg.obs=GetPointer(nf2);
+      u.reg.manager=GetPointer(u.mgr);
+      u.Tick();
+      u.x.position.found=false;
+      u.Tick();
+      Check(sink2.Count("POSITION CLOSED")==0,StringFormat("dir %d: an unreadable position is not announced as closed",dir));
+      RegClean(u.login);
+     }
+  }
+
+void Scenario_notify_failure_changes_no_decision(void)
+  {
+   int modes[2]={NT_FAILED,NT_RETRY_LATER};
+   for(int k=0;k<2;k++)
+      for(int d=0;d<2;d++)
+        {
+         int dir=(d==0 ? 1 : -1);
+         CWorld w;
+         bool placed=w.Placed(dir);
+         CNtFakeSink sink;
+         sink.mode=modes[k];
+         CNtNotifier nf;
+         NtBind(nf,sink,GetPointer(w.s),777);
+         int sends=w.t.sends,cancels=w.t.cancels;
+         for(int i=0;i<6;i++) NtTick(w,GetPointer(nf));
+         bool same=(w.t.sends==sends && w.t.cancels==cancels && w.g.st.n==1 && w.g.st.halted=="");
+         bool calls=(modes[k]==NT_FAILED ? sink.calls==NT_MAX_TRIES : sink.calls==6);
+         bool later=true;
+         if(modes[k]==NT_RETRY_LATER)
+           {
+            sink.mode=NT_SENT;
+            NtTick(w,GetPointer(nf));
+            later=(sink.Count("PENDING PLACED")==1);
+           }
+         Check(placed && same && calls && later,StringFormat("mode %d dir %d: a failing or throttled notification changes no decision and sends no order; retries are bounded",modes[k],dir));
+        }
+  }
+
+void Scenario_notify_manual_foreign_unreadable_silent(void)
+  {
+   for(int d=0;d<2;d++)
+     {
+      int dir=(d==0 ? 1 : -1);
+      CRegWorld r;
+      r.Build(dir,(d==0 ? 2005.0 : 1995.0),EX_AUTH_PHRASE);
+      CNtFakeSink sink;
+      CNtNotifier nf;
+      NtBind(nf,sink,GetPointer(r.w.s),778);                   // another magic: the records of this robot are not owned by this notifier
+      r.obs=GetPointer(nf);
+      r.reg.obs=GetPointer(nf);
+      r.Tick();
+      bool foreign=(sink.n==0);
+      RegClean(r.login);
+      CRegWorld m;
+      m.Build(dir,(d==0 ? 2005.0 : 1995.0),EX_AUTH_PHRASE);
+      CNtFakeSink sink2;
+      CNtNotifier nf2;
+      NtBind(nf2,sink2,GetPointer(m.w.s),777);
+      m.obs=GetPointer(nf2);
+      m.reg.obs=GetPointer(nf2);
+      m.x.position.identifier=99;                              // a manual position
+      m.x.position.ticket=99;
+      m.x.position.magic=0;
+      SEnOrder manual=m.w.t.orders[0];                         // and a manual pending order
+      manual.ticket=9001;
+      manual.magic=0;
+      manual.state=EN_OS_ACTIVE;
+      m.w.t.orders[m.w.t.n_orders]=manual;
+      m.w.t.n_orders++;
+      m.Tick();
+      bool manual_quiet=(sink2.Count("POSITION PARTIAL")+sink2.Count("POSITION MODIFIED")+sink2.Count("POSITION CLOSED")+sink2.Count("PENDING")==0);
+      Check(foreign && manual_quiet,StringFormat("dir %d: a foreign magic, a manual position and a manual pending order never notify",dir));
+      RegClean(m.login);
+     }
+  }
+
+void Scenario_notify_restart_repeats_nothing(void)
+  {
+   for(int d=0;d<2;d++)
+     {
+      int dir=(d==0 ? 1 : -1);
+      CWorld w;
+      bool placed=w.Placed(dir);
+      CNtFakeSink sink;
+      CNtNotifier nf;
+      NtBind(nf,sink,GetPointer(w.s),777);
+      NtTick(w,GetPointer(nf));
+      bool one=(sink.n==1);
+      LC_Release(GetPointer(w.s),w.g.st);
+      CEnFakeStore s2;
+      CloneDisk(w.s,s2);
+      CNtNotifier n2;
+      NtBind(n2,sink,GetPointer(s2),777,true);                 // the startup sweep only remembers
+      SLcState st2;
+      string notes;
+      LC_Startup(w.cfg,GetPointer(w.t),GetPointer(s2),GetPointer(s2),false,st2,notes,NULL,GetPointer(n2));
+      n2.baseline=false;
+      string t;
+      for(int i=0;i<3;i++) LC_Tick(w.cfg,GetPointer(w.t),GetPointer(s2),st2,0,0,t,NULL,GetPointer(n2));
+      bool same=(sink.n==1);
+      w.t.orders[0].state=EN_OS_FILLED;
+      w.t.orders[0].position_id=4242;
+      LC_Tick(w.cfg,GetPointer(w.t),GetPointer(s2),st2,0,0,t,NULL,GetPointer(n2));
+      // an event during the downtime is not announced: a fill that already exists at the start is only remembered
+      CWorld x;
+      bool placed2=x.Placed(dir);
+      x.t.orders[0].state=EN_OS_FILLED;
+      x.t.orders[0].position_id=4242;
+      LC_Release(GetPointer(x.s),x.g.st);
+      CNtFakeSink sink3;
+      CNtNotifier n3;
+      NtBind(n3,sink3,GetPointer(x.s),777,true);
+      SLcState st3;
+      LC_Startup(x.cfg,GetPointer(x.t),GetPointer(x.s),GetPointer(x.s),false,st3,notes,NULL,GetPointer(n3));
+      n3.baseline=false;
+      LC_Tick(x.cfg,GetPointer(x.t),GetPointer(x.s),st3,0,0,t,NULL,GetPointer(n3));
+      Check(placed && placed2 && one && same && sink.Count("POSITION OPENED")==1 && sink.n==2 && sink3.n==0 && Has(notes,"FILLED_UNMANAGED"),
+            StringFormat("dir %d: a restart repeats nothing, a new fact is announced, a fact of the downtime is only logged",dir));
+     }
+  }
+
 void OnStart()
   {
    Print("T019 ENTRY LIFECYCLE TEST: fake transport and fake store only; no terminal read, no order, no file.");
@@ -1514,6 +1937,18 @@ void OnStart()
    Scenario_managed_manual_foreign_and_synthetic_untouched();
    Scenario_managed_failures_block_and_lock_at_the_level();
    Scenario_managed_slots_released_and_capacity();
+   Scenario_direction_cancel_only_opposite_records();
+   Scenario_opposite_signal_cancel_per_record();
+   Scenario_direction_unknown_data_proves_nothing();
+   Scenario_direction_cancel_leaves_positions_and_foreign();
+   Scenario_direction_cancel_uncertain_halts_no_retry();
+   Scenario_notify_pending_placed_then_filled_once();
+   Scenario_notify_unproven_order_send_is_silent();
+   Scenario_notify_removed_pending_once();
+   Scenario_notify_partial_modified_closed_are_distinct();
+   Scenario_notify_failure_changes_no_decision();
+   Scenario_notify_manual_foreign_unreadable_silent();
+   Scenario_notify_restart_repeats_nothing();
    PrintFormat("T019 ENTRY LIFECYCLE TEST finished: %d passed, %d failed",g_pass,g_fail);
   }
 

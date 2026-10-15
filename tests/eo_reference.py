@@ -66,6 +66,16 @@ class Quote:
     time: int = 0
 
 
+@dataclass
+class Facts:
+    """what the step knows about the direction (the lifecycle evaluates it per record): unknown or incomplete data is valid=False / direction 0 and proves nothing"""
+    valid: bool = False
+    ctx_direction: int = 0
+    signal_direction: int = 0
+    signal_id: str = ''
+    time: int = 0
+
+
 RISK_SOURCE_AMOUNT, RISK_SOURCE_DEMO_BALANCE_PCT = 0, 1
 RISK_PCT_DEMO = 1.0                         # fixed: the demo policy is 1% and nothing else; it is NOT a client confirmation for live (D2)
 
@@ -127,12 +137,14 @@ class Orchestrator:
         self.handled = []
         self.halted = ''
         self.signals = 0                    # fake requests accepted
+        self.facts = Facts()                # refreshed by every step
 
     def defect(self):
         """a data defect or a recovery: the next successful build starts a new baseline (an old signal is never revived)"""
         self.rebase = True
 
     def step(self, cfg, mk, feed_ok, ob, broken, cut, tr, store, pre_send=None):
+        self.facts = Facts()
         if not feed_ok or ob is None:
             self.defect()
             return Outcome('FEED_NOT_OK', 'no confirmed data; the baseline restarts with the next successful build')
@@ -143,6 +155,9 @@ class Orchestrator:
         if self.rebase or self.baseline == 0:
             self.baseline = max(self.baseline, cut)
             self.rebase = False
+        c = ob.context
+        if c is not None and c.ready and c.reliable and c.selected and c.direction in (1, -1):         # the context is KNOWN: only then does a direction prove a change
+            self.facts = Facts(True, c.direction, 0, '', mk.now())
         if self.halted:
             return Outcome('HALTED', self.halted)
         bad = unset_config(cfg)
@@ -174,6 +189,8 @@ class Orchestrator:
         r1, geo = sp.geometry(sel, mkt, ob, broken, cut)
         if geo is None:
             return Outcome('NO_PLAN', r1.reason, spb=r1)
+        if self.facts.valid:
+            self.facts.signal_direction, self.facts.signal_id = ob.context.direction, r1.signal_id          # a live signal exists in this step
         if r1.signal_id in self.handled:
             return Outcome('ALREADY_HANDLED', r1.signal_id, spb=r1)
         buy = ob.context.direction == 1

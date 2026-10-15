@@ -99,6 +99,11 @@ InpM15RightBars=2
 InpCancelOnSessionEnd=true
 InpCancelOnNewsBlock=true
 InpCancelOnDailyLimit=true
+; [CONFIRMED S:29-30] cancel a pending order whose OWN direction is opposite to the KNOWN H4 context (direction change) or when a live signal of the opposite direction exists. Judged per record; unknown data proves nothing.
+InpCancelOnDirectionChange=true
+InpCancelOnOppositeSignal=true
+; [OFF] push notifications (S:100, S:173) for proven facts of this EA's own orders / positions. Needs the MetaQuotes ID in the terminal options; the owner turns it on. FAKE-entry texts start with [FAKE].
+InpPushNotifications=false
 ; [OFF] owner acknowledgement of a persisted halt; only at a start after the cause was read.
 InpAcknowledgeLifecycleHalt=false
 ; [OFF] registration and management of a filled entry. The FAKE entry transport never fills a real position; turning this on needs InpManagementAuthorisation=I_AUTHORISE_T011_DEMO_PARTIAL_CLOSE and InpManagementRPolicy=1 (the closing inputs below are already set).

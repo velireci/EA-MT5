@@ -274,13 +274,14 @@ public:
    long magic;
    string phrase;               // the standing authorisation phrase (EX_AUTH_PHRASE) given as an EA input
    int rpol;                    // EX_RPOL_R_GEOM
+   CLcObserver *obs;            // optional: PROVEN facts about the owned position (volume, SL, closed)
    CMhManager *manager;         // optional: after a confirmed registration the position is handed to the T011 driver (management inside the orchestrator)
    int provenance;              // MH_PROV_*; anything but BROKER refuses before any terminal read
    bool selftest;               // test file names only (a prefix); the production name is ESF_FileName
    string tries_id[LC_MAX];
    int tries[LC_MAX];
    int n_tries;
-   CMhRegistrar(void) {entry_store=NULL; exit_tr=NULL; magic=0; phrase=""; rpol=EX_RPOL_UNSET; manager=NULL; provenance=MH_PROV_UNSET; selftest=false; n_tries=0;}
+   CMhRegistrar(void) {entry_store=NULL; exit_tr=NULL; magic=0; phrase=""; rpol=EX_RPOL_UNSET; obs=NULL; manager=NULL; provenance=MH_PROV_UNSET; selftest=false; n_tries=0;}
    string Name(const long login,const ulong position_id) {return((selftest ? "VELO_T019_SELFTEST_" : "")+ESF_FileName(login,position_id));}
    // true only when the position list was readable, stable (two scans, the count unchanged) and holds no such position: the position is CLOSED, not merely unreadable. Tests override it.
    virtual bool Absent(const ulong position_id)
@@ -349,6 +350,7 @@ public:
         {
          if(Absent(idn.position_id))
            {
+            if(obs!=NULL) obs.OnClosed(rec.login,rec.signal_id,idn.position_id);
             SEaState cst;
             SEsRestore co;
             ESF_Load(name,idn,cst,co);
@@ -362,6 +364,7 @@ public:
          return(LC_SINK_PENDING);
         }
       if(pos.symbol!=idn.symbol || pos.magic!=magic || pos.type!=(rec.direction==1 ? 0 : 1)) {detail="OWNERSHIP_NOT_PROVEN: symbol, magic or direction of the live position differ from the record / configuration"; return(LC_SINK_REFUSED);}
+      if(obs!=NULL) obs.OnPosition(rec.login,rec.signal_id,idn.position_id,pos.volume,pos.sl);      // an OWNED position, read once, proven by identifier + magic + symbol + direction
       SEaState st;
       SEsRestore o;
       ESF_Load(name,idn,st,o);

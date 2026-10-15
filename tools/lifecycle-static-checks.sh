@@ -9,9 +9,10 @@ NEG=$(mktemp -d); trap 'rm -rf "$NEG"' EXIT
 BASE=3d1e084
 HD=src/include/EntryLifecycle.mqh
 MH=src/include/EntryManagementHandoff.mqh
+NT=src/include/EntryNotify.mqh
 EA=src/XauUsdEntryOrchestrator.mq5
 TS=src/tests/EntryLifecycleTest.mq5
-FILES="$HD $MH $EA $TS tests/lifecycle_reference.py tests/test_lifecycle.py tools/lifecycle-static-checks.sh"
+FILES="$HD $MH $NT $EA $TS tests/lifecycle_reference.py tests/test_lifecycle.py tools/lifecycle-static-checks.sh"
 
 echo "=== L1: files exist, ASCII only ==="
 for f in $FILES; do
@@ -29,15 +30,21 @@ for w in ('OrderSend', 'OrderCheck', 'EN_Place(', 'EN_PlaceLocked', '.Send(', 't
 assert sorted(re.findall(r'#include "([^"]+)"', t)) == ['EntryGate.mqh'], 'includes'
 assert not re.search(r'(?<![A-Za-z_])store\.(Lock|Unlock)\(', t), 'the per-signal lock belongs to the executor'
 assert t.count('lockstore.Lock(') == 1 and t.count('lockstore.Unlock(') == 1, 'one acquire and one release of the index lock'
-assert t.count('EN_Reconcile(') == 2 and t.count('EN_Cancel(') == 1 and t.count('TP_CancelDecision(') == 1, 'call sites'
+assert t.count('EN_Reconcile(') == 2 and t.count('EN_Cancel(') == 1 and t.count('TP_CancelDecision(') == 1 and t.count('LC_RecordEvents(') == 2, 'call sites (one definition, one use)'
 sweep = t[t.index('void LC_Sweep('):t.index('bool LC_Startup(')]
 assert 'EN_Reconcile(' in sweep and 'EN_Cancel(' not in sweep, 'the sweep only reconciles'
-tick = t[t.index('void LC_Tick('):]
+tick = t[t.index('void LC_TickEx('):t.index('void LC_Tick(')]
 assert 'int events=(due & enabled);' in tick, 'cancel events must be due AND enabled'
-assert tick.index('LC_Sweep(') < tick.index('if(events!=0)') < tick.index('TP_CancelDecision(') < tick.index('EN_Cancel('), 'order'
+assert tick.index('LC_Sweep(') < tick.index('if(events!=0 || (dir_enabled!=0 && facts.valid))') < tick.index('TP_CancelDecision(') < tick.index('EN_Cancel('), 'order'
 assert 'dec.status!=TP_CANCEL_REQUEST) continue;' in tick, 'cancel without a request'
 assert 'EN_RuntimeInit(rt)' in tick and tick.index('EN_RuntimeInit(rt)') < tick.index('EN_Cancel('), 'fresh runtime per cancel'
-assert 'TP_CancelDecision(true,open_ids[i],false,events,dec)' in tick, 'cancel decision inputs'
+assert 'TP_CancelDecision(true,open_ids[i],false,events|LC_RecordEvents(cfg,tr,store,s.login,open_ids[i],facts,dir_enabled),dec)' in tick, 'cancel decision inputs: the global events plus the events of THIS record'
+rec = t[t.index('int LC_RecordEvents('):t.index('void LC_TickEx(')]
+for need in ('if(dir_enabled==0 || !facts.valid) return(0);', 'age<0 || age>cfg.quote_max_age', 'EN_Load(store,EN_FileName(login,sid),rec,why)!=1', 'rec.magic!=cfg.ea_magic', 'facts.ctx_direction==-rec.direction',
+             'facts.signal_direction==-rec.direction', 'facts.signal_id!=sid'):
+    assert need in rec, 'the per-record judgement lacks: ' + need
+assert 'EN_Cancel(' not in rec and 'tr.Cancel' not in rec and 'store.Write' not in rec, 'the judgement only reads'
+assert 'cancel_all' not in t.lower() and 'global direction' not in t.lower(), 'no global direction flag'
 assert 'CANCEL_NOT_CONFIRMED' in tick and 'r.outcome==EN_R_CANCELLED' in tick, 'an unconfirmed cancel halts'
 start = t[t.index('bool LC_Startup('):t.index('int LC_DueEvents(')]
 assert 'if(kind==LC_DAMAGED) {LC_Note(notes,s.halted); return(true);}' in start, 'a damaged file returns before anything is written'
@@ -99,10 +106,12 @@ assert 'if(InpManagementRegistration)' in conf and 'InpManagementAuthorisation!=
 assert 'g_registrar.provenance=(g_real_entry ? MH_PROV_BROKER : MH_PROV_SYNTHETIC);' in conf, 'the FAKE entry transport declares SYNTHETIC provenance; only the explicitly selected real one declares BROKER'
 assert conf.count('g_sink=GetPointer(g_registrar);') == 1 and 'g_sink=NULL;' in conf and 'g_registrar.exit_tr=GetPointer(g_xtr);' in conf and 'g_registrar.selftest=false;' in conf, 'the sink is set only inside the registration branch, with the read-only transport'
 assert 'int EnabledCancelEvents(void)' in ea and 'InpCancelOnSessionEnd ? TP_EV_SESSION_END : 0' in ea
-assert ea.count('LC_Tick(') == 1 and ea.count('LC_Startup(') == 1, 'one tick and one startup'
+assert ea.count('LC_TickEx(') == 1 and ea.count('LC_Tick(') == 0 and ea.count('LC_Startup(') == 1, 'one tick and one startup'
+assert 'input bool InpCancelOnDirectionChange=false;' in ea and 'input bool InpCancelOnOppositeSignal=false;' in ea, 'the direction events are off by default'
+assert 'EnabledDirectionEvents()' in ea and 'facts.valid=g_orch.facts.valid;' in ea, 'the facts of the last step reach the lifecycle'
 assert 'LC_Register(' not in ea, 'the EA never indexes after the fact: the gate hook does it before the send'
 assert 'CLcGuard g_guard;' in ea and 'CEnFakeFileStore g_lockstore;' in ea, 'guard and a dedicated lock store'
-assert 'LC_Startup(g_cfg.exec,g_trp,g_storep,g_lockp,InpAcknowledgeLifecycleHalt,g_guard.st,startup_notes,g_sink)' in ea and 'g_guard.st,due,enabled,notes,g_sink);' in ea, 'the registrar is the sink of startup and tick'
+assert 'LC_Startup(g_cfg.exec,g_trp,g_storep,g_lockp,InpAcknowledgeLifecycleHalt,g_guard.st,startup_notes,g_sink' in ea and 'g_guard.st,due,enabled,facts,EnabledDirectionEvents(),notes,g_sink,g_obs);' in ea and 'startup_notes,g_sink,g_obs);' in ea, 'the registrar is the sink and the notifier the observer of startup and tick'
 assert 'if(g_mgr_on) g_mgr.OnTimer();' in ea and 'g_mgr.OnQuote(t.bid,t.ask)' in ea and ea.count('g_mgr.OnQuote(') == 1 and ea.count('g_mgr.OnTimer(') == 1, 'the management runs on the quote loop and the timer only'
 assert 'void OnTick()' in ea and 'if(!g_mgr_on || g_mgr.n==0) return;' in ea, 'no quote work without a managed slot'
 assert 'g_registrar.manager=GetPointer(g_mgr);' in conf and 'g_mgr_on=true;' in conf and 'InpMgmtFilling==EX_FILL_UNSET' in conf and 'InpMgmtDeviation<0' in conf and 'InpMgmtFilterPolicy==EX_POL_UNSET' in conf, 'management is wired only inside the registration branch with its closing inputs explicit'
@@ -199,6 +208,46 @@ assert not bad, 'duplicate declaration: ' + '; '.join(bad[:5])
 PYEOF
 python3 -I "$NEG/l5b.py" $EA $TS && echo "  PASS the EA and the lifecycle test include no duplicate declaration" || { echo "  FAIL"; FAIL=1; }
 
+echo "=== L5c: the notifier only tells what is PROVEN and owned; the only terminal call is SendNotification; a failure changes nothing ==="
+cat > "$NEG/l7.py" <<'PYEOF'
+import re, sys
+t = re.sub(r'//[^\n]*', '', open(sys.argv[1], encoding='ascii').read())
+ea = re.sub(r'//[^\n]*', '', open(sys.argv[2], encoding='ascii').read())
+hd = re.sub(r'//[^\n]*', '', open(sys.argv[3], encoding='ascii').read())
+mh = re.sub(r'//[^\n]*', '', open(sys.argv[4], encoding='ascii').read())
+assert sorted(re.findall(r'#include "([^"]+)"', t)) == ['EntryLifecycle.mqh'], 'includes'
+for w in ('OrderSend', 'OrderCheck', 'EN_Place', 'EN_Cancel', 'EN_Reconcile', 'ETD_', 'EX_Process', 'ESF_', 'FileOpen', 'FileWrite', 'FileDelete', 'PositionClose', 'TP_CancelDecision', 'GlobalVariable'):
+    assert w not in t, 'forbidden: ' + w
+assert t.count('SendNotification(') == 1, 'the one terminal call'
+push = t[t.index('class CNtPushSink'):t.index('class CNtNotifier')]
+assert 'SendNotification(' in push and 'n>=8' in push and 'now-stamps[n-1]<1000' in push and 'return(NT_RETRY_LATER)' in push, 'the real sink keeps its own margin below the terminal limits'
+nf = t[t.index('class CNtNotifier'):]
+assert 'rec.magic==magic && rec.symbol==symbol' in nf, 'ownership by magic and symbol'
+assert nf.count('Load(login,sid,rec)') == 3, 'every observation loads and filters the record first'
+assert 'if(IsDone(key)) return(true);' in nf and 'if(baseline) {MarkDone(key); return(true);}' in nf, 'once per key; the baseline only remembers'
+assert nf.index('if(IsDone(key)) return(true);') < nf.index('sink.Send('), 'dedupe before the send'
+assert 'NT_MAX_TRIES' in nf and 'if(st==NT_RETRY_LATER) return(false);' in nf, 'bounded retries; a throttled send does not consume attempts'
+assert 'verdict==LC_V_OPEN' in nf and 'verdict==LC_V_FILLED' in nf and 'removed_kind==1 || removed_kind==2' in nf, 'pending placed / filled / removed come from the reconcile verdict'
+assert 'volume<lvol[k]-1e-9' in nf and 'MathAbs(sl-lsl[k])>1e-9' in nf and 'POSITION PARTIAL CLOSE' in nf and 'POSITION MODIFIED' in nf and 'POSITION CLOSED' in nf, 'partial, modification and final close are distinct events'
+assert 'if(ok) {lvol[k]=volume; lsl[k]=sl;}' in nf, 'a position observation is completed only when its events are settled'
+# the observer is told about facts; it never receives a way to act
+obs = hd[hd.index('class CLcObserver'):hd.index('class CLcFillSink')]
+assert 'virtual void OnVerdict(' in obs and 'virtual void OnPosition(' in obs and 'virtual void OnClosed(' in obs and 'CEnTransport' not in obs and 'CEnStore' not in obs, 'the observer interface has no handle to act'
+assert hd.count('obs.OnVerdict(') == 2 and 'obs!=NULL' in hd, 'the lifecycle reports the verdict of the sweep and the confirmed cancel'
+assert mh.count('obs.OnPosition(') == 1 and mh.count('obs.OnClosed(') == 1, 'the registrar reports an OWNED position once and a proven absence once'
+assert mh.index('pos.magic!=magic') < mh.index('obs.OnPosition('), 'the position is reported only after its ownership is proven'
+assert mh.index('if(Absent(idn.position_id))') < mh.index('obs.OnClosed('), 'a close is reported only when the absence is proven'
+# the EA
+assert 'input bool InpPushNotifications=false;' in ea, 'notifications are off by default'
+cf = ea[ea.index('if(InpPushNotifications)'):ea.index('if(InpPushNotifications)') + 700]
+assert 'if(InpEaMagic<=0) return(false);' in cf and 'g_notify.magic=InpEaMagic;' in cf and 'g_obs=GetPointer(g_notify);' in cf and 'g_registrar.obs=g_obs;' in cf, 'the notifier is bound to this EA magic'
+assert 'g_notify.prefix=(g_real_entry ? "" : "[FAKE] ");' in cf, 'FAKE texts are labelled'
+init = ea[ea.index('int OnInit()'):ea.index('void OnDeinit(')]
+assert init.index('g_notify.baseline=true;') < init.index('LC_Startup(') < init.index('g_notify.baseline=false;'), 'the startup sweep only remembers'
+assert 'SendNotification' not in ea, 'the EA never calls the terminal itself'
+PYEOF
+python3 -I "$NEG/l7.py" $NT $EA $HD $MH && echo "  PASS one terminal call, ownership filter, once per key, baseline, bounded retries, proven facts only, distinct partial / modified / closed, no handle to act" || { echo "  FAIL"; FAIL=1; }
+
 echo "=== L5: protected modules are untouched since $BASE ==="
 for p in src/include/EntryExecutor.mqh src/include/EntryTransport.mqh src/include/EntryTransportFake.mqh src/include/EntryTransportReal.mqh src/include/EntryStateFile.mqh \
          src/include/EntryOrchestratorFeed.mqh src/include/ExposureReaderReal.mqh src/include/SetupPlanBridge.mqh src/include/TradePlanning.mqh \
@@ -293,8 +342,8 @@ mut ZA.mqh $EA 's/^input bool InpManagementRegistration=false;/input bool InpMan
 expect_assert "$NEG/l3.py" "$NEG/ZA.mqh" "registration on by default" "registration is off"
 mut ZB.mqh $EA 's/InpManagementAuthorisation!=EX_AUTH_PHRASE || //'
 expect_assert "$NEG/l3.py" "$NEG/ZB.mqh" "registration without the authorisation phrase" "needs the phrase"
-mut ZC.mqh $EA 's/LC_Tick(g_cfg.exec,g_trp,g_storep,g_guard.st,due,enabled,notes,g_sink);/LC_Tick(g_cfg.exec,g_trp,g_storep,g_guard.st,due,enabled,notes);/'
-expect_assert "$NEG/l3.py" "$NEG/ZC.mqh" "a tick that never reaches the registrar" "sink of startup and tick"
+mut ZC.mqh $EA 's/EnabledDirectionEvents(),notes,g_sink,g_obs);/EnabledDirectionEvents(),notes,g_obs);/'
+expect_assert "$NEG/l3.py" "$NEG/ZC.mqh" "a tick that never reaches the registrar" "sink and the notifier"
 
 mut ZD.mqh $HD 's/         else if(r2==LC_SINK_PENDING) LC_Note(notes,"FILL_REGISTRATION_PENDING "+id+": "+detail);/         else if(r2==LC_SINK_PENDING) {LC_Note(notes,"FILL_REGISTRATION_PENDING "+id+": "+detail); LC_Remove(s,i);}/'
 expect_assert "$NEG/l2.py" "$NEG/ZD.mqh" "a fill forgotten while its registration is pending" "only after the registration is CONFIRMED"
@@ -320,6 +369,30 @@ expect_assert "$NEG/l6.py" "$NEG/ZK.mqh" "a request path that bypasses the drive
 
 mut ZL.mqh $MH 's/      if(ms==LC_SINK_CONFIRMED) manager.Forget(rec.position_id);.*$/      \/\/ none/'
 expect_assert "$NEG/l6.py" "$NEG/ZL.mqh" "a slot that outlives its finished management" "releases its slot"
+
+mut ZM.mqh $HD 's/ \&\& facts.ctx_direction==-rec.direction) ev|=TP_EV_DIRECTION_CHANGE;/) ev|=TP_EV_DIRECTION_CHANGE;/'
+expect_assert "$NEG/l2.py" "$NEG/ZM.mqh" "a direction event that ignores the record's direction" "facts.ctx_direction==-rec.direction"
+mut ZN.mqh $HD 's/   if(dir_enabled==0 || !facts.valid) return(0);/   if(dir_enabled==0) return(0);/'
+expect_assert "$NEG/l2.py" "$NEG/ZN.mqh" "a direction event from unknown facts" "if(dir_enabled==0 || !facts.valid) return(0);"
+mut ZO.mqh $HD 's/   if(age<0 || age>cfg.quote_max_age) return(0);/   if(age<0) return(0);/'
+expect_assert "$NEG/l2.py" "$NEG/ZO.mqh" "a direction event from stale facts" "age<0 || age>cfg.quote_max_age"
+mut ZP.mqh $EA 's/^input bool InpCancelOnDirectionChange=false;/input bool InpCancelOnDirectionChange=true;/'
+expect_assert "$NEG/l3.py" "$NEG/ZP.mqh" "direction cancel on by default" "off by default"
+
+mut N1.mqh $NT 's/      if(IsDone(key)) return(true);/      if(false) return(true);/'
+expect_assert "$NEG/l7.py" "$NEG/N1.mqh $EA $HD $MH" "a notification repeated at every poll" "once per key"
+mut N2.mqh $NT 's/      return(rec.magic==magic \&\& rec.symbol==symbol);/      return(true);/'
+expect_assert "$NEG/l7.py" "$NEG/N2.mqh $EA $HD $MH" "a manual or foreign trade notified" "ownership by magic"
+mut N3.mqh $NT 's/      bool ok=SendNotification(text);/      bool ok=SendNotification(text); OrderSend();/'
+expect_assert "$NEG/l7.py" "$NEG/N3.mqh $EA $HD $MH" "an order call in the notifier" "forbidden: OrderSend"
+mut N4.mqh $NT 's/      if(n>=8 || (n>0 \&\& now-stamps\[n-1\]<1000)) return(NT_RETRY_LATER);/      \/\/ none/'
+expect_assert "$NEG/l7.py" "$NEG/N4.mqh $EA $HD $MH" "a push sink without its own rate margin" "own margin"
+mut N5.mqh $NT 's/      if(volume<lvol\[k\]-1e-9)/      if(volume!=lvol[k])/'
+expect_assert "$NEG/l7.py" "$NEG/N5.mqh $EA $HD $MH" "a partial close that is not a decrease" "distinct events"
+mut N6.mqh $MH 's/      if(obs!=NULL) obs.OnPosition(rec.login,rec.signal_id,idn.position_id,pos.volume,pos.sl);/      \/\/ none/'
+expect_assert "$NEG/l7.py" "$NT $EA $HD $NEG/N6.mqh" "positions never reported" "OWNED position once"
+mut N7.mqh $EA 's/^input bool InpPushNotifications=false;/input bool InpPushNotifications=true;/'
+expect_assert "$NEG/l7.py" "$NT $NEG/N7.mqh $HD $MH" "notifications on by default" "off by default"
 
 [ $FAIL -eq 0 ] && echo "LIFECYCLE STATIC CHECKS: ALL PASS (static only; MetaEditor compile and MT5 run UNVERIFIED)" || echo "LIFECYCLE STATIC CHECKS: FAILURES"
 exit $FAIL

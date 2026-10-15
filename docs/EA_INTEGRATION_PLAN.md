@@ -132,7 +132,7 @@ Të gjitha janë **vetëm për provë demo, jo miratim për live**; çdo "Pyetje
 
 ## Gjendja pas paketës së menaxhimit (15.10.2026; kompilim/MT5 UNVERIFIED)
 - **Përcaktuar dhe lidhur:** hyrja LIMIT `NEAR_SIDE` (pika 5), max 2 pozicione dhe 2% (pika 9), seanca/lajmet/spread si filtra (pika 11–13), anulimi në fund seance/lajm/limit ditor (pika 16), regjistrimi + menaxhimi 80/20 në 2R brenda orkestruesit me driver-in T011 ekzistues (pika 17–19, i çaktivizuar si parazgjedhje), transporti real DEMO i përgatitur (pika 22, i çaktivizuar, me frazë; dërgimi real nuk është i autorizuar nga ndërtimi).
-- **Përcaktuar nga klienti por ende jo i lidhur (teknike):** anulimi i pending-it në ndryshim drejtimi / sinjal të kundërt (S:29-30) dhe njoftimet push (S:100, S:173).
+- **Përcaktuar nga klienti dhe tani i lidhur (15.10.2026, kompilim/MT5 UNVERIFIED):** anulimi i pending-it në ndryshim drejtimi / sinjal të kundërt (S:29-30), për çdo rekord veç e veç (`InpCancelOnDirectionChange/OppositeSignal`), dhe njoftimet push (S:100, S:173) vetëm për fakte të provuara të objekteve të veta (`InpPushNotifications`, e fikur si parazgjedhje). Pa njoftim real gjatë ndërtimit.
 - **Mungesa reale (UNSET = BLOCK; burimi):** D1 2 apo 3 trade (S:69 kundrejt S:133); D2 baza e 1% (S:62-65); D3 rezervimi nga pending (Q11); D4–D7 burimi i kontekstit, MSS/FVG M15, SL, targeti (SPEC §6–7); D8 +0.2% kundrejt hyrja+kosto dhe TP=2R (S:51, S:58); D10 pozicionet në fund orari/lajm (S:91, S:99); D11 sinjal i kundërt me pozicion (S:36); D12 klasifikimi i trade-it (Q10); D13 filtri i range (S:38-39).
 - **Pasoja:** sinjali bllokohet nga D4–D7 (dhe madhësia/limitet nga D1–D3), menaxhimi 2R nga D8; EA nuk është robot i përfunduar.
 

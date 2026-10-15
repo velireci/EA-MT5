@@ -79,7 +79,7 @@ class Preset(unittest.TestCase):
         for n in ('InpContextSource', 'InpM15Level', 'InpFvgTiming', 'InpCandidate', 'InpSlRule', 'InpSlBuffer', 'InpTargetRule', 'InpRiskSource', 'InpPendingPolicy', 'InpPendingRiskPolicy',
                   'InpMaxTrades', 'InpDailyResultFormula'):
             self.assertEqual(LABELS[n], 'DEMO-PROPOSAL', n)
-        for n in ('InpEntryEdge', 'InpLotCap', 'InpMaxPositions', 'InpSessionClock', 'InpNewsCalendar', 'InpDailyHistoryBridge'):
+        for n in ('InpEntryEdge', 'InpLotCap', 'InpMaxPositions', 'InpSessionClock', 'InpNewsCalendar', 'InpDailyHistoryBridge', 'InpCancelOnDirectionChange', 'InpCancelOnOppositeSignal'):
             self.assertEqual(LABELS[n], 'CONFIRMED', n)
         text = read('src', 'presets', 'XauUsdEntryOrchestrator_demo_fake.set')
         self.assertIn('NOTHING HERE IS A CLIENT APPROVAL FOR LIVE', text)

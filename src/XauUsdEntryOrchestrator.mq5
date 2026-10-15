@@ -9,13 +9,14 @@
 //   A filled order is registered with the existing T011 executor and then managed by the T011 driver inside this EA (OnTick = the 2R level, OnTimer = reconcile only) only when InpManagementRegistration is true;
 //   the registered fill stays in the lifecycle index until the T011 record is DONE or the position is proven closed (that index is the restart memory). Not proof of broker execution. UNVERIFIED: not compiled or run.
 #property strict
-#property version "1.09"
+#property version "1.11"
 #include "include/EntryOrchestratorFeed.mqh"
 #include "include/EntryTransportFake.mqh"
 #include "include/ExposureReaderReal.mqh"
 #include "include/EntryStateFile.mqh"
 #include "include/EntryLifecycle.mqh"
 #include "include/EntryManagementHandoff.mqh"
+#include "include/EntryNotify.mqh"
 #include "include/EntryTransportReal.mqh"   // compiled in, but selected ONLY by InpEntryTransport = BROKER_DEMO with the explicit phrase (default FAKE)
 #include "include/ExitTransportReal.mqh"    // compiled in, but selected ONLY by InpManagementTransport = BROKER_DEMO with the explicit phrase and confirmation (default READ_ONLY)
 
@@ -92,6 +93,9 @@ input int InpM15RightBars=2;
 input bool InpCancelOnSessionEnd=false;       // lifecycle: cancel an open (proven) pending order when the session filter reports CLOSED. false = never (owner decision)
 input bool InpCancelOnNewsBlock=false;        // lifecycle: ... when the news filter reports BLOCKED
 input bool InpCancelOnDailyLimit=false;       // lifecycle: ... when the T012 daily result says cancel_pending_due
+input bool InpCancelOnDirectionChange=false;  // lifecycle (S:29): cancel a pending order whose OWN direction is opposite to the KNOWN H4 context (per record; an unknown / incomplete context proves nothing)
+input bool InpCancelOnOppositeSignal=false;   // lifecycle (S:30): cancel a pending order when a live signal of the OPPOSITE direction to that order exists (per record)
+input bool InpPushNotifications=false;        // push notifications (S:100, S:173) for PROVEN facts of this EA's own orders / positions: pending placed (broker facts, never OrderSend=true), position opened, partial close, SL modified, final close, pending removed. Needs the MetaQuotes ID in the terminal; a failed notification changes nothing; FAKE-entry texts start with [FAKE]
 input bool InpAcknowledgeLifecycleHalt=false; // owner acknowledgement at the START: clears a persisted lifecycle halt and drops its unresolved ids (their records stay, the signals stay consumed). Never automatic
 input bool InpManagementRegistration=false;   // true = register a FILLED entry with the T011 executor automatically (the existing ETD_Register: ownership, initial SL, plan, never overwritten); false = report only
 input string InpManagementAuthorisation="";   // the T011 standing authorisation phrase (EX_AUTH_PHRASE); required when registration is on; the account must be a demo account (T011 gate)
@@ -176,6 +180,9 @@ CEnTransport *g_trp=NULL;          // the entry transport in use: g_tr (FAKE) un
 CEnStore *g_storep=NULL;
 CEnStore *g_lockp=NULL;
 bool g_real_entry=false;
+CNtPushSink g_push;                // the ONLY terminal call of the notifications is SendNotification inside this sink
+CNtNotifier g_notify;
+CLcObserver *g_obs=NULL;           // NULL = notifications off
 CMhManager g_mgr;                  // T011 management inside the orchestrator (the existing driver)
 bool g_mgr_on=false;
 COrchestrator g_orch;
@@ -200,6 +207,7 @@ void Status(const string text)
 bool Configure(void)
   {
    g_sink=NULL;
+   g_obs=NULL;
    g_mgr_on=false;
    g_real_entry=false;
    g_trp=GetPointer(g_tr);
@@ -243,6 +251,18 @@ bool Configure(void)
       g_registrar.manager=GetPointer(g_mgr);
       g_mgr_on=true;
       g_sink=GetPointer(g_registrar);
+     }
+   if(InpPushNotifications)
+     {
+      if(InpEaMagic<=0) return(false);                       // ownership = this magic; without it nothing can be told apart from a manual trade
+      g_notify.sink=GetPointer(g_push);
+      g_notify.store=g_storep;
+      g_notify.magic=InpEaMagic;
+      g_notify.symbol=_Symbol;
+      g_notify.prefix=(g_real_entry ? "" : "[FAKE] ");
+      g_notify.baseline=false;
+      g_obs=GetPointer(g_notify);
+      g_registrar.obs=g_obs;
      }
    // an unknown enum value (a preset or a hand-typed number) is refused here; it must never fall through to the manual exposure inputs
    if((int)InpExposureSource!=(int)EOI_EXPOSURE_EXPLICIT && (int)InpExposureSource!=(int)EOI_EXPOSURE_ACCOUNT_READ) return(false);
@@ -322,6 +342,11 @@ int EnabledCancelEvents(void)
    return((InpCancelOnSessionEnd ? TP_EV_SESSION_END : 0)|(InpCancelOnNewsBlock ? TP_EV_NEWS_BLOCK : 0)|(InpCancelOnDailyLimit ? TP_EV_DAILY_LIMIT : 0));
   }
 
+int EnabledDirectionEvents(void)
+  {
+   return((InpCancelOnDirectionChange ? TP_EV_DIRECTION_CHANGE : 0)|(InpCancelOnOppositeSignal ? TP_EV_OPPOSITE_SIGNAL : 0));
+  }
+
 // the two layers share ONE halt: whichever halts first stops new entries; the lifecycle halt is persisted
 void SyncHalts(void)
   {
@@ -351,7 +376,14 @@ void Lifecycle()
      }
    string notes="";
    if(g_mgr_on) g_mgr.OnTimer();                       // reconcile only (the driver's timer): a DONE slot is released by the sweep below
-   LC_Tick(g_cfg.exec,g_trp,g_storep,g_guard.st,due,enabled,notes,g_sink);
+   SLcFacts facts;
+   LC_FactsInit(facts);
+   facts.valid=g_orch.facts.valid;                      // the facts of the last step; the lifecycle judges them per record and ignores stale ones
+   facts.ctx_direction=g_orch.facts.ctx_direction;
+   facts.signal_direction=g_orch.facts.signal_direction;
+   facts.signal_id=g_orch.facts.signal_id;
+   facts.time=g_orch.facts.time;
+   LC_TickEx(g_cfg.exec,g_trp,g_storep,g_guard.st,due,enabled,facts,EnabledDirectionEvents(),notes,g_sink,g_obs);
    if(notes!="") Print("T019 LIFECYCLE | ",notes);
    SyncHalts();
   }
@@ -391,7 +423,10 @@ int OnInit()
    string startup_notes="";
    g_guard.Bind(g_storep);
    // exclusive ownership of the index comes FIRST (the existing lock mechanism); an instance that does not get it neither reads nor writes the index and never sends or cancels (the layer stays halted)
-   if(!LC_Startup(g_cfg.exec,g_trp,g_storep,g_lockp,InpAcknowledgeLifecycleHalt,g_guard.st,startup_notes,g_sink))
+   g_notify.baseline=true;                              // the startup sweep only REMEMBERS the facts: a restart repeats nothing
+   bool started=LC_Startup(g_cfg.exec,g_trp,g_storep,g_lockp,InpAcknowledgeLifecycleHalt,g_guard.st,startup_notes,g_sink,g_obs);
+   g_notify.baseline=false;
+   if(!started)
       Print("T019 LIFECYCLE startup: the account is not readable; the layer stays halted.");
    if(startup_notes!="") Print("T019 LIFECYCLE startup | ",startup_notes);
    if(g_guard.st.halted!="") g_orch.halted="LIFECYCLE: "+g_guard.st.halted;

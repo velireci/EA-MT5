@@ -689,6 +689,27 @@ void Scenario_cached_feed_market_recheck(void)
      }
   }
 
+void Scenario_facts_expose_direction_only_when_known(void)
+  {
+   for(int d=0;d<2;d++)
+     {
+      int dir=(d==0 ? 1 : -1);
+      CW w;
+      w.Init(dir);
+      CObs a;
+      a.Make(dir,2);
+      w.StepObs(a);
+      bool early=(w.o.facts.valid && w.o.facts.ctx_direction==dir && w.o.facts.signal_direction==0);
+      CObs b;
+      b.Make(dir,3);
+      w.StepObs(b);
+      bool signal=(w.o.facts.valid && w.o.facts.ctx_direction==dir && w.o.facts.signal_direction==dir && w.o.facts.signal_id!="");
+      w.StepObs(b,false);
+      bool lost=(!w.o.facts.valid && w.o.facts.ctx_direction==0 && w.o.facts.signal_direction==0);
+      Check(early && signal && lost,StringFormat("dir %d: the step publishes the known context, the live signal, and nothing when the data is not confirmed",dir));
+     }
+  }
+
 void OnStart()
   {
    Print("T016 ENTRY ORCHESTRATOR TEST: fake transport, fake store and a scripted market; no file, no terminal read, no order, no trade.");
@@ -710,6 +731,7 @@ void OnStart()
    Scenario_risk_budget_from_current_balance();
    Scenario_risk_base_failure_blocks();
    Scenario_cached_feed_market_recheck();
+   Scenario_facts_expose_direction_only_when_known();
    TestOffsetValidation();
    PrintFormat("T016 ENTRY ORCHESTRATOR TEST finished: %d passed, %d failed",g_pass,g_fail);
   }
