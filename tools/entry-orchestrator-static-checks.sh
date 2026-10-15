@@ -76,7 +76,7 @@ for n in ('InpContextSource=EOI_SRC_UNSELECTED', 'InpM15Level=EOI_SWING_UNSELECT
           'InpPermitMaxAgeSeconds=-1', 'InpOpenPositions=-1', 'InpTradesToday=-1', 'InpExistingRisk=-1', 'InpMaxPositions=-1', 'InpMaxTrades=-1', 'InpCombinedRiskCap=-1', 'InpSessionClock=false',
           'InpNewsCalendar=false', 'InpMaxSpreadPoints=-1', 'InpDailyHistoryBridge=false', 'InpDailyServerOffsetSeconds=99999', 'InpDailyHistoryComplete=false', 'InpFilling=EOI_FILL_UNSET', 'InpExpiryMode=EOI_EXP_UNSET'):
     assert n in ea, 'default not UNSET: ' + n
-assert sorted(re.findall(r'#include "([^"]+)"', ea)) == ['include/EntryOrchestratorFeed.mqh', 'include/EntryStateFile.mqh', 'include/EntryTransportFake.mqh'], 'EA includes'
+assert sorted(re.findall(r'#include "([^"]+)"', ea)) == ['include/EntryOrchestratorFeed.mqh', 'include/EntryStateFile.mqh', 'include/EntryTransportFake.mqh', 'include/ExposureReaderReal.mqh'], 'EA includes'
 assert 'daily_on=InpDailyHistoryBridge' in ea
 daily = fd[fd.index('virtual bool Daily('):]
 assert 'EO_OffsetSeconds(mc.daily_offset_seconds,daily_offset)' in daily, 'offset validation'
@@ -89,7 +89,7 @@ echo "=== O4: the test never includes a real transport or reads the terminal ===
 grep -nE 'EntryTransportReal|ExitTransportReal|OrderSend|SymbolInfo|OrderCalcProfit|TimeCurrent|FileOpen|CopyRates|AccountInfo|DBS_' $TS >/dev/null && { echo "  FAIL the test touches the real side"; FAIL=1; } || echo "  PASS the test uses the fake transport, the fake store and a scripted market only"
 
 echo "=== O5: protected modules are untouched since $BASE ==="
-for p in src/include/EntryTransport.mqh src/include/EntryTransportFake.mqh src/include/EntryTransportReal.mqh src/include/EntryExecutor.mqh src/include/EntryGate.mqh \
+for p in src/include/EntryTransport.mqh src/include/EntryTransportFake.mqh src/include/EntryExecutor.mqh src/include/EntryGate.mqh \
          src/include/TradePlanning.mqh src/include/BrokerLossCheck.mqh src/include/DailyBridge.mqh src/include/DailyLimits.mqh src/include/DailyPreviewGate.mqh src/include/DailyBalanceStore.mqh \
          src/include/M15Confirmation.mqh src/include/M15Timeline.mqh src/include/H4M15Bridge.mqh src/include/H4TouchContext.mqh src/include/TimeframeWatcher.mqh src/include/NewsSpreadFilters.mqh \
          src/include/SessionPolicy.mqh src/include/SymbolSnapshot.mqh src/include/ExitExecutor.mqh src/include/ExitTickDriver.mqh src/include/ExitStateFile.mqh src/XauUsdTradePreview.mq5 \

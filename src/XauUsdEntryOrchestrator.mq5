@@ -1,12 +1,13 @@
 // T016 ENTRY ORCHESTRATOR EA: H4/M15 observer flow (T004) -> SetupPlanBridge (T014) -> EntryGate (T015) -> EntryExecutor (T013) with a FAKE transport FIXED IN THIS DELIVERY.
 //   FAKE EXECUTION: a virtual request is logged and counted in memory; NOTHING is sent to the terminal. The real transport is NOT included in this file and is NOT selectable by any input.
 //   Market/account reads: closed bars, symbol / quote properties, OrderCalcProfit, calendar, deal history and T012 balance LOAD only. Only isolated FAKE entry records are written.
-//   Every source / selection / policy input is UNSET by default and UNSET blocks. Exposure and counters are EXPLICIT inputs (-1 = unknown), nothing is accounted here. Chart symbol only (incl. XAUUSD.fx).
+//   Every source / selection / policy input is UNSET by default and UNSET blocks. Exposure: EXPLICIT inputs by default (-1 = unknown) or the opt-in READ-ONLY account reader (T018: this EA magic, hedging account, pending policy explicit); the trade counter stays an explicit input. Chart symbol only (incl. XAUUSD.fx).
 //   FAKE entry records persist in VELO_T016_FAKE_ files. Baseline, halt and fake orders remain in memory; this is not complete orchestrator recovery or proof of broker execution.
 #property strict
-#property version "1.01"
+#property version "1.02"
 #include "include/EntryOrchestratorFeed.mqh"
 #include "include/EntryTransportFake.mqh"
+#include "include/ExposureReaderReal.mqh"
 #include "include/EntryStateFile.mqh"
 
 enum ENUM_EO_SOURCE {EOI_SRC_UNSELECTED=0,EOI_SRC_T003_RECONF_PROPOSAL=1,EOI_SRC_T002_TOUCH_AFTER_LOSS_PROPOSAL=2,EOI_SRC_T002_TOUCH_FIRST_ONLY_PROPOSAL=3};
@@ -16,6 +17,8 @@ enum ENUM_EO_CANDIDATE {EOI_CAND_UNSELECTED=0,EOI_CAND_SOLE_ELIGIBLE=2};
 enum ENUM_EO_EDGE {EOI_EDGE_UNSELECTED=0,EOI_EDGE_NEAR_SIDE=1,EOI_EDGE_FAR_SIDE=2};
 enum ENUM_EO_SL {EOI_SL_UNSELECTED=0,EOI_SL_BROKEN_LEVEL_PRICE_PLUS_BUFFER=1};
 enum ENUM_EO_TARGET {EOI_TGT_UNSELECTED=0,EOI_TGT_NONE_2R_MINIMUM=1};
+enum ENUM_EO_EXPOSURE {EOI_EXPOSURE_EXPLICIT=0,EOI_EXPOSURE_ACCOUNT_READ=1};
+enum ENUM_EO_PENDING {EOI_PENDING_UNSET=0,EOI_PENDING_COUNT_AS_POSITIONS=1,EOI_PENDING_IGNORE=2};
 enum ENUM_EO_FILLING {EOI_FILL_UNSET=0,EOI_FILL_RETURN=1};
 enum ENUM_EO_EXPIRY {EOI_EXP_UNSET=0,EOI_EXP_GTC=1,EOI_EXP_SECONDS=2};
 
@@ -33,6 +36,8 @@ input double InpModelTolerance=-1;           // 0..1; -1 = UNSET
 input long InpMaxQuoteAgeSeconds=-1;         // -1 = UNSET
 input long InpGateMaxAgeSeconds=-1;          // age of the gate evidence; -1 = UNSET
 input long InpPermitMaxAgeSeconds=-1;        // executor permit age; -1 = UNSET
+input ENUM_EO_EXPOSURE InpExposureSource=EOI_EXPOSURE_EXPLICIT; // ACCOUNT_READ = READ-ONLY: open positions (+ pending per policy) and the loss-at-SL risk of THIS EA magic on a HEDGING account; the two explicit exposure inputs below are then IGNORED (no fallback)
+input ENUM_EO_PENDING InpPendingPolicy=EOI_PENDING_UNSET; // ACCOUNT_READ only: whether an owned pending order reserves a position (owner policy; UNSET blocks)
 input long InpOpenPositions=-1;              // explicit external snapshot; -1 = unknown (blocks)
 input long InpTradesToday=-1;                // also the trade counter of the daily check; -1 = unknown
 input double InpExistingRisk=-1;             // -1 = unknown
@@ -202,6 +207,16 @@ void Poll()
   {
    bool feed_ok=false;
    if(!g_feed.Poll(feed_ok)) return;                // nothing new on the closed bars
+   if(InpExposureSource==EOI_EXPOSURE_ACCOUNT_READ)
+     {
+      SExResult ex;
+      CExRealPort port;
+      EX_Compute(InpEaMagic,_Symbol,(int)InpPendingPolicy,GetPointer(port),ex);      // InpPendingPolicy: 1 = EX_PEND_COUNT, 2 = EX_PEND_IGNORE, 0 = UNSET
+      g_cfg.open_positions=EX_GatePositions(ex);
+      g_cfg.existing_risk=EX_GateRisk(ex);
+      PrintFormat("T018 EXPOSURE source=ACCOUNT_READ (read-only) ok=%d reason=%s owned+reserved=%I64d pending=%I64d foreign_positions=%I64d foreign_pending=%I64d risk_known=%d risk=%.2f %s",
+                  (int)ex.ok,ex.reason,ex.open_positions,ex.pending,ex.foreign_positions,ex.foreign_pending,(int)ex.risk_known,ex.existing_risk,ex.risk_reason);
+     }
    SEoOutcome out;
    g_orch.Step(g_cfg,GetPointer(g_market),feed_ok,g_feed.st,g_feed.f,g_feed.broken,g_feed.cut,GetPointer(g_tr),GetPointer(g_store),out);
    string text=out.status+" | "+out.reason+" | cut "+TimeToString(g_feed.cut,TIME_DATE|TIME_MINUTES)+" | baseline "+TimeToString((datetime)g_orch.baseline,TIME_DATE|TIME_MINUTES)+
