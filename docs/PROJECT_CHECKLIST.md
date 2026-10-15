@@ -1,10 +1,12 @@
 # Checklist qendrore e projektit
 
-Përditësuar më 14.10.2026. Pamje e evidencës së njohur, jo kontroll i ri i GitHub. Nuk matet përqindja nga numri i testeve. Programuar ≠ testuar plotësisht ≠ validuar nga klienti.
+Përditësuar më 15.10.2026. Pamje e evidencës së njohur, jo kontroll i ri i GitHub. Nuk matet përqindja nga numri i testeve. Programuar ≠ testuar plotësisht ≠ validuar nga klienti.
 
 ## Ku jemi
 
 H4 → M15 → FVG → kthim është ndërtuar dhe vëzhguar në replay. T005 u dorëzua te 67f02e5; Codex Python 39/0, MetaEditor 0/0; pronari MT5 572/0. T006 (sizing i pastër me buxhet risku të dhënë) te 559794a: Codex Python 47/0 dhe MetaEditor 0/0; pronari MT5 14.10.2026 18:42:14: 710 passed, 0 failed (të përcjella, jo ekzekutim i Claude). Moduli i pastër është verifikuar; integrimi me brokerin jo. T007 (plan i pastër, kontrolle lejeje dhe kërkesë anulimi, pa urdhra) është programuar me teste Python 34/0 të ekzekutuara nga Claude dhe kontrolle statike; kompilimi MetaEditor dhe MT5 janë UNVERIFIED dhe moduli nuk është i lidhur. Robot që hap dhe menaxhon urdhra: ende jo.
+
+T010–T012 (dega PR#4, evidencë e përcjellë nga Codex dhe pronari, jo ekzekutime të Claude): filtrat e lajmeve/spread-it, ndarja 80/20 me aktivizim dhe pajtim, kufijtë ditorë, faktet e historikut dhe ura faktet → kontroll ditor janë module të pastra; ura te 1761b51 ka Codex Python 12/0, MetaEditor 0/0 dhe pronari MT5 323/0 (15.10.2026 11:49:58). Asnjë nuk është i lidhur me lejen ose EA; politikat strategjike mbeten të hapura (shih fund).
 
 ## T001 — Themelet
 - [x] Themelet dhe kompilimi 0/0 në versionin e provuar.
@@ -90,15 +92,18 @@ Status: moduli i pastër i sizing-ut i verifikuar (Python, MetaEditor, MT5); 10 
 - [ ] Anulimi në ndryshim drejtimi/sinjal të kundërt
 - [ ] Anulimi në fund seance dhe përpara lajmeve
 
-### 5. Menaxhimi 80% / 20% — PA NISUR
-- [ ] Mbyllja e 80% në 2R dhe kufijtë e volumit
+### 5. Menaxhimi 80% / 20% — NISUR (vetëm module të pastra T011; asnjë urdhër)
+- [x] Ndarja 80/20 në hapa të plotë, aktivizimi në 2R si makinë gjendjesh dhe pajtimi me snapshot (module të pastra; shih T011 më poshtë)
+- [ ] Ekzekutuesi real që regjistron biletat e urdhrave, harta kërkesë→urdhër dhe rinisja
+- [ ] Mbyllja e 80% në 2R në broker dhe politika kur ndarja nuk realizohet (SPLIT_POLICY_UNSET)
 - [ ] Pajtimi i entry plus kosto me +0.2%
 - [ ] Mbetja deri te TP/SL, pa trailing
 
 ### 6. Kufijtë ditorë dhe ekspozimi — NISUR (vetëm kontrolli i pastër T007; kufijtë vijnë si numra ose UNSET)
 - [x] Kontrolli i pozicioneve, trade/ditë dhe riskut të kombinuar me kufij të furnizuar; kufi UNSET bllokon (POLICY_UNSET); kufijtë e testit (3, 5, 5000) janë arbitrarë, jo të klientit (Python)
 - [ ] Pajtimi i kufirit 2 apo 3 trade
-- [ ] Ndalimi pas fitoreje/humbjeve dhe kufiri ditor
+- [x] Kontrolli i pastër ditor (fitore ≥1, 2 humbje radhazi, −2%, kufi i furnizuar) dhe ura nga faktet e historikut; politikat UNSET bllokojnë (T012 më poshtë)
+- [ ] Ndalimi pas fitoreje/humbjeve dhe kufiri ditor si politikë e pranuar: formula e rezultatit, përkufizimi trade/win/loss/breakeven, balance_start
 - [ ] Pending risk dhe ndarja nga tregtitë manuale
 
 ### 7. Rikuperimi dhe siguria operative — PA NISUR
@@ -180,3 +185,21 @@ Status: integrim vetëm për kontroll, jo sinjal ose urdhër; risku dhe ekspozim
 - [ ] Pronari: MT5 T009_SessionTest.
 - [ ] Pronari: preview opsional SESSION_TIRANE_CLOCK, verifikimi i UTC/Tirane dhe portës së seancës.
 Mbetet: orari nuk dërgon ende anulime ose mbyllje; persistence/catchup/lajmet të pandërtuara.
+
+## T010 — lajmet dhe spread-i
+- [x] Filtra të pastër (lajme USD high ±30 min, serveri; spread me prag të furnizuar, -1 = UNSET) me lexues të hollë kalendari në EA; MANUAL mbetet parazgjedhja.
+- [ ] Verifikimi MT5/live i kalendarit dhe pragu i spread-it (vendim i hapur).
+
+## T011 — daljet 80/20 (vetëm module të pastra, pa urdhra)
+- [x] ExitSplit: Codex Python 9/0, MetaEditor 0/0, pronari MT5 SplitTest 234/0 (e3abea2).
+- [x] ExitActivation: Codex Python 12/0, MetaEditor 0/0, pronari MT5 1010/0 (d83426a).
+- [x] ExitReconciliation: pronari MT5 951/0, Codex kompilim 0/0 (të përcjella).
+- [ ] ExitSnapshotAdapter (vetëm lexim): kompilimi dhe T011_AdapterTest/diagnostiku në MT5 — UNVERIFIED në këtë dokument.
+- [ ] Hapat e hapur: ekzekutuesi që regjistron biletat, harta reale kërkesë→urdhër, rinisja, politikat e daljes. T011 mbetet pjesërisht i hapur.
+
+## T012 — kufijtë ditorë
+- [x] DailyLimits (pronari MT5 604/0) dhe DailyPreviewGate (200/0); preview hipotetik DAILY_LOSS_LIMIT i konfirmuar nga pronari.
+- [x] DailyHistory vetëm fakte: HistoryTest 196/0; diagnostiku real READY me 2 deal-e manuale të përjashtuara (pronari). complete=false, formula UNSET, balance_start UNKNOWN mbeten të hapura në atë shtresë.
+- [x] Ura faktet → DL_Check (1761b51): Codex Python 12/0, MetaEditor 0/0, pronari MT5 323 passed/0 failed (15.10.2026 11:49:58). Moduli i pastër; jo i lidhur me lejen ose EA.
+- [ ] Vendime klienti/pronari: formula e rezultatit; përkufizimi trade/win/loss/breakeven dhe pjesëmbyllje; 2 apo 3 trade; si merret balance_start; pronësia (mbyllje manuale, magic i përbashkët, pozicione nga dita e mëparshme); kush pohon complete; DST i brokerit.
+- [ ] Teknike të hapura: reset në mesnatë, persistence/restart, lidhja me lejen. T012 NUK është i mbyllur.
