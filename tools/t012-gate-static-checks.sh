@@ -107,6 +107,10 @@ for f in $NEWFILES $EA; do
 done
 echo "  INFO ASCII-only checked for every integration file"
 
+RESERVED='final|override|sealed|explicit|delete|new|virtual|template|typename|operator|this|static|class|struct|union|enum|public|private|protected|extern|input|sinput|void|auto|namespace|using|typedef|interface|implements'
+for f in $HDR $TST; do
+  if grep -nE "\b(bool|int|long|double|string|ulong|uint|datetime|color|char|short|uchar|ushort|float)\s+($RESERVED)\b\s*(=|;|,|\))" "$f" >/dev/null; then echo "  FAIL $f declares a variable with a reserved MQL5 word (Codex compile of c64805f: 'final')"; FAIL=1; else echo "  PASS $f: no variable is named with a reserved MQL5 word"; fi
+done
 echo "=== S7: the verified modules are identical to $BASE ==="
 if git cat-file -e "$BASE^{commit}" 2>/dev/null; then
   for p in docs/PROJECT_CHECKLIST.md docs/PROJECT_PROGRESS.html src/include/DailyLimits.mqh src/include/SessionPolicy.mqh src/include/TradePlanning.mqh src/include/NewsSpreadFilters.mqh src/include/BrokerLossCheck.mqh src/include/ExitSplit.mqh src/include/ExitActivation.mqh src/include/ExitReconciliation.mqh src/include/ExitSnapshotAdapter.mqh tests/t012_daily_reference.py; do
@@ -146,6 +150,8 @@ names = [n for n, _ in re.findall(r'^input\s+\w+\s+(Inp\w+)\s*=\s*([^;]+);', ea,
 keys = [l.split('=', 1)[0] for l in open(sys.argv[2], encoding='ascii') if l.strip() and not l.startswith(';')]
 sys.exit(0 if sorted(keys) == sorted(names) else 1)
 PYEOF
+cp $TST "$NEG/Reserved.mq5"; sed -i 's/bool final_ok=/bool final=/' "$NEG/Reserved.mq5"
+grep -nE "\b(bool|int|long|double|string)\s+($RESERVED)\b\s*(=|;|,|\))" "$NEG/Reserved.mq5" >/dev/null && echo "  PASS a variable named final is detected" || { echo "  FAIL reserved-word control"; FAIL=1; }
 cp $HDR "$NEG/Unbalanced.mqh"; echo "void x(){" >> "$NEG/Unbalanced.mqh"
 python3 tools/t001-check-balance.py "$NEG/Unbalanced.mqh" >/dev/null 2>&1 && { echo "  FAIL unbalanced brace not detected"; FAIL=1; } || echo "  PASS unbalanced brace detected"
 

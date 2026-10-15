@@ -42,16 +42,16 @@ void RunRows(void)
       bool allowed=(ev ? d.entry_allowed : true);
       string reasons=(ev ? DL_Joined(d) : "");
       bool cancel=(ev ? d.cancel_pending_due : false);
-      bool final=DG_FinalPreview(R_LOSSOK[i]==1,R_PERMIT[i]==1,ev,d.entry_allowed);
+      bool final_ok=DG_FinalPreview(R_LOSSOK[i]==1,R_PERMIT[i]==1,ev,d.entry_allowed);
       Check((int)ev==X_EVAL[i],tag+"evaluated "+(string)ev);
       Check((int)allowed==X_ALLOWED[i],tag+"daily allowed "+(string)allowed+" ("+reasons+")");
       Check(reasons==X_REASONS[i],tag+"daily reasons '"+reasons+"' expected '"+X_REASONS[i]+"'");
-      Check((int)final==X_FINAL[i],tag+"final preview "+(string)final);
+      Check((int)final_ok==X_FINAL[i],tag+"final preview "+(string)final_ok);
       Check((int)cancel==X_CANCEL[i] && (!ev || (int)d.daily_limit_reached==X_CANCEL[i]),tag+"cancel_pending_due (diagnostic) "+(string)cancel);
       if(ev && !d.entry_allowed)
-         Check(!final,tag+"a daily BLOCK reaches the final result");
+         Check(!final_ok,tag+"a daily BLOCK reaches the final result");
       if(!ev)
-         Check(final==(R_LOSSOK[i]==1 && R_PERMIT[i]==1),tag+"MANUAL: the final result is the existing one");
+         Check(final_ok==(R_LOSSOK[i]==1 && R_PERMIT[i]==1),tag+"MANUAL: the final result is the existing one");
      }
   }
 void TestTruthTable(void)
