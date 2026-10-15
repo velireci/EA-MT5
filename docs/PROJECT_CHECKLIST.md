@@ -194,12 +194,13 @@ Mbetet: orari nuk dërgon ende anulime ose mbyllje; persistence/catchup/lajmet t
 - [x] ExitSplit: Codex Python 9/0, MetaEditor 0/0, pronari MT5 SplitTest 234/0 (e3abea2).
 - [x] ExitActivation: Codex Python 12/0, MetaEditor 0/0, pronari MT5 1010/0 (d83426a).
 - [x] ExitReconciliation: pronari MT5 951/0, Codex kompilim 0/0 (të përcjella).
-- [ ] ExitSnapshotAdapter (vetëm lexim): kompilimi dhe T011_AdapterTest/diagnostiku në MT5 — UNVERIFIED në këtë dokument.
+- [x] ExitSnapshotAdapter (vetëm lexim, ca3bd57): Codex Python 10/0, MetaEditor AdapterTest/diagnostik 0/0; pronari MT5 15.10.2026 10:42:58: 391 passed, 0 failed (të përcjella). NUK provon hartën reale request→closing order dhe as pajtimin real: harta e ekzekutuesit mbetet input (ekzekutuesi nuk është ndërtuar).
 - [ ] Hapat e hapur: ekzekutuesi që regjistron biletat, harta reale kërkesë→urdhër, rinisja, politikat e daljes. T011 mbetet pjesërisht i hapur.
 
 ## T012 — kufijtë ditorë
 - [x] DailyLimits (pronari MT5 604/0) dhe DailyPreviewGate (200/0); preview hipotetik DAILY_LOSS_LIMIT i konfirmuar nga pronari.
 - [x] DailyHistory vetëm fakte: HistoryTest 196/0; diagnostiku real READY me 2 deal-e manuale të përjashtuara (pronari). complete=false, formula UNSET, balance_start UNKNOWN mbeten të hapura në atë shtresë.
 - [x] Ura faktet → DL_Check (1761b51): Codex Python 12/0, MetaEditor 0/0, pronari MT5 323 passed/0 failed (15.10.2026 11:49:58). Moduli i pastër; jo i lidhur me lejen ose EA.
+- [x] Burimi HISTORY_BRIDGE në preview v1.05 (DH_ReadAndBuild → DB_Check → rezultati final; MANUAL dhe DAILY_SNAPSHOT të ruajtura; preset vetëm-lexim). Sandbox: Python 19 + kontrolle statike; kompilimi i preview dhe ekzekutimi në demo — UNVERIFIED.
 - [ ] Vendime klienti/pronari: formula e rezultatit; përkufizimi trade/win/loss/breakeven dhe pjesëmbyllje; 2 apo 3 trade; si merret balance_start; pronësia (mbyllje manuale, magic i përbashkët, pozicione nga dita e mëparshme); kush pohon complete; DST i brokerit.
 - [ ] Teknike të hapura: reset në mesnatë, persistence/restart, lidhja me lejen. T012 NUK është i mbyllur.

@@ -34,3 +34,6 @@ When everything is defined: the facts day is passed as `snapshot_day`, so the hi
 6. Who asserts `complete=true` and on what evidence (today: the owner's assertion).
 7. Server-offset (broker DST) handling inside a day, and netting/exchange accounts (unsupported: BLOCK).
 Plus the pre-existing open items: reset at the Tirane midnight and persistence/restart recovery (not built), wiring of the permit (not done).
+
+## Preview source HISTORY_BRIDGE (preview v1.05)
+`InpDailySource=DAILY_SRC_HISTORY_BRIDGE` runs `DH_ReadAndBuild` -> `DB_Check` and feeds the daily result into the existing final preview result; MANUAL (default) and DAILY_SNAPSHOT are unchanged. Explicit inputs only: `InpDailyEaMagic` (>0), `InpDailyServerOffsetSeconds`, `InpDailyHistoryComplete`, `InpDailyBalanceStart` + `InpDailySnapshotDay` (the balance's day), `InpDailyResultFormula`, `InpDailyClassification`, `InpTradesToday`, `InpDailyWins`, `InpDailyConsecutiveLosses`, `InpMaxTrades`. Defaults: UNSET / unknown / complete=false. `InpDailyClosedResult` and `InpDailyResultKnown` are ignored in this source. Read-only proof preset: `src/presets/XauUsdTradePreview_T012_history_bridge_readonly.set`.

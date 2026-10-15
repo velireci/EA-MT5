@@ -3,18 +3,19 @@
 // T012 adds an opt-in DAILY source (DAILY_SRC_SNAPSHOT: daily limits from explicit inputs, UTC like T009). Observation only: the daily BLOCK joins the final
 // preview result; cancel_pending_due is a diagnostic flag, nothing is cancelled or closed; no history or account is read; MANUAL (default) changes nothing.
 #property strict
-#property version "1.04"
+#property version "1.05"
 #include "include/SymbolSnapshot.mqh"
 #include "include/BrokerLossCheck.mqh"
 #include "include/SessionPolicy.mqh"
 #include "include/NewsSpreadFilters.mqh"
 #include "include/DailyPreviewGate.mqh"
+#include "include/DailyBridge.mqh"
 enum PREVIEW_SIDE {PREVIEW_UNSET=0,PREVIEW_BUY=1,PREVIEW_SELL=-1};
 enum PREVIEW_STATE {STATE_UNKNOWN=0,STATE_CLEAR=1,STATE_BLOCK=2};
 enum PREVIEW_SESSION_SOURCE {SESSION_MANUAL=0,SESSION_TIRANE_CLOCK=1};
 enum PREVIEW_NEWS_SOURCE {NEWS_SRC_MANUAL=0,NEWS_SRC_CALENDAR_AUTO=1};
 enum PREVIEW_SPREAD_SOURCE {SPREAD_SRC_MANUAL=0,SPREAD_SRC_QUOTE_AUTO=1};
-enum PREVIEW_DAILY_SOURCE {DAILY_SRC_MANUAL=0,DAILY_SRC_SNAPSHOT=1};
+enum PREVIEW_DAILY_SOURCE {DAILY_SRC_MANUAL=0,DAILY_SRC_SNAPSHOT=1,DAILY_SRC_HISTORY_BRIDGE=2};
 input PREVIEW_SIDE InpDirection=PREVIEW_UNSET;
 input string InpSignalId="";
 input string InpSetupId="";
@@ -43,13 +44,18 @@ input long InpTradesToday=-1; // also the trade count of the daily check (DAILY_
 input double InpExistingRisk=-1;
 input long InpMaxPositions=-1; // -1 = policy unset, no silent choice
 input long InpMaxTrades=-1; // also the trade limit of the daily check; -1 = UNSET (blocks). 2 versus 3 is an open client decision: no default
-input PREVIEW_DAILY_SOURCE InpDailySource=DAILY_SRC_MANUAL; // MANUAL = daily check not evaluated (old behaviour). SNAPSHOT = T012 daily limits from the inputs below; UTC like T009 (PC clock), refused in tester
-input int InpDailySnapshotDay=0; // Tirane day (yyyymmdd) the figures belong to; a different day than the UTC instant gives STALE_SNAPSHOT_DAY
-input double InpDailyBalanceStart=-1; // balance at the start of the Tirane day, SUPPLIED (not read from the account); <=0 = unknown
+input PREVIEW_DAILY_SOURCE InpDailySource=DAILY_SRC_MANUAL; // MANUAL = daily check not evaluated (old behaviour). SNAPSHOT = T012 daily limits from the inputs below; HISTORY_BRIDGE = READ-ONLY robot history (T012 facts) -> bridge -> daily check, policies and figures supplied below. UTC like T009 (PC clock), both refused in tester
+input int InpDailySnapshotDay=0; // Tirane day (yyyymmdd) the figures belong to (SNAPSHOT: the snapshot day; HISTORY_BRIDGE: the day of InpDailyBalanceStart); a different day gives STALE_SNAPSHOT_DAY / BALANCE_DAY_MISMATCH
+input double InpDailyBalanceStart=-1; // balance at the start of the Tirane day, SUPPLIED (never read or reconstructed); <=0 = unknown
 input bool InpDailyResultKnown=false; // true only when InpDailyClosedResult is the robot's closed result of the day; false = unknown
 input double InpDailyClosedResult=0; // closed result of the ROBOT today in account currency (no floating, no manual trades); used only if InpDailyResultKnown
 input long InpDailyWins=-1; // wins today as classified by the caller (partial exits/costs/breakeven NOT classified here); -1 = unknown
 input long InpDailyConsecutiveLosses=-1; // consecutive losses today as classified by the caller; -1 = unknown
+input long InpDailyEaMagic=0; // HISTORY_BRIDGE only: magic number of the robot (> 0); 0 = unset -> history UNKNOWN. Not derived from anything
+input int InpDailyServerOffsetSeconds=99999; // HISTORY_BRIDGE only: server time minus UTC in seconds (multiple of 900, within +-14 h); 99999 = unset -> history UNKNOWN. Never read from the clock here
+input bool InpDailyHistoryComplete=false; // HISTORY_BRIDGE only: owner assertion that the terminal history is fully loaded; false -> HISTORY_INCOMPLETE
+input string InpDailyResultFormula="UNSET"; // HISTORY_BRIDGE only: PROFIT | PROFIT_COMMISSION_SWAP | PROFIT_COMMISSION_SWAP_FEE; UNSET or anything else blocks. Open client/owner decision: no default
+input string InpDailyClassification="UNSET"; // HISTORY_BRIDGE only: CALLER_CLASSIFIED = InpTradesToday / InpDailyWins / InpDailyConsecutiveLosses are classified by the caller; UNSET or anything else blocks
 input double InpCombinedRiskCap=-1; // money in account currency, not percent
 input double InpModelTolerance=.01; // diagnostic convention: relative model discrepancy
 input int InpMaxQuoteAgeSeconds=30; // diagnostic freshness limit
@@ -179,7 +185,9 @@ void Evaluate()
      }
    // T012 daily limits (observation only). MANUAL evaluates nothing; SNAPSHOT evaluates the explicit inputs above.
    bool daily_on=(InpDailySource==DAILY_SRC_SNAPSHOT);
+   bool daily_bridge=(InpDailySource==DAILY_SRC_HISTORY_BRIDGE);
    if(daily_on && MQLInfoInteger(MQL_TESTER)) {StopPreview("DAILY_UTC_UNAVAILABLE_IN_TESTER");return;}
+   if(daily_bridge && MQLInfoInteger(MQL_TESTER)) {StopPreview("DAILY_HISTORY_UNAVAILABLE_IN_TESTER");return;}
    SDlResult daily;
    bool daily_evaluated=DG_Evaluate(daily_on,daily_on ? TimeGMT() : 0,InpDailySnapshotDay,InpDailyBalanceStart,InpDailyResultKnown,InpDailyClosedResult,
                                     InpTradesToday,InpDailyWins,InpDailyConsecutiveLosses,InpMaxTrades,daily);
@@ -188,7 +196,48 @@ void Evaluate()
       PrintFormat("T012 DAILY source=DAILY_SNAPSHOT allowed=%d primary=%s reasons=%s tirane_day=%d snapshot_day=%d cancel_pending_due=%d daily_limit_reached=%d | balance_start=%.2f result_known=%d closed_result=%.2f trades=%I64d wins=%I64d consecutive_losses=%I64d max_trades=%I64d | DIAGNOSTIC ONLY: nothing is cancelled or closed; no history or account is read",
                   (int)daily.entry_allowed,daily.primary,DL_Joined(daily),daily.day_key,InpDailySnapshotDay,(int)daily.cancel_pending_due,(int)daily.daily_limit_reached,
                   InpDailyBalanceStart,(int)InpDailyResultKnown,InpDailyClosedResult,InpTradesToday,InpDailyWins,InpDailyConsecutiveLosses,InpMaxTrades);
-   else Print("T012 DAILY source=MANUAL: not evaluated, the preview behaves as before");
+   else if(!daily_bridge) Print("T012 DAILY source=MANUAL: not evaluated, the preview behaves as before");
+   // T012 history bridge (observation only): READ-ONLY history facts -> DB_Check (-> DL_Check). Every policy and figure is an explicit input.
+   if(daily_bridge)
+     {
+      SDhCfg hcfg;
+      hcfg.ea_magic=InpDailyEaMagic;
+      hcfg.utc_in_day=TimeGMT();
+      hcfg.server_offset_seconds=InpDailyServerOffsetSeconds;
+      hcfg.history_complete_asserted=InpDailyHistoryComplete;
+      SDhFacts hfacts;
+      SDhRaw hraw;
+      string hreason="";
+      ENUM_DH_VERDICT hverdict=DH_ReadAndBuild(_Symbol,hcfg,hfacts,hreason,hraw);
+      SDbBalance hbalance;
+      hbalance.known=(InpDailyBalanceStart>0.0);
+      hbalance.day=InpDailySnapshotDay;
+      hbalance.amount=InpDailyBalanceStart;
+      SDbPolicy hpolicy;
+      hpolicy.result_formula=InpDailyResultFormula;
+      hpolicy.classification=InpDailyClassification;
+      SDbClassified hclassified;
+      hclassified.trades=DG_Counter(InpTradesToday);
+      hclassified.wins=DG_Counter(InpDailyWins);
+      hclassified.consecutive_losses=DG_Counter(InpDailyConsecutiveLosses);
+      SDbResult hbridge;
+      DB_Check(hverdict,hfacts,hcfg.utc_in_day,hbalance,hpolicy,hclassified,InpMaxTrades>=0,
+               (InpMaxTrades>DL_MAX_COUNT ? DL_MAX_COUNT+1 : (int)(InpMaxTrades<0 ? 0 : InpMaxTrades)),hbridge);
+      daily.entry_allowed=hbridge.entry_allowed;
+      daily.primary=hbridge.primary;
+      daily.n_reasons=hbridge.n_reasons;
+      for(int hi=0;hi<DL_MAX_REASONS;hi++)
+         daily.reasons[hi]=(hi<hbridge.n_reasons ? hbridge.reasons[hi] : "");
+      daily.cancel_pending_due=hbridge.cancel_pending_due;
+      daily.daily_limit_reached=hbridge.daily_limit_reached;
+      daily.day_key=hbridge.day_key;
+      daily_evaluated=true;
+      daily_text="HISTORY_BRIDGE verdict "+DH_VerdictName(hverdict)+" ("+(hreason=="" ? "ok" : hreason)+") complete="+(hverdict==DH_READY ? (string)hfacts.complete : "n/a")+" | "+DB_Text(hbridge);
+      PrintFormat("T012 DAILY source=HISTORY_BRIDGE history_verdict=%s history_reason=%s allowed=%d primary=%s reasons=%s daily_check_called=%d closed_result=%.2f cancel_pending_due=%d daily_limit_reached=%d | formula=%s classification=%s balance_start=%.2f balance_day=%d trades=%I64d wins=%I64d consecutive_losses=%I64d max_trades=%I64d | read-only, nothing cancelled or sent",
+                  DH_VerdictName(hverdict),hreason,(int)hbridge.entry_allowed,hbridge.primary,DB_Joined(hbridge),(int)hbridge.dl_called,hbridge.closed_result,
+                  (int)hbridge.cancel_pending_due,(int)hbridge.daily_limit_reached,InpDailyResultFormula,InpDailyClassification,InpDailyBalanceStart,InpDailySnapshotDay,
+                  InpTradesToday,InpDailyWins,InpDailyConsecutiveLosses,InpMaxTrades);
+     }
    snap.news_state=(InpNewsState==STATE_CLEAR ? TP_NEWS_CLEAR : InpNewsState==STATE_BLOCK ? TP_NEWS_BLOCKED : TP_NEWS_UNKNOWN);
    snap.spread_state=(InpSpreadState==STATE_CLEAR ? TP_SPREAD_CLEAR : InpSpreadState==STATE_BLOCK ? TP_SPREAD_BLOCKED : TP_SPREAD_UNKNOWN);
    string news_text="MANUAL "+EnumToString(InpNewsState),spread_text="MANUAL "+EnumToString(InpSpreadState);

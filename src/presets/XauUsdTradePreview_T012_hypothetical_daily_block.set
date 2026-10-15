@@ -1,4 +1,4 @@
-; XauUsdTradePreview v1.04 - HYPOTHETICAL daily-limit BLOCK test (T012). Observation only: no order is sent, changed, cancelled or closed.
+; XauUsdTradePreview v1.04/v1.05 - HYPOTHETICAL daily-limit BLOCK test (T012). Observation only: no order is sent, changed, cancelled or closed.
 ; Every number below is a TEST value, none is a client fact and none comes from a real account. The closed result -250.00 is invented
 ; (it is NOT the +3.57 of the earlier manual test and it is not a robot result). The other policies stay UNKNOWN on purpose: the final
 ; preview result is BLOCK anyway; what you check is the "T012 DAILY" log line and the "DAILY" panel line.
@@ -43,6 +43,11 @@ InpDailyResultKnown=true
 InpDailyClosedResult=-250.00
 InpDailyWins=0
 InpDailyConsecutiveLosses=1
+InpDailyEaMagic=0
+InpDailyServerOffsetSeconds=99999
+InpDailyHistoryComplete=false
+InpDailyResultFormula=UNSET
+InpDailyClassification=UNSET
 InpCombinedRiskCap=-1
 InpModelTolerance=0.01
 InpMaxQuoteAgeSeconds=30

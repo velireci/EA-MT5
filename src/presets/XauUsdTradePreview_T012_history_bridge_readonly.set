@@ -1,0 +1,59 @@
+; XauUsdTradePreview v1.05 - READ-ONLY HISTORY_BRIDGE proof on the CURRENT demo (T012). Observation only: no order is sent, changed, cancelled or closed,
+; and no new trade is needed. The EA reads the deal history and open positions of the robot's Tirane day (read-only) and feeds the bridge.
+; WHAT THIS PRESET PROVES: with the history NOT asserted complete, no balance at the start of the day and the result formula / classification left UNSET,
+; the bridge must BLOCK with concrete reasons and the daily check must NOT be called.
+; BEFORE RUNNING: (1) set InpEntry / InpStopLoss to levels that pass the T008 checks for the CURRENT XAUUSD quote (the daily source is evaluated after
+; the plan and the broker probe; if they stop first you see GEOMETRY / PLAN instead); (2) edit InpDailyEaMagic (a value > 0) and InpDailyServerOffsetSeconds
+; (server time minus UTC, a multiple of 900; the history diagnostic prints TimeTradeServer()-TimeGMT()) to your demo values. The values below are
+; PLACEHOLDERS, not facts: a different magic or offset only changes which deals are found; the expected reasons below do not depend on them.
+; EXPECTED log line "T012 DAILY source=HISTORY_BRIDGE": history_verdict=READY (if the history is readable; otherwise UNKNOWN / BLOCK with a concrete
+;   history_reason) allowed=0 primary=HISTORY_INCOMPLETE
+;   reasons=HISTORY_INCOMPLETE|BALANCE_START_UNSET|POLICY_UNSET:result_formula|POLICY_UNSET:trade_classification daily_check_called=0
+;   cancel_pending_due=0 daily_limit_reached=0, then T008 PREVIEW RESULT BLOCK with "DAILY: ..." in the reasons.
+; TO SEE OTHER BLOCKS (one change at a time): InpDailyHistoryComplete=true removes HISTORY_INCOMPLETE; InpDailyBalanceStart=<balance at the start of the
+; day> with InpDailySnapshotDay=<today yyyymmdd> removes BALANCE_START_UNSET; a wrong InpDailySnapshotDay gives BALANCE_DAY_MISMATCH; InpDailyResultFormula=NET
+; gives POLICY_UNSUPPORTED:result_formula. Choosing a formula or a classification is a client / owner decision: nothing here suggests one.
+; The preview uses TimeGMT() (PC clock) for the day and refuses the source in the Strategy Tester.
+InpDirection=1
+InpSignalId=HYP-T012-SIGNAL
+InpSetupId=HYP-T012-SETUP
+InpEntry=4300.00
+InpStopLoss=4290.00
+InpHasTarget=false
+InpTarget=0
+InpRiskBudget=100
+InpLotCap=10
+InpDataState=0
+InpSessionState=0
+InpSessionSource=0
+InpSessionStartMinute=0
+InpSessionEndMinute=1230
+InpSessionWeekdayMask=62
+InpFridayCloseEnabled=true
+InpFridayCloseMinute=1260
+InpNewsSource=0
+InpNewsState=0
+InpSpreadSource=0
+InpMaxSpreadPoints=-1
+InpSpreadState=0
+InpSignalUnused=0
+InpOpenPositions=-1
+InpTradesToday=-1
+InpExistingRisk=-1
+InpMaxPositions=-1
+InpMaxTrades=-1
+InpDailySource=2
+InpDailySnapshotDay=0
+InpDailyBalanceStart=-1
+InpDailyResultKnown=false
+InpDailyClosedResult=0
+InpDailyWins=-1
+InpDailyConsecutiveLosses=-1
+InpDailyEaMagic=777
+InpDailyServerOffsetSeconds=7200
+InpDailyHistoryComplete=false
+InpDailyResultFormula=UNSET
+InpDailyClassification=UNSET
+InpCombinedRiskCap=-1
+InpModelTolerance=0.01
+InpMaxQuoteAgeSeconds=30
