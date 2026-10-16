@@ -3,6 +3,7 @@ They prove what a source test CAN prove: the view reads only, runs after the dec
 covers every reason code of the gate chain, never draws an entry arrow, makes gold exclusive to the plan bridge's selection, and its words about confirmed / temporary choices equal the labels of the
 simulation preset. They do NOT prove that the chart is readable or that the marks are well placed: that needs the MT5 run of EntryViewTest.mq5 and the screenshots listed in
 docs/T016-entry-orchestrator.md. Nothing here compiles MQL5."""
+import hashlib
 import os
 import re
 import subprocess
@@ -13,6 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import preset_check as pc  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+BASE_SHA256 = '398ddb39439a237138832221198fd2e05d122f4ffd795113e0f8b62bca74d623'   # sha256 of the comment-stripped feed at 25fc190: used when the git base is not available locally
 BASE = '25fc190'          # the last commit before the view: the feed's decision path must still equal it
 
 
@@ -31,6 +33,7 @@ FEED = code(read('src', 'include', 'EntryOrchestratorFeed.mqh'))
 EA = code(read('src', 'XauUsdEntryOrchestrator.mq5'))
 TEST_RAW = read('src', 'tests', 'EntryViewTest.mq5')
 TEST = code(TEST_RAW)
+PANEL = VIEW[VIEW.index('void DrawPanels'):VIEW.index('public:\n   CEoView(void)')]
 
 
 def fn(name_start, name_end):
@@ -56,7 +59,8 @@ class ViewIsReadOnly(unittest.TestCase):
             self.assertTrue(n.startswith('EV_PREFIX+'), n)
         self.assertIn('#define EV_PREFIX        "velo_t016v_"', RAW)
         for m in re.finditer(r'ObjectsDeleteAll\(([^)]*)\)', VIEW):
-            self.assertEqual(m.group(1), 'm_chart,EV_PREFIX', m.group(0))
+            self.assertIn(m.group(1), ('m_chart,EV_PREFIX', 'm_chart,m_prefix'), m.group(0))
+        self.assertEqual(sorted(re.findall(r'\.Init\((EV_PANEL_PREFIX\+"\w+"),\d\)', VIEW)), ['EV_PANEL_PREFIX+"leg_"', 'EV_PANEL_PREFIX+"main_"'], 'the boxes delete only their own prefix, below the panel prefix')
         self.assertIn('if(StringFind(name,EV_PREFIX)!=0) continue;', VIEW, 'the object loop skips foreign names (manual drawings)')
         self.assertIn('if(StringFind(name,EV_PANEL_PREFIX)==0) continue;', VIEW)
         self.assertNotIn('velo_t003', VIEW)
@@ -77,7 +81,7 @@ class ViewIsReadOnly(unittest.TestCase):
 
     def test_the_text_is_ascii_and_the_technical_ids_stay_in_tooltips(self):
         self.assertTrue(all(ord(ch) < 128 for ch in RAW))
-        panel = fn('void DrawPanel', 'void DrawLegend')
+        panel = PANEL
         self.assertIsNone(re.search(r'\+\s*[\w.\[\]]*(?:\.id|signal_id|bos_level|setup_id|dg_reason)\b', panel), 'a technical id or code appended to a panel line')
         self.assertNotIn('out.reason', panel)
         self.assertIn('"FVG M15 "+state+" "+EV_Price(feed.f[i].lower,m_digits)+" - "+EV_Price(feed.f[i].upper,m_digits)+" | "+feed.f[i].id', VIEW, 'the id is in the tooltip')
@@ -85,12 +89,12 @@ class ViewIsReadOnly(unittest.TestCase):
     def test_the_view_speaks_in_the_four_decision_words_and_covers_every_status(self):
         verdict = fn('void EV_Verdict', 'color EV_VerdictColor')
         labels = set(re.findall(r'label="([A-Z ]+)"', verdict))
-        self.assertEqual(labels, {'PRET', 'BLLOKUAR', 'PLAN GATI', 'KERKESE VIRTUALE'})
+        self.assertEqual(labels, {'PRET', 'BLLOKUAR', 'PLAN GATI', 'KERKESE VIRTUALE', 'KERKESE REALE'}, 'the four decision words, and the request word follows the transport')
         core = code(read('src', 'include', 'EntryOrchestrator.mqh'))
         statuses = set(re.findall(r'EO_Set\(out,"(\w+)"', core)) | {'EXECUTOR', 'GATE_BLOCKED', 'RESERVATION_FAILED'}
         for st in sorted(statuses):
             self.assertIn('"%s"' % st, verdict, 'no Albanian verdict for the status ' + st)
-        panel = fn('void DrawPanel', 'void DrawLegend')
+        panel = PANEL
         self.assertIn('"VENDIMI: "+label+" - "', panel)
         self.assertIn('SIMULIM - PA URDHRA REALE', panel)
         self.assertIn('FAKE / READ_ONLY', panel)
@@ -172,11 +176,11 @@ class TheMarksFollowTheRules(unittest.TestCase):
         self.assertIn('"HYRJA LIMIT "+ds+" "+EV_Price(m_plan.entry,m_digits)', plan)
 
     def test_there_is_a_legend_on_the_chart_that_explains_every_kind_of_mark(self):
-        legend = fn('void DrawLegend', 'public:')
+        legend = PANEL
         for part in ("'H4'", 'Sweep H4', 'Fitil H4', 'Thyerje M15', 'ARTE', 'HYRJA LIMIT / SL / 2R / TP', 'kandidat', 'rikonfirmuar', 'pavlefshme'):
             self.assertIn(part, legend, part)
-        self.assertIn('EV_PANEL_PREFIX+"leg"', legend)
-        self.assertIn('DrawLegend();', VIEW)
+        self.assertIn('m_legend.Line(', legend)
+        self.assertIn('EV_PANEL_PREFIX+"leg_"', VIEW)
 
 
 class ConfirmedAndTemporaryWordsEqualThePresetLabels(unittest.TestCase):
@@ -186,7 +190,7 @@ class ConfirmedAndTemporaryWordsEqualThePresetLabels(unittest.TestCase):
 
     def test_what_the_panel_calls_confirmed_is_confirmed_and_what_it_calls_temporary_is_a_proposal(self):
         lab = self.labels()
-        panel = fn('void DrawPanel', 'void DrawLegend')
+        panel = PANEL
         conf = re.search(r'"Konfirmuar nga klienti: ([^"]+)"', panel).group(1)
         temp = re.search(r'"E perkohshme \(prototip\): ([^"]+)"', panel).group(1)
         for word, key in (('hyrja LIMIT ne skaj te FVG', 'InpEntryEdge'), ('seanca', 'InpSessionClock'), ('lajmet', 'InpNewsCalendar'), ('kufijte ditore', 'InpMaxPositions')):
@@ -197,7 +201,7 @@ class ConfirmedAndTemporaryWordsEqualThePresetLabels(unittest.TestCase):
             self.assertEqual(lab[key], 'DEMO-PROPOSAL', key)
 
     def test_the_risk_line_names_the_simulation_policy(self):
-        panel = fn('void DrawPanel', 'void DrawLegend')
+        panel = PANEL
         self.assertIn('(out.risk_label!="" ? " ("+out.risk_label+": 1% e balances)" : "")', panel)
 
 
@@ -222,8 +226,9 @@ class TheViewDoesNotChangeTheDecision(unittest.TestCase):
     def test_the_feed_decision_path_is_the_one_before_the_view_plus_a_gated_copy(self):
         try:
             base = subprocess.run(['git', 'show', '%s:src/include/EntryOrchestratorFeed.mqh' % BASE], cwd=ROOT, capture_output=True, text=True, check=True).stdout
-        except Exception:
-            self.skipTest('the base commit is not available')
+            self.assertEqual(hashlib.sha256(code(base).encode('ascii')).hexdigest(), BASE_SHA256, 'the recorded hash is the hash of the base')
+        except subprocess.CalledProcessError:
+            base = None                                    # no git base locally: the recorded hash of the base is used instead
         text = read('src', 'include', 'EntryOrchestratorFeed.mqh')
         text = re.sub(r'   // chart view only \(InpChartView\)[^\n]*\n(?:   (?:bool keep_view|bool dv_have|int dv_n|SH3Eval dv_ev|SH3Track dv_tracks\[\]|SH3Event dv_events\[\])[^\n]*\n)+', '', text)
         text = re.sub(r'   // copy for the chart view;[^\n]*\n   void KeepView\(.*?\n     \}\n(?=   void T003View)', '', text, flags=re.S)
@@ -231,7 +236,7 @@ class TheViewDoesNotChangeTheDecision(unittest.TestCase):
                      "      if(keep_view) KeepView(n,e,tracks,events);\n"):
             self.assertIn(line, text, line)
             text = text.replace(line, '', 1)
-        self.assertEqual(code(text), code(base), 'the feed differs from the base outside the view additions')
+        self.assertEqual(hashlib.sha256(code(text).encode('ascii')).hexdigest(), BASE_SHA256, 'the feed differs from the base outside the view additions')
 
     def test_the_copy_is_gated_and_nothing_in_the_decision_reads_it(self):
         self.assertEqual(len(re.findall(r'if\(keep_view\) KeepView\(', FEED)), 1)
@@ -240,6 +245,67 @@ class TheViewDoesNotChangeTheDecision(unittest.TestCase):
         self.assertNotIn('keep_view', body)
         self.assertNotIn('dv_', FEED[FEED.index('bool Poll(bool &feed_ok)'):FEED.index('struct SEoMarketCfg')])
         self.assertNotIn('dv_', EA)
+
+
+class CodexReviewRegressions(unittest.TestCase):
+    """Codex review of eeddf39: (1) Comment() under the panel, (2) a panel without background that does not fit the chart, (3) every request called virtual whatever the transport"""
+
+    def test_1_status_clears_the_comment_when_the_view_is_on_and_keeps_the_text_when_it_is_off(self):
+        status = EA[EA.index('void Status('):EA.index('bool Configure(void)')]
+        self.assertIn('if(InpChartView) Comment("");', status)
+        self.assertRegex(status, r'else\s+Comment\(\(g_real_entry \? "T016 ENTRY ORCHESTRATOR - REAL DEMO ORDERS ENABLED BY THE OWNER\\n" : "T016 ENTRY ORCHESTRATOR - FAKE EXECUTION ONLY, nothing is sent to the terminal\\n"\)')
+        self.assertIn('Print("T016 ",text);', status, 'the diagnostics stay in the Experts log')
+        self.assertLess(status.index('Print("T016 ",text);'), status.index('Comment('))
+        self.assertEqual(EA.count('Comment('), 3, 'Status (view on / off) and OnDeinit only')
+        self.assertEqual(EA.count('Comment("")'), 2)
+
+    def test_2_the_panel_has_a_background_and_fits_the_chart_inside_the_view(self):
+        self.assertNotIn('CStatusPanel', VIEW)
+        self.assertNotIn('StatusPanel.mqh', VIEW)
+        self.assertIn('class CEvBox', VIEW)
+        self.assertIn('OBJ_RECTANGLE_LABEL', VIEW)
+        self.assertIn('CHART_WIDTH_IN_PIXELS', VIEW)
+        self.assertIn('CHART_HEIGHT_IN_PIXELS', VIEW)
+        self.assertIn('int EV_Select(', VIEW)
+        self.assertIn('int EV_Wrap(', VIEW)
+        box = VIEW[VIEW.index('class CEvBox'):VIEW.index('class CEoView')]
+        self.assertIn('EV_Select(', box, 'the box chooses its rows by the space it has')
+        self.assertIn('BGCOLOR', box)
+        self.assertEqual(len(re.findall(r'new CStatusPanel|CStatusPanel ', read('src', 'include', 'EntryOrchestratorView.mqh'))), 0)
+        draw = PANEL
+        self.assertLess(draw.index('m_legend.Render('), draw.index('m_panel.Render('), 'the legend is laid out first; the panel takes the rest of the height')
+        self.assertIn('CORNER_LEFT_UPPER', box, 'one corner for every object: no corner-dependent anchor is assumed')
+        self.assertNotIn('CORNER_LEFT_LOWER', VIEW)
+        self.assertIn('priority', RAW.lower())
+
+    def test_3_the_verdict_and_the_kept_plan_carry_the_mode_of_the_request(self):
+        self.assertIn('void EV_Verdict(const SEoOutcome &o,const SEvPlan &kept,const bool real,string &label,string &reason)', VIEW)
+        verdict = fn('void EV_Verdict', 'color EV_VerdictColor')
+        self.assertRegex(verdict, r'if\(o\.request\)\s*\{\s*if\(real\)\s*\{label="KERKESE REALE"')
+        self.assertIn('label="KERKESE VIRTUALE"', verdict)
+        self.assertLess(verdict.index('label="KERKESE REALE"'), verdict.index('label="KERKESE VIRTUALE"'))
+        self.assertIn('bool     real;', RAW.replace('\t', ' '))
+        track = fn('void TrackPlan', 'int FindH4Bar')
+        self.assertIn('const bool real', track)
+        self.assertIn('m_plan.real=real;', track)
+        self.assertIn('EV_Verdict(out,m_plan,real,m_plan.verdict,m_plan.reason);', track)
+        self.assertIn('TrackPlan(out,feed,real_entry);', VIEW)
+        panel = PANEL
+        self.assertIn('EV_Verdict(out,m_plan,real_entry,label,reason);', panel)
+        self.assertIn('modaliteti: ', panel)
+        self.assertIn('"REAL (DEMO)"', panel)
+        self.assertIn('"FAKE (virtuale)"', panel)
+        self.assertEqual(VIEW.count('KERKESE REALE'), 2, 'the verdict and its colour: no other place may use the word')
+
+    def test_the_layout_helpers_are_mirrored_in_python_and_in_the_mt5_test(self):
+        for name in ('EV_Wrap', 'EV_Select'):
+            self.assertIn(name, TEST_RAW)
+        mirror = read('tests', 'view_layout_reference.py')
+        self.assertIn('def wrap(', mirror)
+        self.assertIn('def select(', mirror)
+        for needle in ('layout: a long line wraps', 'layout: low priorities leave first', 'layout: priority 0 is never dropped', 'layout: a wide chart keeps every line',
+                       'KERKESE REALE', 'modaliteti: REAL (DEMO)', 'modaliteti: FAKE (virtuale)'):
+            self.assertIn(needle, TEST_RAW, needle)
 
 
 class TheSyntheticMt5Test(unittest.TestCase):

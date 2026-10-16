@@ -39,7 +39,6 @@
 #define VELO_ENTRY_ORCHESTRATOR_VIEW_MQH
 
 #include "EntryOrchestratorFeed.mqh"
-#include "StatusPanel.mqh"
 
 #define EV_PREFIX        "velo_t016v_"
 #define EV_PANEL_PREFIX  "velo_t016v_pnl_"
@@ -58,6 +57,7 @@ struct SEvPlan
    double   volume;
    double   risk;
    bool     tp_is_2r;
+   bool     real;          // the request mode when the plan was built: true = REAL (DEMO) transport, false = FAKE (virtual)
    string   signal_id;
    string   setup;
    string   verdict;       // PRET / BLLOKUAR / PLAN GATI / KERKESE VIRTUALE at the step that built the plan
@@ -71,6 +71,7 @@ void EV_PlanInit(SEvPlan &p)
    p.direction=0;
    p.entry=0.0; p.sl=0.0; p.tp=0.0; p.level_2r=0.0; p.volume=0.0; p.risk=0.0;
    p.tp_is_2r=false;
+   p.real=false;
    p.signal_id="";
    p.setup="";
    p.verdict="";
@@ -211,14 +212,20 @@ bool EV_IsWaitingReason(const string code)
   }
 
 //--- the decision of the step as ONE of PRET / BLLOKUAR / PLAN GATI / KERKESE VIRTUALE with a short reason
-void EV_Verdict(const SEoOutcome &o,const SEvPlan &kept,string &label,string &reason)
+void EV_Verdict(const SEoOutcome &o,const SEvPlan &kept,const bool real,string &label,string &reason)
   {
    string s=o.status;
    label="PRET";
    reason="";
    if(s=="EXECUTOR")
      {
-      if(o.request) {label="KERKESE VIRTUALE"; reason="plan i pranuar; kerkese FAKE, asgje nuk shkon te brokeri"; return;}
+      if(o.request)
+        {
+         if(real) {label="KERKESE REALE"; reason="plan i pranuar; kerkese REALE (DEMO) e derguar te brokeri"; return;}
+         label="KERKESE VIRTUALE";
+         reason="plan i pranuar; kerkese FAKE, asgje nuk shkon te brokeri";
+         return;
+        }
       label="PLAN GATI";
       reason="plani kaloi porten, por ekzekutuesi nuk vendosi kerkese (shih Experts)";
       return;
@@ -256,7 +263,7 @@ void EV_Verdict(const SEoOutcome &o,const SEvPlan &kept,string &label,string &re
 
 color EV_VerdictColor(const string label)
   {
-   if(label=="KERKESE VIRTUALE" || label=="PLAN GATI") return(clrLimeGreen);
+   if(label=="KERKESE VIRTUALE" || label=="KERKESE REALE" || label=="PLAN GATI") return(clrLimeGreen);
    if(label=="BLLOKUAR") return(clrOrangeRed);
    return(clrWhite);
   }
@@ -285,13 +292,219 @@ string EV_Detail(const string detail,const string key)
    return(e<0 ? StringSubstr(detail,from) : StringSubstr(detail,from,e-from));
   }
 
+//--- LAYOUT (pure; mirrored by tests/view_layout_reference.py): word wrap of one panel line to the characters that fit, continuation rows indented by two spaces
+int EV_Wrap(const string text,const int width_in,string &rows[])
+  {
+   int width=(width_in<8 ? 8 : width_in);
+   ArrayResize(rows,0);
+   if(StringLen(text)<=width) {ArrayResize(rows,1); rows[0]=text; return(1);}
+   string words[];
+   int nw=StringSplit(text,' ',words);
+   string cur="";
+   int n=0;
+   for(int k=0;k<nw;k++)
+     {
+      string w=words[k];
+      if(w=="") continue;
+      string indent=(n==0 ? "" : "  ");
+      int room=width-StringLen(indent);
+      string cand=(cur=="" ? w : cur+" "+w);
+      if(StringLen(cand)<=room) {cur=cand; continue;}
+      if(cur!="")
+        {
+         ArrayResize(rows,n+1);
+         rows[n]=indent+cur;
+         n++;
+         cur="";
+         room=width-2;
+        }
+      while(StringLen(w)>room)
+        {
+         ArrayResize(rows,n+1);
+         rows[n]=(n==0 ? "" : "  ")+StringSubstr(w,0,room);
+         n++;
+         w=StringSubstr(w,room);
+         room=width-2;
+        }
+      cur=w;
+     }
+   if(cur!="") {ArrayResize(rows,n+1); rows[n]=(n==0 ? "" : "  ")+cur; n++;}
+   return(n);
+  }
+
+//--- which lines stay when the chart has only max_rows rows: the lines with the HIGHEST priority number leave first (the later one of equal priority first); priority 0 never leaves;
+//--- a dropped line is announced by one marker row, which counts in max_rows. Returns the number of dropped lines.
+int EV_Select(const string &texts[],const int &prio[],const int n,const int width,const int max_rows,bool &keep[])
+  {
+   ArrayResize(keep,n);
+   int rows[];
+   ArrayResize(rows,n);
+   string tmp[];
+   int total=0;
+   for(int i=0;i<n;i++)
+     {
+      keep[i]=true;
+      rows[i]=EV_Wrap(texts[i],width,tmp);
+      total+=rows[i];
+     }
+   int dropped=0;
+   while(total+(dropped>0 ? 1 : 0)>max_rows)
+     {
+      int pick=-1;
+      for(int i=0;i<n;i++)
+         if(keep[i] && prio[i]>0 && (pick<0 || prio[i]>=prio[pick])) pick=i;
+      if(pick<0) break;
+      keep[pick]=false;
+      total-=rows[pick];
+      dropped++;
+     }
+   return(dropped);
+  }
+
+//--- a text box with a background, fitted to the chart: its own labels (OBJ_RECTANGLE_LABEL + OBJ_LABEL), all anchored at the upper left corner of the chart (no corner-dependent anchor is assumed)
+class CEvBox
+  {
+private:
+   string   m_prefix;
+   long     m_chart;
+   int      m_font;
+   int      m_lh;
+   int      m_pad;
+   string   m_text[];
+   color    m_clr[];
+   int      m_prio[];
+   int      m_n;
+   int      m_made;
+
+   void Put(const string name,const ENUM_OBJECT type)
+     {
+      if(ObjectFind(m_chart,name)>=0) return;
+      if(!ObjectCreate(m_chart,name,type,0,0,0)) {ResetLastError(); return;}
+      ObjectSetInteger(m_chart,name,OBJPROP_CORNER,CORNER_LEFT_UPPER);
+      ObjectSetInteger(m_chart,name,OBJPROP_SELECTABLE,false);
+      ObjectSetInteger(m_chart,name,OBJPROP_HIDDEN,true);
+      ObjectSetInteger(m_chart,name,OBJPROP_BACK,false);
+     }
+
+public:
+   CEvBox(void)
+     {
+      m_prefix=EV_PANEL_PREFIX;
+      m_chart=0;
+      m_font=9;
+      m_lh=15;
+      m_pad=5;
+      m_n=0;
+      m_made=0;
+     }
+   void Init(const string prefix,const int font)
+     {
+      m_prefix=prefix;
+      m_chart=ChartID();
+      m_font=font;
+      m_lh=font+6;
+      m_n=0;
+      m_made=0;
+      ObjectsDeleteAll(m_chart,m_prefix);
+     }
+   int  LineHeight(void) const {return(m_lh);}
+   void Begin(void) {m_n=0;}
+   void Line(const string text,const color clr,const int priority)
+     {
+      ArrayResize(m_text,m_n+1);
+      ArrayResize(m_clr,m_n+1);
+      ArrayResize(m_prio,m_n+1);
+      m_text[m_n]=text;
+      m_clr[m_n]=clr;
+      m_prio[m_n]=priority;
+      m_n++;
+     }
+   //--- draws the lines that fit; returns the pixel height of the box. from_bottom: the box sits on the lower edge of the chart, else its top is top_px.
+   int  Render(const int max_rows,const int top_px,const bool from_bottom)
+     {
+      int chart_w=(int)ChartGetInteger(m_chart,CHART_WIDTH_IN_PIXELS,0);
+      int chart_h=(int)ChartGetInteger(m_chart,CHART_HEIGHT_IN_PIXELS,0);
+      int char_px=(int)MathMax(5.0,MathRound(m_font*0.78));
+      int max_w=(chart_w<300 ? chart_w-12 : (int)MathMax(260.0,chart_w*0.72));
+      int width_chars=(int)MathMax(36.0,(double)((max_w-2*m_pad)/char_px));
+      bool keep[];
+      int dropped=EV_Select(m_text,m_prio,m_n,width_chars,max_rows,keep);
+      string rows[];
+      color rclr[];
+      int nr=0;
+      for(int i=0;i<m_n;i++)
+        {
+         if(!keep[i]) continue;
+         string parts[];
+         int np=EV_Wrap(m_text[i],width_chars,parts);
+         for(int k=0;k<np;k++)
+           {
+            ArrayResize(rows,nr+1);
+            ArrayResize(rclr,nr+1);
+            rows[nr]=parts[k];
+            rclr[nr]=m_clr[i];
+            nr++;
+           }
+        }
+      if(dropped>0)
+        {
+         ArrayResize(rows,nr+1);
+         ArrayResize(rclr,nr+1);
+         rows[nr]=StringFormat("(+%d rreshta te fshehura: zmadho grafikun)",dropped);
+         rclr[nr]=C'170,170,170';
+         nr++;
+        }
+      int widest=0;
+      for(int i=0;i<nr;i++) widest=(int)MathMax((double)widest,(double)StringLen(rows[i]));
+      int w_px=widest*char_px+2*m_pad;
+      int h_px=nr*m_lh+2*m_pad;
+      int y=(from_bottom ? chart_h-h_px-6 : top_px);
+      if(y<0) y=0;
+      string bg=m_prefix+"bg";
+      Put(bg,OBJ_RECTANGLE_LABEL);
+      ObjectSetInteger(m_chart,bg,OBJPROP_XDISTANCE,6);
+      ObjectSetInteger(m_chart,bg,OBJPROP_YDISTANCE,y);
+      ObjectSetInteger(m_chart,bg,OBJPROP_XSIZE,w_px);
+      ObjectSetInteger(m_chart,bg,OBJPROP_YSIZE,h_px);
+      ObjectSetInteger(m_chart,bg,OBJPROP_BGCOLOR,C'16,20,28');
+      ObjectSetInteger(m_chart,bg,OBJPROP_BORDER_TYPE,BORDER_FLAT);
+      ObjectSetInteger(m_chart,bg,OBJPROP_COLOR,C'80,86,98');
+      for(int i=0;i<nr;i++)
+        {
+         string name=m_prefix+StringFormat("%03d",i);
+         Put(name,OBJ_LABEL);
+         ObjectSetInteger(m_chart,name,OBJPROP_ANCHOR,ANCHOR_LEFT_UPPER);
+         ObjectSetInteger(m_chart,name,OBJPROP_XDISTANCE,6+m_pad);
+         ObjectSetInteger(m_chart,name,OBJPROP_YDISTANCE,y+m_pad+i*m_lh);
+         ObjectSetInteger(m_chart,name,OBJPROP_FONTSIZE,m_font);
+         ObjectSetString(m_chart,name,OBJPROP_FONT,"Consolas");
+         ObjectSetString(m_chart,name,OBJPROP_TEXT,rows[i]);
+         ObjectSetInteger(m_chart,name,OBJPROP_COLOR,rclr[i]);
+        }
+      for(int i=nr;i<m_made;i++)
+        {
+         string old=m_prefix+StringFormat("%03d",i);
+         if(ObjectFind(m_chart,old)>=0) ObjectDelete(m_chart,old);
+        }
+      m_made=nr;
+      return(h_px);
+     }
+   void Destroy(void)
+     {
+      ObjectsDeleteAll(m_chart,m_prefix);
+      m_made=0;
+      m_n=0;
+     }
+  };
+
 class CEoView
   {
 private:
    bool            m_on;
    long            m_chart;
    int             m_digits;
-   CStatusPanel    m_panel;
+   CEvBox          m_panel;
+   CEvBox          m_legend;
    string          m_signature;
    SEvPlan         m_plan;
    int             m_n_objects;      // marks drawn by the last redraw (the panel and the legend are not counted)
@@ -370,7 +583,7 @@ private:
       m_n_objects=0;
      }
    //--- the plan of this step, or the kept plan of the same signal; dropped as soon as its H4 setup is no longer the live context
-   void TrackPlan(const SEoOutcome &out,const CEoFeed &feed)
+   void TrackPlan(const SEoOutcome &out,const CEoFeed &feed,const bool real)
      {
       bool pass2=(out.status=="GATE_BLOCKED" || out.status=="EXECUTOR" || out.status=="RESERVATION_FAILED");
       if(pass2 && out.spb.plan_ready && feed.st.has_context)
@@ -384,9 +597,10 @@ private:
          m_plan.volume=out.spb.plan.volume_out;
          m_plan.risk=out.spb.plan.risk_model;
          m_plan.tp_is_2r=out.spb.plan.tp_equals_2r;
+         m_plan.real=real;
          m_plan.signal_id=out.spb.signal_id;
          m_plan.setup=feed.st.context.setup;
-         EV_Verdict(out,m_plan,m_plan.verdict,m_plan.reason);
+         EV_Verdict(out,m_plan,real,m_plan.verdict,m_plan.reason);
          m_plan.t0=(feed.st.bos_time>0 ? feed.st.bos_time : feed.cut-8*900);
          return;
         }
@@ -557,32 +771,43 @@ private:
       if(!m_plan.tp_is_2r)
          Segment(EV_PREFIX+"r2",t0,m_plan.level_2r,end,m_plan.level_2r,clrLimeGreen,1,STYLE_DOT,"Niveli 2R "+EV_Price(m_plan.level_2r,m_digits));
       Note(EV_PREFIX+"entry_txt",end,m_plan.entry,"HYRJA LIMIT "+ds+" "+EV_Price(m_plan.entry,m_digits),pc,ANCHOR_LEFT,
-           "Vol "+DoubleToString(m_plan.volume,2)+" | risku i modeluar "+DoubleToString(m_plan.risk,2));
+           "Vol "+DoubleToString(m_plan.volume,2)+" | risku i modeluar "+DoubleToString(m_plan.risk,2)+" | modaliteti: "+(m_plan.real ? "REAL (DEMO)" : "FAKE (virtuale)"));
       Note(EV_PREFIX+"sl_txt",end,m_plan.sl,"SL "+EV_Price(m_plan.sl,m_digits),clrRed,(buy ? ANCHOR_LEFT_UPPER : ANCHOR_LEFT_LOWER),"Stop loss");
       Note(EV_PREFIX+"tp_txt",end,m_plan.tp,(m_plan.tp_is_2r ? "TP = 2R " : "TP ")+EV_Price(m_plan.tp,m_digits),clrLimeGreen,(buy ? ANCHOR_LEFT_LOWER : ANCHOR_LEFT_UPPER),"Target");
       if(!m_plan.tp_is_2r)
          Note(EV_PREFIX+"r2_txt",end,m_plan.level_2r,"2R "+EV_Price(m_plan.level_2r,m_digits),clrLimeGreen,(buy ? ANCHOR_LEFT_UPPER : ANCHOR_LEFT_LOWER),"Niveli 2R");
      }
-   //--- panel: mode, H4, M15, decision, what is a temporary choice
-   void DrawPanel(const SEoOutcome &out,const CEoFeed &feed,const bool real_entry,const bool mgmt_read_only)
+   //--- the legend (bottom left) and the panel (top left): boxes with a background, laid out for the space the chart has; the legend first, the panel takes the rest of the height
+   void DrawPanels(const SEoOutcome &out,const CEoFeed &feed,const bool real_entry,const bool mgmt_read_only)
      {
+      int chart_h=(int)ChartGetInteger(m_chart,CHART_HEIGHT_IN_PIXELS,0);
+      int lh=m_legend.LineHeight();
+      m_legend.Begin();
+      m_legend.Line("LEGJENDA",clrSilver,0);
+      m_legend.Line("Kuti blu/portokalli 'H4' = FVG H4 (e plote: rikonfirmuar, e ndrydhur: kandidat, pika: e pavlefshme)",C'170,170,170',1);
+      m_legend.Line("Vije e ndrydhur + pike + 'Sweep H4'/'Fitil H4' = niveli dhe qiriu i sweep-it",C'170,170,170',2);
+      m_legend.Line("Vije e bute + pike + 'Thyerje M15' = qiriu qe konfirmoi thyerjen (prototip BOS, jo MSS i vleresuar)",C'170,170,170',3);
+      m_legend.Line("Kuti M15: gri = kandidat, ARTE = FVG e zgjedhur nga plani, pika = e pavlefshme",C'170,170,170',4);
+      m_legend.Line("HYRJA LIMIT / SL / 2R / TP = vija me etikete dhe cmim",C'170,170,170',5);
+      int leg_rows=(int)MathMax(2.0,MathMin(6.0,(double)((chart_h/3)/lh)));
+      int leg_px=m_legend.Render(leg_rows,0,true);
+      int main_rows=(int)MathMax(4.0,(double)((chart_h-leg_px-40)/lh));
       m_panel.Begin();
-      if(real_entry || !mgmt_read_only) m_panel.Line("ATENCION: TRANSPORT REAL I ZGJEDHUR - ky NUK eshte simulimi FAKE/READ_ONLY",clrRed);
+      //--- priority 0 never leaves: the mode and the decision; larger numbers leave first when the chart is small
+      if(real_entry || !mgmt_read_only) m_panel.Line("ATENCION: TRANSPORT REAL I ZGJEDHUR - ky NUK eshte simulimi FAKE/READ_ONLY",clrRed,0);
       else
         {
-         m_panel.Line("SIMULIM - PA URDHRA REALE",clrOrange);
-         m_panel.Line("FAKE / READ_ONLY | prototip, jo strategji e vleresuar nga klienti",clrSilver);
+         m_panel.Line("SIMULIM - PA URDHRA REALE",clrOrange,0);
+         m_panel.Line("FAKE / READ_ONLY | prototip, jo strategji e vleresuar nga klienti",clrSilver,2);
         }
-      //--- H4: the direction and what it waits for
       if(feed.dv_have)
         {
          bool has_setup=(feed.dv_ev.st.dir!=H3_NONE && feed.dv_ev.st.setup_id!="");
          string h4=EV_H4PhaseText(feed.dv_ev.st.phase,has_setup);
          if(!feed.dv_ev.reliable) h4="drejtimi i pasigurt (historia H4 nuk konvergon); pret";
-         m_panel.Line("H4: "+EV_H4DirectionText(feed.dv_ev.st.dir)+" | "+h4,(feed.dv_ev.st.phase==H3_PH_RECONFIRMED ? clrLimeGreen : clrWhite));
+         m_panel.Line("H4: "+EV_H4DirectionText(feed.dv_ev.st.dir)+" | "+h4,(feed.dv_ev.st.phase==H3_PH_RECONFIRMED ? clrLimeGreen : clrWhite),1);
         }
-      else m_panel.Line("H4: nuk ka vleresim T003 per kete grafik (feed jo gati ose burimi nuk eshte T003)",clrGray);
-      //--- M15: what is confirmed and what is missing
+      else m_panel.Line("H4: nuk ka vleresim T003 per kete grafik (feed jo gati ose burimi nuk eshte T003)",clrSilver,1);
       string done="",missing="";
       if(feed.st.has_context) done+="setup H4 i rikonfirmuar";
       else missing+="setup H4 i rikonfirmuar";
@@ -601,52 +826,21 @@ private:
       else missing+=(missing=="" ? "" : "; ")+"FVG M15 pas thyerjes";
       if(returned) done+="; cmimi u kthye ne FVG";
       else missing+=(missing=="" ? "" : "; ")+"kthimi i cmimit ne FVG";
-      m_panel.Line("M15 konfirmuar: "+(done=="" ? "asgje ende" : done),(done=="" ? clrGray : clrWhite));
-      m_panel.Line("M15 mungon: "+(missing=="" ? "asgje" : missing),clrGray);
-      //--- the plan, when one exists
+      m_panel.Line("M15 konfirmuar: "+(done=="" ? "asgje ende" : done),(done=="" ? clrSilver : clrWhite),1);
+      m_panel.Line("M15 mungon: "+(missing=="" ? "asgje" : missing),clrSilver,1);
       if(m_plan.have)
         {
          m_panel.Line("PLAN "+EV_DirectionText(m_plan.direction)+" LIMIT: hyrja "+EV_Price(m_plan.entry,m_digits)+" | SL "+EV_Price(m_plan.sl,m_digits)+" | "+
-                      (m_plan.tp_is_2r ? "TP = 2R " : "2R "+EV_Price(m_plan.level_2r,m_digits)+" | TP ")+EV_Price(m_plan.tp,m_digits),(m_plan.direction==1 ? clrDodgerBlue : clrDarkOrange));
-         m_panel.Line("  volum "+DoubleToString(m_plan.volume,2)+" | risk i modeluar "+DoubleToString(m_plan.risk,2)+(out.risk_label!="" ? " ("+out.risk_label+": 1% e balances)" : ""),clrGray);
+                      (m_plan.tp_is_2r ? "TP = 2R " : "2R "+EV_Price(m_plan.level_2r,m_digits)+" | TP ")+EV_Price(m_plan.tp,m_digits),(m_plan.direction==1 ? clrDodgerBlue : clrDarkOrange),1);
+         m_panel.Line("volum "+DoubleToString(m_plan.volume,2)+" | risk i modeluar "+DoubleToString(m_plan.risk,2)+(out.risk_label!="" ? " ("+out.risk_label+": 1% e balances)" : "")+
+                      " | modaliteti: "+(m_plan.real ? "REAL (DEMO)" : "FAKE (virtuale)"),clrSilver,2);
         }
-      //--- the decision
       string label,reason;
-      EV_Verdict(out,m_plan,label,reason);
-      m_panel.Line("VENDIMI: "+label+" - "+EV_Clip(reason,92),EV_VerdictColor(label));
-      //--- what is a temporary choice (words, not only a tag)
-      m_panel.Line("Konfirmuar nga klienti: hyrja LIMIT ne skaj te FVG, seanca, lajmet, kufijte ditore.",clrDimGray);
-      m_panel.Line("E perkohshme (prototip): burimi H4, niveli M15 i thyer, zgjedhja e FVG, SL, TP/2R, risku 1%.",clrDimGray);
-      m_panel.End();
-     }
-   //--- the legend, bottom left (own labels: the panel class cannot anchor at the bottom)
-   void DrawLegend(void)
-     {
-      string lines[6];
-      lines[0]="LEGJENDA";
-      lines[1]="Kuti blu/portokalli 'H4' = FVG H4 (e plote: rikonfirmuar, e ndrydhur: kandidat, pika: e pavlefshme)";
-      lines[2]="Vije e ndrydhur + pike + 'Sweep H4'/'Fitil H4' = niveli dhe qiriu i sweep-it";
-      lines[3]="Vije e bute + pike + 'Thyerje M15' = qiriu qe konfirmoi thyerjen (prototip BOS, jo MSS i vleresuar)";
-      lines[4]="Kuti M15: gri = kandidat, ARTE = FVG e zgjedhur nga plani, pika = e pavlefshme";
-      lines[5]="HYRJA LIMIT / SL / 2R / TP = vija me etikete dhe cmim";
-      for(int i=0;i<6;i++)
-        {
-         string name=EV_PANEL_PREFIX+"leg"+IntegerToString(i);
-         if(ObjectFind(m_chart,name)<0)
-           {
-            if(!ObjectCreate(m_chart,name,OBJ_LABEL,0,0,0)) {ResetLastError(); continue;}
-            ObjectSetInteger(m_chart,name,OBJPROP_CORNER,CORNER_LEFT_LOWER);
-            ObjectSetInteger(m_chart,name,OBJPROP_ANCHOR,ANCHOR_LEFT_LOWER);
-            ObjectSetInteger(m_chart,name,OBJPROP_XDISTANCE,10);
-            ObjectSetInteger(m_chart,name,OBJPROP_YDISTANCE,8+(5-i)*13);
-            ObjectSetInteger(m_chart,name,OBJPROP_FONTSIZE,8);
-            ObjectSetString(m_chart,name,OBJPROP_FONT,"Consolas");
-            ObjectSetInteger(m_chart,name,OBJPROP_SELECTABLE,false);
-            ObjectSetInteger(m_chart,name,OBJPROP_HIDDEN,true);
-            ObjectSetInteger(m_chart,name,OBJPROP_COLOR,(i==0 ? clrSilver : clrDimGray));
-           }
-         ObjectSetString(m_chart,name,OBJPROP_TEXT,lines[i]);
-        }
+      EV_Verdict(out,m_plan,real_entry,label,reason);
+      m_panel.Line("VENDIMI: "+label+" - "+EV_Clip(reason,92),EV_VerdictColor(label),0);
+      m_panel.Line("Konfirmuar nga klienti: hyrja LIMIT ne skaj te FVG, seanca, lajmet, kufijte ditore.",C'170,170,170',3);
+      m_panel.Line("E perkohshme (prototip): burimi H4, niveli M15 i thyer, zgjedhja e FVG, SL, TP/2R, risku 1%.",C'170,170,170',4);
+      m_panel.Render(main_rows,16,false);
      }
 
 public:
@@ -665,14 +859,15 @@ public:
       m_on=true;
       m_chart=ChartID();
       m_digits=(int)SymbolInfoInteger(_Symbol,SYMBOL_DIGITS);
-      m_panel.Init(EV_PANEL_PREFIX,true,CORNER_LEFT_UPPER);
+      m_panel.Init(EV_PANEL_PREFIX+"main_",9);
+      m_legend.Init(EV_PANEL_PREFIX+"leg_",8);
       ObjectsDeleteAll(m_chart,EV_PREFIX);                      // this component's own prefix only
      }
    //--- called by the EA after the decision step; reads only
    void Update(const SEoOutcome &out,const CEoFeed &feed,const bool real_entry,const bool mgmt_read_only)
      {
       if(!m_on) return;
-      TrackPlan(out,feed);
+      TrackPlan(out,feed,real_entry);
       string sig=out.status+"|"+out.reason+"|"+EV_Hm(feed.cut)+"|"+feed.st.phase+"|"+feed.st.bos_level+"|"+out.spb.candidate_id+"|"+
                  (m_plan.have ? EV_Price(m_plan.entry,m_digits)+EV_Price(m_plan.sl,m_digits)+EV_Price(m_plan.tp,m_digits)+m_plan.signal_id : "-")+"|"+IntegerToString(ArraySize(feed.f))+"|"+
                  (feed.dv_have ? IntegerToString(feed.dv_ev.st.phase)+feed.dv_ev.st.setup_id+IntegerToString(ArraySize(feed.dv_tracks)) : "-");
@@ -684,14 +879,14 @@ public:
          DrawM15(out,feed);
          DrawPlan(feed);
         }
-      DrawPanel(out,feed,real_entry,mgmt_read_only);
-      DrawLegend();
+      DrawPanels(out,feed,real_entry,mgmt_read_only);
       ChartRedraw(m_chart);
      }
    void Destroy(void)
      {
       if(!m_on) return;
       m_panel.Destroy();
+      m_legend.Destroy();
       ObjectsDeleteAll(m_chart,EV_PREFIX);
       ChartRedraw(m_chart);
       m_on=false;

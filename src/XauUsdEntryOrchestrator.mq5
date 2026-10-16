@@ -9,7 +9,7 @@
 //   A filled order is registered with the existing T011 executor and then managed by the T011 driver inside this EA (OnTick = the 2R level, OnTimer = reconcile only) only when InpManagementRegistration is true;
 //   the registered fill stays in the lifecycle index until the T011 record is DONE or the position is proven closed (that index is the restart memory). Not proof of broker execution. UNVERIFIED: not compiled or run.
 #property strict
-#property version "1.16"
+#property version "1.17"
 #include "include/EntryOrchestratorFeed.mqh"
 #include "include/EntryOrchestratorView.mqh"      // chart view of the decision already taken (InpChartView); reads only
 #include "include/EntryTransportFake.mqh"
@@ -206,7 +206,9 @@ void Status(const string text)
    if(text==g_last) return;
    g_last=text;
    Print("T016 ",text);
-   Comment((g_real_entry ? "T016 ENTRY ORCHESTRATOR - REAL DEMO ORDERS ENABLED BY THE OWNER\n" : "T016 ENTRY ORCHESTRATOR - FAKE EXECUTION ONLY, nothing is sent to the terminal\n")+(InpRiskSource==EOI_RISK_SIMULATION_1PCT_CURRENT_BALANCE ? "SIMULATION ONLY - the account classification is NOT demo-checked\n" : ""),text);
+   if(InpChartView) Comment("");            // the view's panel replaces the text block; the diagnostics stay in the Experts log (Print above)
+   else
+      Comment((g_real_entry ? "T016 ENTRY ORCHESTRATOR - REAL DEMO ORDERS ENABLED BY THE OWNER\n" : "T016 ENTRY ORCHESTRATOR - FAKE EXECUTION ONLY, nothing is sent to the terminal\n")+(InpRiskSource==EOI_RISK_SIMULATION_1PCT_CURRENT_BALANCE ? "SIMULATION ONLY - the account classification is NOT demo-checked\n" : ""),text);
   }
 
 bool Configure(void)

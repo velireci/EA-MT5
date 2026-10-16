@@ -34,18 +34,22 @@ string TextOf(const string name) {return(Exists(name) ? ObjectGetString(0,name,O
 long ColorOf(const string name) {return(Exists(name) ? ObjectGetInteger(0,name,OBJPROP_COLOR) : -1);}
 bool Has(const string text,const string part) {return(StringFind(text,part)>=0);}
 
-//--- all panel lines joined (velo_t016v_pnl_000, 001, ...)
-string PanelText(void)
+//--- all rows of a box joined (continuation rows, which start with two spaces, are glued to the previous row)
+string BoxText(const string prefix)
   {
    string all="";
-   for(int i=0;i<30;i++)
+   for(int i=0;i<60;i++)
      {
-      string name=EV_PANEL_PREFIX+StringFormat("%03d",i);
+      string name=prefix+StringFormat("%03d",i);
       if(!Exists(name)) break;
-      all+=ObjectGetString(0,name,OBJPROP_TEXT)+"\n";
+      string t=ObjectGetString(0,name,OBJPROP_TEXT);
+      if(StringLen(t)>2 && StringSubstr(t,0,2)=="  " && all!="") all=StringSubstr(all,0,StringLen(all)-1)+" "+StringSubstr(t,2)+"\n";
+      else all+=t+"\n";
      }
    return(all);
   }
+string PanelText(void) {return(BoxText(EV_PANEL_PREFIX+"main_"));}
+string LegendText(void) {return(BoxText(EV_PANEL_PREFIX+"leg_"));}
 
 int CountPrefix(const string prefix,const int type)
   {
@@ -84,6 +88,26 @@ int CountArrowObjects(void)
       if(t==OBJ_ARROW_UP || t==OBJ_ARROW_DOWN || t==OBJ_ARROW_BUY || t==OBJ_ARROW_SELL || t==OBJ_ARROW_LEFT_PRICE || t==OBJ_ARROW_RIGHT_PRICE) n++;
      }
    return(n);
+  }
+
+//--- the background exists, is a rectangle label, holds every row and fits the chart
+bool BoxFits(const string prefix)
+  {
+   string bg=prefix+"bg";
+   if(!Exists(bg) || (int)ObjectGetInteger(0,bg,OBJPROP_TYPE)!=OBJ_RECTANGLE_LABEL) return(false);
+   int x=(int)ObjectGetInteger(0,bg,OBJPROP_XDISTANCE),y=(int)ObjectGetInteger(0,bg,OBJPROP_YDISTANCE);
+   int w=(int)ObjectGetInteger(0,bg,OBJPROP_XSIZE),h=(int)ObjectGetInteger(0,bg,OBJPROP_YSIZE);
+   if(x+w>(int)ChartGetInteger(0,CHART_WIDTH_IN_PIXELS,0) || y+h>(int)ChartGetInteger(0,CHART_HEIGHT_IN_PIXELS,0) || y<0) return(false);
+   int rows=0;
+   for(int i=0;i<60;i++)
+     {
+      string name=prefix+StringFormat("%03d",i);
+      if(!Exists(name)) break;
+      int ly=(int)ObjectGetInteger(0,name,OBJPROP_YDISTANCE);
+      if(ly<y || ly+10>y+h) return(false);
+      rows++;
+     }
+   return(rows>0);
   }
 
 #define KIND_WAIT_CONTEXT  0
@@ -207,7 +231,9 @@ void RunScenario(CEoView &view,const int dir,const int kind,const string title)
    Check(Has(panel,"SIMULIM - PA URDHRA REALE"),title+": the panel says SIMULIM - PA URDHRA REALE");
    Check(Has(panel,"FAKE / READ_ONLY"),title+": the panel says FAKE / READ_ONLY");
    Check(Has(panel,"VENDIMI: "),title+": the panel has a decision line");
-   Check(Has(TextOf(EV_PANEL_PREFIX+"leg0"),"LEGJENDA") && Has(TextOf(EV_PANEL_PREFIX+"leg4"),"ARTE"),title+": the legend is on the chart");
+   Check(Has(LegendText(),"LEGJENDA") && Has(LegendText(),"ARTE") && Has(LegendText(),"Thyerje M15"),title+": the legend is on the chart");
+   Check(BoxFits(EV_PANEL_PREFIX+"main_") && BoxFits(EV_PANEL_PREFIX+"leg_"),title+": both boxes have a background that holds their rows and fits the chart");
+   Check(Has(panel,"modaliteti: FAKE (virtuale)") || kind==KIND_WAIT_CONTEXT,title+": the plan row names the FAKE mode");
    Check(CountArrowObjects()==0,title+": no entry arrow object (only the dots of the sweep and of the break exist)");
    Check(!Exists(EV_PREFIX+"entry_arrow") && CountPrefix(EV_PREFIX,OBJ_ARROW_BUY)==0 && CountPrefix(EV_PREFIX,OBJ_ARROW_SELL)==0,title+": no buy / sell arrow");
    Check(Exists("MANUAL_VIEW_TEST_LINE"),title+": the manual drawing is untouched");
@@ -279,6 +305,62 @@ void RunScenario(CEoView &view,const int dir,const int kind,const string title)
      }
   }
 
+
+//--- pure layout helpers: the same cases as tests/test_view_layout.py
+void TestLayout(void)
+  {
+   string rows[];
+   int n=EV_Wrap("SIMULIM - PA URDHRA REALE",40,rows);
+   Check(n==1 && rows[0]=="SIMULIM - PA URDHRA REALE","layout: a short line is one row");
+   n=EV_Wrap("M15 mungon: thyerja e nivelit M15; FVG M15 pas thyerjes; kthimi i cmimit ne FVG",30,rows);
+   Check(n==3 && rows[0]=="M15 mungon: thyerja e nivelit" && rows[1]=="  M15; FVG M15 pas thyerjes;" && rows[2]=="  kthimi i cmimit ne FVG","layout: a long line wraps at words and indents the continuation");
+   n=EV_Wrap("x aaaaaaaaaaaaaaaaaaaaaaaaa",10,rows);
+   bool all_fit=true;
+   string glued="";
+   for(int i=0;i<n;i++) {if(StringLen(rows[i])>10) all_fit=false; string cell=rows[i]; StringTrimLeft(cell); glued+=cell;}
+   Check(all_fit && glued=="xaaaaaaaaaaaaaaaaaaaaaaaaa","layout: a word longer than the width is cut and nothing is lost");
+   string t[7]={"SIMULIM - PA URDHRA REALE","H4: ZBRITES (SELL) | sweep i brendshem u pa; pret qe cmimi te preke nje FVG H4 te ri","M15 konfirmuar: asgje ende","M15 mungon: setup H4 i rikonfirmuar",
+                "VENDIMI: PRET - pret rikonfirmimin H4","Konfirmuar nga klienti: hyrja LIMIT ne skaj te FVG, seanca, lajmet, kufijte ditore.","E perkohshme (prototip): burimi H4, niveli M15 i thyer, SL, TP/2R"};
+   int p[7]={0,1,1,1,0,3,3};
+   bool keep[];
+   int dropped=EV_Select(t,p,7,120,12,keep);
+   bool all=true;
+   for(int i=0;i<7;i++) if(!keep[i]) all=false;
+   Check(dropped==0 && all,"layout: a wide chart keeps every line");
+   dropped=EV_Select(t,p,7,120,6,keep);
+   Check(dropped==2 && keep[0] && keep[1] && keep[2] && keep[3] && keep[4] && !keep[5] && !keep[6],"layout: low priorities leave first and the marker row counts");
+   string t2[4]={"a","b","c","d"};
+   int p2[4]={0,2,2,2};
+   dropped=EV_Select(t2,p2,4,40,3,keep);
+   Check(dropped==2 && keep[0] && keep[1] && !keep[2] && !keep[3],"layout: the later line of the same priority leaves first");
+   dropped=EV_Select(t,p,7,20,2,keep);
+   Check(keep[0] && keep[4] && !keep[1] && !keep[2] && !keep[3] && !keep[5] && !keep[6],"layout: priority 0 is never dropped even when nothing fits");
+  }
+
+//--- the request mode follows the transport: REAL (DEMO) says so everywhere, FAKE says virtual
+void TestRequestMode(CEoView &view)
+  {
+   CEoFeed feed;
+   SEoOutcome out;
+   Build(feed,out,1,KIND_ACCEPTED_2R);
+   view.Update(out,feed,true,true);
+   string panel=PanelText();
+   Check(Has(panel,"VENDIMI: KERKESE REALE") && !Has(panel,"KERKESE VIRTUALE"),"request mode: a request through the REAL transport is called REALE, never virtual");
+   Check(Has(panel,"modaliteti: REAL (DEMO)") && !Has(panel,"modaliteti: FAKE") && Has(panel,"ATENCION: TRANSPORT REAL"),"request mode: the plan row and the banner say REAL (DEMO)");
+   SEoOutcome again;
+   EO_OutcomeInit(again);
+   again.spb.signal_id=out.spb.signal_id;
+   EO_Set(again,"ALREADY_HANDLED",out.spb.signal_id);
+   view.Update(again,feed,true,true);
+   panel=PanelText();
+   Check(Has(panel,"KERKESE REALE") && Has(panel,"trajtuar me pare") && !Has(panel,"KERKESE VIRTUALE"),"request mode: the kept plan of a handled signal keeps the REAL mode");
+   Build(feed,out,1,KIND_ACCEPTED_2R);
+   out.spb.signal_id="SYNTHETIC_SIGNAL_2";
+   view.Update(out,feed,false,true);
+   panel=PanelText();
+   Check(Has(panel,"VENDIMI: KERKESE VIRTUALE") && Has(panel,"modaliteti: FAKE (virtuale)") && !Has(panel,"KERKESE REALE") && Has(panel,"SIMULIM - PA URDHRA REALE"),"request mode: the FAKE transport is called virtual and the mode line says SIMULIM");
+  }
+
 void OnStart()
   {
    MqlTick t;
@@ -288,6 +370,8 @@ void OnStart()
    datetime now=TimeCurrent();
    g_cut=now-(now%900);
    ObjectCreate(0,"MANUAL_VIEW_TEST_LINE",OBJ_HLINE,0,0,g_mid-20.0*g_u);       // a manual drawing that the view must never touch
+   Check((int)ChartGetInteger(0,CHART_WIDTH_IN_PIXELS,0)>=900 && (int)ChartGetInteger(0,CHART_HEIGHT_IN_PIXELS,0)>=500,"the chart is large enough for the assertions (900 x 500 px)");
+   TestLayout();
    CEoView view;
    view.Init();
    RunScenario(view,-1,KIND_WAIT_CONTEXT,"WAIT_CONTEXT SELL (H4 BEAR, SWEEP_WAIT, M15 waiting)");
@@ -298,6 +382,7 @@ void OnStart()
    RunScenario(view,-1,KIND_ACCEPTED_FAR,"SELL accepted, TP beyond 2R");
    RunScenario(view,1,KIND_BLOCKED,"BUY blocked by the gate");
    RunScenario(view,-1,KIND_BLOCKED,"SELL blocked by the gate");
+   TestRequestMode(view);
    view.Destroy();
    Check(CountPrefix(EV_PREFIX,-1)==0,"Destroy removes every object of the component");
    Check(Exists("MANUAL_VIEW_TEST_LINE"),"the manual drawing survives Destroy");
