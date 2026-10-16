@@ -3,39 +3,48 @@
 //|                                                                  |
 //| CHART VIEW of the decision the entry orchestrator already took.  |
 //| It READS the outcome of the step, the M15 observer state and the |
-//| H4 evaluation the feed already computed; it recomputes nothing,  |
-//| reads no future bar, invents no level and sends nothing. Every   |
-//| input of this file is const or a copy owned by the view, and the |
-//| EA calls Update() AFTER the decision step, only when the owner   |
-//| asked for the view (InpChartView). With the view off, or on, the |
-//| plans, blocks and FAKE requests are the same.                    |
+//| H4 evaluation the feed already computed for its last snapshot;   |
+//| it recomputes no signal, reads no future bar, invents no level   |
+//| and sends nothing. Inputs are const; the EA calls Update() AFTER |
+//| the decision step and only when the owner asked for the view     |
+//| (InpChartView). On or off, the plans, blocks and FAKE requests   |
+//| are the same.                                                    |
 //|                                                                  |
-//| H4 layer: the EXISTING CH3BiasDrawer (T003 map, prefix velo_t003_)|
-//| is called with the arrays of the LAST snapshot of the build. It  |
-//| is the only owner of those objects; do not run the T003 EA on the|
-//| same chart. M15 + plan + panel objects: prefix velo_t016v_ only; |
-//| manual drawings are never touched.                               |
-//|                                                                  |
+//| WHAT IS DRAWN (every mark has a short label; colour never carries|
+//| the meaning alone; the legend is on the chart):                  |
+//|  H4  FVG zones   outline blue (bullish) / orange (bearish), label|
+//|                  "H4 ...": solid = reconfirmed, dashed = candidate|
+//|                  dotted grey = invalid. From the tracks of the   |
+//|                  T003 evaluation of the build.                   |
+//|  H4  sweep       dashed line at the swept level + a mark and a   |
+//|                  label at the sweep candle. The level of an      |
+//|                  internal sweep is the pivot bar named by the    |
+//|                  decision's own event id (a lookup of that bar's |
+//|                  high / low, not a new swing computation); the   |
+//|                  level of a wick setup is the recorded snapshot. |
+//|                  If a piece is missing it is NOT drawn.          |
+//|  M15 break       line + mark at the candle that closed beyond the|
+//|                  level, label "Thyerje M15" (prototype BOS, never|
+//|                  called a validated MSS).                        |
+//|  M15 FVG zones   outline; GOLD only for the FVG the plan bridge  |
+//|                  really selected (spb.candidate_id).             |
+//|  Plan            LIMIT entry, SL, 2R, TP with labels and prices; |
+//|                  TP = 2R is one line with both names. No arrows. |
 //| Text is Albanian WITHOUT diacritics (the sources are ASCII).     |
-//| Tags: [K] = confirmed by the client in the preset labels         |
-//|       [P] = temporary simulation choice (DEMO-PROPOSAL / SIMULATION)|
-//| The tags mirror the labels of src/presets/*_simulation_fake.set  |
-//| (pinned by tests/test_view.py). The view is NOT evidence that the|
-//| prototype matches the client's strategy.                         |
-//|                                                                  |
-//| NOT YET COMPILED OR SEEN IN MT5 (UNVERIFIED).                    |
+//| Objects: prefix velo_t016v_ only; manual drawings are untouched. |
+//| The view is NOT evidence that the prototype matches the client's |
+//| strategy. NOT YET COMPILED OR SEEN IN MT5 (UNVERIFIED).          |
 //+------------------------------------------------------------------+
 #ifndef VELO_ENTRY_ORCHESTRATOR_VIEW_MQH
 #define VELO_ENTRY_ORCHESTRATOR_VIEW_MQH
 
 #include "EntryOrchestratorFeed.mqh"
-#include "H4BiasDrawer.mqh"
 #include "StatusPanel.mqh"
 
 #define EV_PREFIX        "velo_t016v_"
 #define EV_PANEL_PREFIX  "velo_t016v_pnl_"
-#define EV_TAG_CONFIRMED "[K]"
-#define EV_TAG_PROPOSAL  "[P]"
+#define EV_MAX_H4_FVG    4
+#define EV_MAX_M15_FVG   4
 
 //--- the plan the chart keeps after the step that built it (the orchestrator keeps only geometry once a signal is handled)
 struct SEvPlan
@@ -51,7 +60,8 @@ struct SEvPlan
    bool     tp_is_2r;
    string   signal_id;
    string   setup;
-   string   decision;      // Albanian one-liner of what the step did with the plan
+   string   verdict;       // PRET / BLLOKUAR / PLAN GATI / KERKESE VIRTUALE at the step that built the plan
+   string   reason;
    datetime t0;
   };
 
@@ -63,7 +73,8 @@ void EV_PlanInit(SEvPlan &p)
    p.tp_is_2r=false;
    p.signal_id="";
    p.setup="";
-   p.decision="";
+   p.verdict="";
+   p.reason="";
    p.t0=0;
   }
 
@@ -78,6 +89,11 @@ string EV_Price(const double p,const int digits)
    return(MathIsValidNumber(p) ? DoubleToString(p,digits) : "n/a");
   }
 
+string EV_Hm(const datetime t)
+  {
+   return(TimeToString(t,TIME_DATE|TIME_MINUTES));
+  }
+
 string EV_DirectionText(const int direction)
   {
    if(direction==1) return("BUY");
@@ -85,54 +101,190 @@ string EV_DirectionText(const int direction)
    return("?");
   }
 
-string EV_H4DirectionText(const string direction)
+string EV_H4DirectionText(const int dir)
   {
-   if(direction=="BULL") return("ngritese (BUY)");
-   if(direction=="BEAR") return("zbritese (SELL)");
-   return("pa drejtim");
+   if(dir==H3_BULL) return("NGRITES (BUY)");
+   if(dir==H3_BEAR) return("ZBRITES (SELL)");
+   return("PA DREJTIM");
   }
 
-//--- what the M15 observer waits for, from its own phase (no new rule)
+//--- what the T003 phase means and what it waits for (words of H3VPhaseReason, no new rule)
+string EV_H4PhaseText(const int phase,const bool has_setup)
+  {
+   if(phase==H3_PH_SWEEP_WAIT) return("sweep i brendshem u pa; pret qe cmimi te preke nje FVG H4 te ri");
+   if(phase==H3_PH_HOLD) return("fitil mbi nivelin mbrojtes pa mbyllje; pret prekjen e nje FVG H4 te ri");
+   if(phase==H3_PH_RECONFIRMED) return("FVG H4 u prek: setup i RIKONFIRMUAR");
+   if(has_setup) return("setup aktiv");
+   return("pa setup; pret sweep ose fitil mbi nivelin");
+  }
+
+//--- what the M15 observer waits for, from its own phase
 string EV_M15PhaseText(const string phase,const bool has_context)
   {
-   if(phase=="WAIT_CONTEXT" || !has_context) return("pret kontekst H4 te vlefshem");
-   if(phase=="WAIT_BREAK") return("pret thyerjen e nivelit M15 (BOS)");
-   if(phase=="WAIT_FVG") return("BOS u pa; pret FVG M15");
-   if(phase=="WAIT_RETURN") return("FVG M15 ekziston; pret kthimin e cmimit ne FVG");
+   if(!has_context || phase=="WAIT_CONTEXT") return("pret setup H4 te rikonfirmuar (pa te, M15 nuk fillon)");
+   if(phase=="WAIT_BREAK") return("pret thyerjen e nivelit M15");
+   if(phase=="WAIT_FVG") return("thyerja u pa; pret nje FVG M15");
+   if(phase=="WAIT_RETURN") return("FVG M15 ekziston; pret kthimin e cmimit ne te");
    if(phase=="RETURN_OBSERVED") return("cmimi u kthye ne FVG; pa hyrje te vonuar");
    if(phase=="REPLAY_REQUIRED") return("histori e rishikuar; pret rindertim");
    if(phase=="WAIT_POLICY") return("pret politiken e kohes se FVG");
    return("faza "+phase);
   }
 
-//--- the decision of the step in words; the English status and reason stay in the last panel line
-string EV_StatusText(const SEoOutcome &o)
+//--- the first reason of a " | " joined list
+string EV_FirstReason(const string reasons)
   {
-   string s=o.status;
-   if(s=="FEED_NOT_OK") return("PRET te dhenat H4/M15 (feed jo gati)");
-   if(s=="HALTED") return("NDALUAR nga mbrojtja: "+EV_Clip(o.reason,70));
-   if(s=="CONFIG_UNSET") return("BLLOKUAR: konfigurim i paplote "+EV_Clip(o.reason,60));
-   if(s=="MARKET_NOT_READY") return("PRET tregun (kuota/simboli): "+EV_Clip(o.reason,60));
-   if(s=="SIMULATION_REFUSED") return("BLLOKUAR: politika SIMULATION lejohet vetem me hyrje FAKE");
-   if(s=="RISK_BASE_NOT_READY") return("PRET bazen e riskut (balanca): "+EV_Clip(o.reason,60));
-   if(s=="NO_PLAN")
-     {
-      if(StringFind(o.reason,"CONTEXT_LOST_OR_NOT_READY")==0) return("PRET setup H4 te rikonfirmuar; plan nuk ka");
-      return("PA PLAN: "+EV_Clip(o.reason,76));
-     }
-   if(s=="ALREADY_HANDLED") return("Sinjali u trajtua me pare; nuk dergohet perseri");
-   if(s=="PROBE_FAILED") return("Plani NDALOHET: matja e humbjes nga brokeri deshtoi");
-   if(s=="GATE_BLOCKED") return("Plani u NDERTUA por porta e BLLOKON: "+EV_Clip(o.dec.reasons,60));
-   if(s=="RESERVATION_FAILED") return("Rezervimi deshtoi; asgje nuk u vendos, sinjali mbetet i lire");
-   if(s=="EXECUTOR")
-     {
-      if(o.request) return("Plani u PRANUA: kerkese FAKE (virtuale); asgje nuk shkon te brokeri");
-      return("Ekzekutuesi nuk vendosi kerkese: "+EV_Clip(o.reason,60));
-     }
-   return(s+" "+EV_Clip(o.reason,70));
+   int k=StringFind(reasons," | ");
+   if(k<0) return(reasons);
+   return(StringSubstr(reasons,0,k));
   }
 
-//--- one chart object helper set (prefix velo_t016v_ only)
+int EV_ReasonCount(const string reasons)
+  {
+   if(reasons=="") return(0);
+   int n=1,from=0;
+   while(true)
+     {
+      int k=StringFind(reasons," | ",from);
+      if(k<0) break;
+      n++;
+      from=k+3;
+     }
+   return(n);
+  }
+
+bool EV_Starts(const string text,const string prefix)
+  {
+   return(StringFind(text,prefix)==0);
+  }
+
+//--- short Albanian meaning of a technical reason code (the code itself stays in the Experts log)
+string EV_ReasonShort(const string code)
+  {
+   if(EV_Starts(code,"CONTEXT_LOST_OR_NOT_READY")) return("pret rikonfirmimin H4 (nje FVG H4 te preket)");
+   if(EV_Starts(code,"PHASE_NOT_WAIT_RETURN")) return("M15 nuk ka ende FVG qe pret kthim");
+   if(EV_Starts(code,"NO_ELIGIBLE_CANDIDATE")) return("asnje FVG M15 e pranueshme");
+   if(EV_Starts(code,"AMBIGUOUS_CANDIDATES")) return("disa FVG M15, zgjedhja nuk eshte e qarte");
+   if(EV_Starts(code,"HISTORICAL_OR_REPLAYED_CANDIDATE")) return("sinjal i vjeter (para nisjes); nuk perdoret");
+   if(EV_Starts(code,"REPLAY_REQUIRED")) return("histori e rishikuar; pret rindertim");
+   if(EV_Starts(code,"RETURN_ALREADY_OBSERVED") || EV_Starts(code,"CANDIDATE_RETURN_ALREADY_OBSERVED")) return("cmimi u kthye ne FVG para planit; pa hyrje te vonuar");
+   if(EV_Starts(code,"CANDIDATE_INVALIDATED")) return("FVG M15 u be e pavlefshme");
+   if(EV_Starts(code,"CONTEXT_SOURCE_MISMATCH") || EV_Starts(code,"TIMING_MISMATCH") || EV_Starts(code,"SELECTION_UNSET")) return("zgjedhjet e konfigurimit nuk perputhen");
+   if(EV_Starts(code,"FUTURE_DATA") || EV_Starts(code,"BROKEN_LEVEL_MISMATCH") || EV_Starts(code,"CANDIDATE_")) return("te dhenat M15 nuk jane konsistente");
+   if(EV_Starts(code,"SESSION_CLOSED")) return("jashte seances se tregtimit");
+   if(EV_Starts(code,"SESSION_UNKNOWN")) return("seanca e panjohur");
+   if(EV_Starts(code,"NEWS_BLOCK")) return("lajme USD me ndikim te larte");
+   if(EV_Starts(code,"NEWS_UNKNOWN")) return("kalendari i lajmeve nuk lexohet");
+   if(EV_Starts(code,"SPREAD_BLOCK")) return("spread shume i larte");
+   if(EV_Starts(code,"SPREAD_UNKNOWN")) return("spread i panjohur");
+   if(EV_Starts(code,"MAX_POSITIONS_REACHED")) return("kufiri i pozicioneve te hapura");
+   if(EV_Starts(code,"MAX_TRADES_REACHED")) return("kufiri ditor i tregtive");
+   if(EV_Starts(code,"COMBINED_RISK_EXCEEDED")) return("risku i kombinuar tejkalon kufirin");
+   if(EV_Starts(code,"DAILY_WIN_STOP")) return("limiti ditor: fitore e arritur");
+   if(EV_Starts(code,"CONSECUTIVE_LOSSES_STOP")) return("limiti ditor: humbje radhazi");
+   if(EV_Starts(code,"DAILY_LOSS_LIMIT")) return("limiti ditor i humbjes");
+   if(EV_Starts(code,"BALANCE_START_UNSET")) return("balanca e fillimit te dites mungon");
+   if(EV_Starts(code,"BALANCE_DAY_MISMATCH")) return("balanca e ruajtur eshte per dite tjeter");
+   if(EV_Starts(code,"HISTORY_")) return("historia ditore nuk eshte e plote");
+   if(EV_Starts(code,"CLASSIFICATION_") || EV_Starts(code,"INCONSISTENT_COUNTERS")) return("numeruesit ditore te dhene nuk jane konsistente");
+   if(EV_Starts(code,"INPUT_UNSET") || EV_Starts(code,"NOW_UNSET")) return("hyrje e paplotesuar per porten");
+   if(EV_Starts(code,"INVALID_UTC") || EV_Starts(code,"UNSUPPORTED_YEAR") || EV_Starts(code,"STALE_SNAPSHOT_DAY")) return("ora ose dita e portes ditore nuk eshte e vlefshme");
+   if(EV_Starts(code,"DAILY_")) return("porta ditore nuk lejon");
+   if(EV_Starts(code,"POLICY_UNSET")) return("kufi i paplotesuar ne konfigurim");
+   if(EV_Starts(code,"INVALID_SNAPSHOT")) return("te dhena te pavlefshme per porten");
+   if(EV_Starts(code,"DATA_")) return("konteksti H4/M15 nuk eshte gati");
+   if(EV_Starts(code,"DUPLICATE_SIGNAL")) return("sinjal i dyfishte");
+   if(EV_Starts(code,"BROKER_LOSS_CHECK")) return("humbja e matur nga brokeri nuk perputhet me planin");
+   if(EV_Starts(code,"PERMIT")) return("lejimi i planit nuk eshte i vlefshem");
+   if(EV_Starts(code,"PLAN_")) return("plani nuk eshte i vlefshem");
+   if(EV_Starts(code,"REGISTRY_")) return("regjistri i sinjaleve");
+   if(EV_Starts(code,"PRE_SEND_RESERVATION_FAILED")) return("rezervimi i sinjalit deshtoi");
+   if(EV_Starts(code,"QUOTE_") || EV_Starts(code,"BALANCE_") || EV_Starts(code,"ACCOUNT_")) return("kuota ose balanca nuk lexohen sic duhet");
+   return("arsye teknike (shih Experts)");
+  }
+
+bool EV_IsWaitingReason(const string code)
+  {
+   return(EV_Starts(code,"CONTEXT_LOST_OR_NOT_READY") || EV_Starts(code,"PHASE_NOT_WAIT_RETURN") || EV_Starts(code,"NO_ELIGIBLE_CANDIDATE") ||
+          EV_Starts(code,"HISTORICAL_OR_REPLAYED_CANDIDATE") || EV_Starts(code,"REPLAY_REQUIRED") || EV_Starts(code,"RETURN_ALREADY_OBSERVED") ||
+          EV_Starts(code,"CANDIDATE_RETURN_ALREADY_OBSERVED"));
+  }
+
+//--- the decision of the step as ONE of PRET / BLLOKUAR / PLAN GATI / KERKESE VIRTUALE with a short reason
+void EV_Verdict(const SEoOutcome &o,const SEvPlan &kept,string &label,string &reason)
+  {
+   string s=o.status;
+   label="PRET";
+   reason="";
+   if(s=="EXECUTOR")
+     {
+      if(o.request) {label="KERKESE VIRTUALE"; reason="plan i pranuar; kerkese FAKE, asgje nuk shkon te brokeri"; return;}
+      label="PLAN GATI";
+      reason="plani kaloi porten, por ekzekutuesi nuk vendosi kerkese (shih Experts)";
+      return;
+     }
+   if(s=="GATE_BLOCKED")
+     {
+      int n=EV_ReasonCount(o.dec.reasons);
+      label="BLLOKUAR";
+      reason="plani u ndertua, porta nuk lejon: "+EV_ReasonShort(EV_FirstReason(o.dec.reasons))+(n>1 ? " (+"+IntegerToString(n-1)+" arsye te tjera)" : "");
+      return;
+     }
+   if(s=="ALREADY_HANDLED")
+     {
+      if(kept.have && kept.verdict!="") {label=kept.verdict; reason=kept.reason+" (trajtuar me pare)"; return;}
+      reason="sinjali u trajtua me pare; nuk dergohet perseri";
+      return;
+     }
+   if(s=="NO_PLAN")
+     {
+      if(EV_IsWaitingReason(o.reason)) {label="PRET"; reason=EV_ReasonShort(o.reason); return;}
+      label="BLLOKUAR";
+      reason="plan nuk ndertohet: "+EV_ReasonShort(o.reason);
+      return;
+     }
+   if(s=="FEED_NOT_OK") {reason="te dhenat H4/M15 nuk jane gati"; return;}
+   if(s=="MARKET_NOT_READY") {reason="kuota ose simboli nuk lexohen"; return;}
+   if(s=="RISK_BASE_NOT_READY") {reason="balanca per riskun nuk lexohet"; return;}
+   if(s=="HALTED") {label="BLLOKUAR"; reason="mbrojtja e ndali sistemin (shih Experts)"; return;}
+   if(s=="CONFIG_UNSET") {label="BLLOKUAR"; reason="konfigurim i paplote (shih Experts)"; return;}
+   if(s=="SIMULATION_REFUSED") {label="BLLOKUAR"; reason="politika SIMULATION lejohet vetem me hyrje FAKE"; return;}
+   if(s=="PROBE_FAILED") {label="BLLOKUAR"; reason="humbja nga brokeri nuk u mat; plani ndalet"; return;}
+   if(s=="RESERVATION_FAILED") {label="BLLOKUAR"; reason="rezervimi deshtoi; asgje nuk u vendos"; return;}
+   reason="gjendje "+s;
+  }
+
+color EV_VerdictColor(const string label)
+  {
+   if(label=="KERKESE VIRTUALE" || label=="PLAN GATI") return(clrLimeGreen);
+   if(label=="BLLOKUAR") return(clrOrangeRed);
+   return(clrWhite);
+  }
+
+//--- "IH201610161200" / "IL..." (the id of an internal swing level) -> pivot open time, kind letter
+bool EV_ParseInteriorId(const string id,datetime &pivot,bool &is_high)
+  {
+   if(StringLen(id)!=14) return(false);
+   string kind=StringSubstr(id,0,2);
+   if(kind!="IH" && kind!="IL") return(false);
+   string st=StringSubstr(id,2,12);
+   pivot=StringToTime(StringSubstr(st,0,4)+"."+StringSubstr(st,4,2)+"."+StringSubstr(st,6,2)+" "+StringSubstr(st,8,2)+":"+StringSubstr(st,10,2));
+   if(pivot<=0) return(false);
+   is_high=(kind=="IH");
+   return(true);
+  }
+
+//--- value of a key in "k=v;k=v" (the event details)
+string EV_Detail(const string detail,const string key)
+  {
+   string needle=key+"=";
+   int k=StringFind(detail,needle);
+   if(k<0 || (k>0 && StringGetCharacter(detail,k-1)!=';')) return("");
+   int from=k+StringLen(needle);
+   int e=StringFind(detail,";",from);
+   return(e<0 ? StringSubstr(detail,from) : StringSubstr(detail,from,e-from));
+  }
+
 class CEoView
   {
 private:
@@ -140,12 +292,9 @@ private:
    long            m_chart;
    int             m_digits;
    CStatusPanel    m_panel;
-   CH3BiasDrawer   m_h4;
-   SH3View         m_h4v;
-   bool            m_h4_drawn;
-   datetime        m_h4_cut;
    string          m_signature;
    SEvPlan         m_plan;
+   int             m_n_objects;      // marks drawn by the last redraw (the panel and the legend are not counted)
 
    bool Ensure(const string name,const ENUM_OBJECT type)
      {
@@ -153,6 +302,7 @@ private:
       if(!ObjectCreate(m_chart,name,type,0,0,0)) {ResetLastError(); return(false);}
       ObjectSetInteger(m_chart,name,OBJPROP_SELECTABLE,false);
       ObjectSetInteger(m_chart,name,OBJPROP_HIDDEN,true);
+      m_n_objects++;
       return(true);
      }
    void Segment(const string name,const datetime t1,const double p1,const datetime t2,const double p2,const color clr,const int width,const ENUM_LINE_STYLE style,const string tip)
@@ -169,7 +319,8 @@ private:
       ObjectSetInteger(m_chart,name,OBJPROP_BACK,false);
       ObjectSetString(m_chart,name,OBJPROP_TOOLTIP,tip);
      }
-   void Box(const string name,const datetime t1,const double p1,const datetime t2,const double p2,const color clr,const bool fill,const string tip)
+   //--- outline only (no fill): the candles stay readable under the zone
+   void Zone(const string name,const datetime t1,const double p1,const datetime t2,const double p2,const color clr,const int width,const ENUM_LINE_STYLE style,const string tip)
      {
       if(!Ensure(name,OBJ_RECTANGLE)) return;
       ObjectSetInteger(m_chart,name,OBJPROP_TIME,0,t1);
@@ -177,9 +328,10 @@ private:
       ObjectSetInteger(m_chart,name,OBJPROP_TIME,1,t2);
       ObjectSetDouble(m_chart,name,OBJPROP_PRICE,1,p2);
       ObjectSetInteger(m_chart,name,OBJPROP_COLOR,clr);
-      ObjectSetInteger(m_chart,name,OBJPROP_FILL,fill);
-      ObjectSetInteger(m_chart,name,OBJPROP_BACK,true);
-      ObjectSetInteger(m_chart,name,OBJPROP_WIDTH,1);
+      ObjectSetInteger(m_chart,name,OBJPROP_FILL,false);
+      ObjectSetInteger(m_chart,name,OBJPROP_BACK,false);
+      ObjectSetInteger(m_chart,name,OBJPROP_WIDTH,width);
+      ObjectSetInteger(m_chart,name,OBJPROP_STYLE,style);
       ObjectSetString(m_chart,name,OBJPROP_TOOLTIP,tip);
      }
    void Note(const string name,const datetime t,const double p,const string text,const color clr,const ENUM_ANCHOR_POINT anchor,const string tip)
@@ -194,7 +346,18 @@ private:
       ObjectSetInteger(m_chart,name,OBJPROP_COLOR,clr);
       ObjectSetInteger(m_chart,name,OBJPROP_ANCHOR,anchor);
      }
-   //--- delete the M15 / plan objects of this component; the panel labels (EV_PANEL_PREFIX) and every other prefix stay
+   //--- a small dot at a candle (NOT an entry arrow); the label next to it carries the meaning
+   void Dot(const string name,const datetime t,const double p,const color clr,const string tip)
+     {
+      if(!Ensure(name,OBJ_ARROW)) return;
+      ObjectSetInteger(m_chart,name,OBJPROP_ARROWCODE,159);
+      ObjectSetInteger(m_chart,name,OBJPROP_TIME,0,t);
+      ObjectSetDouble(m_chart,name,OBJPROP_PRICE,0,p);
+      ObjectSetInteger(m_chart,name,OBJPROP_COLOR,clr);
+      ObjectSetInteger(m_chart,name,OBJPROP_WIDTH,3);
+      ObjectSetString(m_chart,name,OBJPROP_TOOLTIP,tip);
+     }
+   //--- delete the marks of this component; the panel and the legend labels (EV_PANEL_PREFIX) and every other prefix stay
    void ClearObjects(void)
      {
       for(int i=ObjectsTotal(m_chart,0,-1)-1;i>=0;i--)
@@ -204,6 +367,7 @@ private:
          if(StringFind(name,EV_PANEL_PREFIX)==0) continue;
          ObjectDelete(m_chart,name);
         }
+      m_n_objects=0;
      }
    //--- the plan of this step, or the kept plan of the same signal; dropped as soon as its H4 setup is no longer the live context
    void TrackPlan(const SEoOutcome &out,const CEoFeed &feed)
@@ -222,104 +386,267 @@ private:
          m_plan.tp_is_2r=out.spb.plan.tp_equals_2r;
          m_plan.signal_id=out.spb.signal_id;
          m_plan.setup=feed.st.context.setup;
-         m_plan.decision=EV_StatusText(out);
+         EV_Verdict(out,m_plan,m_plan.verdict,m_plan.reason);
          m_plan.t0=(feed.st.bos_time>0 ? feed.st.bos_time : feed.cut-8*900);
          return;
         }
       if(m_plan.have && out.status=="ALREADY_HANDLED" && out.spb.signal_id==m_plan.signal_id) return;      // the kept plan of the handled signal
       if(m_plan.have && (!feed.st.has_context || feed.st.context.setup!=m_plan.setup)) EV_PlanInit(m_plan);
      }
+   //--- index of the closed H4 bar with this open time, or -1 (the bars of the last snapshot only)
+   int FindH4Bar(const CEoFeed &feed,const datetime t)
+     {
+      for(int i=feed.dv_n-1;i>=0;i--)
+        {
+         if(feed.hbars[i].time==t) return(i);
+         if(feed.hbars[i].time<t) break;
+        }
+      return(-1);
+     }
+   //--- H4: the sweep (level + candle) and the FVG zones of the T003 evaluation the build already computed
    void DrawH4(const CEoFeed &feed)
      {
-      if(!feed.dv_have)
+      if(!feed.dv_have) return;
+      if(feed.dv_ev.st.dir==H3_NONE || feed.dv_ev.st.setup_id=="") return;               // no setup: nothing is invented
+      int dir=feed.dv_ev.st.dir;
+      color dc=(dir==H3_BULL ? clrDodgerBlue : clrDarkOrange);
+      datetime end=feed.cut+16*900;
+      //--- sweep
+      bool is_internal=(feed.dv_ev.st.setup_type=="SWEEP");
+      datetime sweep_t=(is_internal ? feed.dv_ev.st.sweep_time : feed.dv_ev.st.wk_src);
+      string what=(is_internal ? "Sweep H4" : "Fitil H4");
+      string tip=(is_internal ? "Sweep H4: u mor likuiditeti i brendshem (swing i brendshem)" : "Fitil H4: fitil mbi nivelin mbrojtes, pa mbyllje matane tij");
+      double level=0.0;
+      datetime level_from=0;
+      if(is_internal)
         {
-         if(m_h4_drawn) {m_h4.ClearAll(); m_h4_drawn=false; m_h4_cut=0;}
-         return;
+         datetime pivot=0;
+         bool is_high=false;
+         for(int j=0;j<ArraySize(feed.dv_events);j++)
+           {
+            if(feed.dv_events[j].type!=H3_EV_INT_SWEEP || feed.dv_events[j].bar_time!=sweep_t) continue;
+            if(EV_Detail(feed.dv_events[j].detail,"setup")!="1") continue;
+            if(!EV_ParseInteriorId(feed.dv_events[j].ref,pivot,is_high)) continue;
+            int pi=FindH4Bar(feed,pivot);
+            if(pi<0) continue;
+            level=(is_high ? feed.hbars[pi].high : feed.hbars[pi].low);
+            level_from=pivot;
+            break;
+           }
         }
-      if(m_h4_drawn && m_h4_cut==feed.cut) return;
-      string no_ids[];
-      ArrayResize(no_ids,0);
-      m_h4.Draw(feed.hbars,feed.dv_n,feed.params,feed.dv_ev,feed.dv_tracks,feed.dv_events,no_ids,0,8,6,false,false,true,4,false,m_h4v);
-      m_h4_drawn=true;
-      m_h4_cut=feed.cut;
+      else
+        {
+         if(MathIsValidNumber(feed.dv_ev.st.snap_price) && feed.dv_ev.st.snap_price>0.0)
+           {
+            level=feed.dv_ev.st.snap_price;
+            level_from=(feed.dv_ev.st.snap_known>0 && feed.dv_ev.st.snap_known<sweep_t ? feed.dv_ev.st.snap_known : sweep_t-4*14400);
+           }
+        }
+      int si=(sweep_t>0 ? FindH4Bar(feed,sweep_t) : -1);
+      if(si>=0)
+        {
+         double mark=(dir==H3_BEAR ? feed.hbars[si].high : feed.hbars[si].low);
+         Dot(EV_PREFIX+"sweep_dot",sweep_t,mark,dc,tip+" | "+EV_Hm(sweep_t));
+         Note(EV_PREFIX+"sweep_txt",sweep_t,mark,what,dc,(dir==H3_BEAR ? ANCHOR_LEFT_LOWER : ANCHOR_LEFT_UPPER),tip+" | "+EV_Hm(sweep_t));
+         if(level>0.0)
+            Segment(EV_PREFIX+"sweep_lvl",level_from,level,sweep_t+14400,level,dc,1,STYLE_DASH,"Niveli i "+what+" "+EV_Price(level,m_digits));
+        }
+      //--- FVG zones: the reconfirmed one first, then the newest candidates, then the newest invalid one; at most EV_MAX_H4_FVG
+      int nt=ArraySize(feed.dv_tracks);
+      bool used[];
+      ArrayResize(used,nt);
+      for(int i=0;i<nt;i++) used[i]=false;
+      int shown=0;
+      for(int pass=0;pass<3;pass++)
+        {
+         int limit=(pass==2 ? 1 : EV_MAX_H4_FVG);
+         int taken=0;
+         while(shown<EV_MAX_H4_FVG && taken<limit)
+           {
+            int pick=-1;
+            for(int i=0;i<nt;i++)
+              {
+               if(used[i]) continue;
+               bool is_rec=(feed.dv_ev.st.phase==H3_PH_RECONFIRMED && feed.dv_tracks[i].id==feed.dv_ev.st.rec_id);
+               bool ok=(pass==0 ? is_rec : (pass==1 ? (!is_rec && !feed.dv_tracks[i].invalid) : (!is_rec && feed.dv_tracks[i].invalid)));
+               if(!ok) continue;
+               if(pick<0 || feed.dv_tracks[i].conf>feed.dv_tracks[pick].conf) pick=i;
+              }
+            if(pick<0) break;
+            used[pick]=true;
+            bool rec=(pass==0);
+            bool inv=(pass==2);
+            string state=(rec ? "rikonfirmuar" : (inv ? "i pavlefshem" : "kandidat"));
+            Zone(EV_PREFIX+"h4fvg_"+IntegerToString(shown),feed.dv_tracks[pick].time_a,feed.dv_tracks[pick].lower,end,feed.dv_tracks[pick].upper,(inv ? clrDimGray : dc),
+                 (rec ? 2 : 1),(rec ? STYLE_SOLID : (inv ? STYLE_DOT : STYLE_DASH)),"FVG H4 "+state+" "+EV_Price(feed.dv_tracks[pick].lower,m_digits)+" - "+EV_Price(feed.dv_tracks[pick].upper,m_digits)+" | "+feed.dv_tracks[pick].id);
+            Note(EV_PREFIX+"h4fvg_txt"+IntegerToString(shown),feed.dv_tracks[pick].time_a,feed.dv_tracks[pick].upper,"H4 "+state,(inv ? clrDimGray : dc),ANCHOR_LEFT_LOWER,
+                 "FVG H4 "+state+" | "+feed.dv_tracks[pick].id);
+            shown++;
+            taken++;
+           }
+        }
      }
+   //--- M15: the break of the level and the FVG zones of the observer; GOLD only for the FVG the plan bridge selected
    void DrawM15(const SEoOutcome &out,const CEoFeed &feed)
      {
       if(!feed.st.has_context) return;
       int d=feed.st.context.direction;
-      color base=(d==1 ? clrDodgerBlue : clrTomato);
       datetime end=feed.cut+16*900;
       if(feed.st.bos_time>0 && feed.broken.valid && feed.broken.id==feed.st.bos_level)
         {
-         Segment(EV_PREFIX+"bos_line",feed.broken.known,feed.broken.price,feed.st.bos_time,feed.broken.price,clrOrange,2,STYLE_SOLID,
-                 "Niveli M15 i thyer (propozim, jo MSS i vleresuar nga klienti): "+feed.broken.id);
-         Note(EV_PREFIX+"bos_txt",feed.st.bos_time,feed.broken.price,"BOS M15 (P) "+EV_Price(feed.broken.price,m_digits),clrOrange,(d==1 ? ANCHOR_LEFT_LOWER : ANCHOR_LEFT_UPPER),
-              "Bari qe mbylli matane nivelit: "+TimeToString(feed.st.bos_time,TIME_DATE|TIME_MINUTES));
+         Segment(EV_PREFIX+"brk_line",feed.broken.known,feed.broken.price,feed.st.bos_time+900,feed.broken.price,clrWhite,2,STYLE_SOLID,
+                 "Thyerje M15: qiriu "+EV_Hm(feed.st.bos_time)+" mbylli matane nivelit "+EV_Price(feed.broken.price,m_digits)+". Prototip BOS, NUK eshte MSS i vleresuar nga klienti. "+feed.broken.id);
+         Dot(EV_PREFIX+"brk_dot",feed.st.bos_time,feed.broken.price,clrWhite,"Qiriu qe konfirmoi thyerjen M15 "+EV_Hm(feed.st.bos_time));
+         Note(EV_PREFIX+"brk_txt",feed.st.bos_time,feed.broken.price,"Thyerje M15 "+EV_Price(feed.broken.price,m_digits),clrWhite,(d==1 ? ANCHOR_LEFT_UPPER : ANCHOR_LEFT_LOWER),
+              "Prototip BOS, jo MSS i vleresuar nga klienti");
         }
+      //--- the selected FVG first (it is never dropped), then the newest others
+      int nf=ArraySize(feed.f);
+      bool used[];
+      ArrayResize(used,nf);
+      for(int i=0;i<nf;i++) used[i]=false;
       int shown=0;
-      for(int i=ArraySize(feed.f)-1;i>=0 && shown<4;i--)
+      for(int i=0;i<nf;i++)
         {
-         if(feed.f[i].invalid) continue;
-         bool chosen=(out.spb.candidate_id!="" && feed.f[i].id==out.spb.candidate_id);
-         datetime left=feed.f[i].confirmed-2700;
-         string state=(feed.f[i].returned ? "cmimi u kthye" : "pret kthimin");
-         Box(EV_PREFIX+"fvg_"+IntegerToString(shown),left,feed.f[i].lower,end,feed.f[i].upper,(chosen ? clrGold : clrDimGray),chosen,
-             (chosen ? "FVG M15 i ZGJEDHUR (P): " : "FVG M15 kandidat (P): ")+feed.f[i].id+" | "+state);
-         if(chosen) Note(EV_PREFIX+"fvg_txt",left,(d==1 ? feed.f[i].upper : feed.f[i].lower),"FVG M15 zgjedhur (P)",clrGold,(d==1 ? ANCHOR_LEFT_LOWER : ANCHOR_LEFT_UPPER),
-                         "Skaji i ketij FVG percakton hyrjen LIMIT (zgjedhja e skajit: konfirmuar)");
+         if(out.spb.candidate_id=="" || feed.f[i].id!=out.spb.candidate_id) continue;
+         DrawM15Zone(feed,i,true,shown,end);
+         used[i]=true;
          shown++;
+         break;
         }
-      if(m_plan.have)
+      for(int pass=0;pass<2;pass++)
         {
-         color pc=(m_plan.direction==1 ? clrDodgerBlue : clrTomato);
-         datetime t0=m_plan.t0;
-         Segment(EV_PREFIX+"entry",t0,m_plan.entry,end,m_plan.entry,pc,2,STYLE_SOLID,"HYRJA LIMIT "+EV_DirectionText(m_plan.direction)+" "+EV_Price(m_plan.entry,m_digits));
-         Segment(EV_PREFIX+"sl",t0,m_plan.sl,end,m_plan.sl,clrRed,2,STYLE_SOLID,"SL (P) "+EV_Price(m_plan.sl,m_digits));
-         Segment(EV_PREFIX+"tp",t0,m_plan.tp,end,m_plan.tp,clrLimeGreen,2,STYLE_SOLID,"TP (P) "+EV_Price(m_plan.tp,m_digits)+(m_plan.tp_is_2r ? " = 2R" : ""));
-         if(!m_plan.tp_is_2r)
-            Segment(EV_PREFIX+"r2",t0,m_plan.level_2r,end,m_plan.level_2r,clrLimeGreen,1,STYLE_DOT,"Niveli 2R "+EV_Price(m_plan.level_2r,m_digits));
-         Note(EV_PREFIX+"entry_txt",end,m_plan.entry,"LIMIT "+EV_DirectionText(m_plan.direction)+" "+EV_Price(m_plan.entry,m_digits)+"  vol "+DoubleToString(m_plan.volume,2),pc,ANCHOR_LEFT,
-              "Hyrja LIMIT [K skaji]. Volumi "+DoubleToString(m_plan.volume,2)+" | risku i modeluar "+DoubleToString(m_plan.risk,2));
-         Note(EV_PREFIX+"sl_txt",end,m_plan.sl,"SL "+EV_Price(m_plan.sl,m_digits),clrRed,ANCHOR_LEFT,"Stop loss (zgjedhje e perkohshme)");
-         Note(EV_PREFIX+"tp_txt",end,m_plan.tp,"TP"+(m_plan.tp_is_2r ? " = 2R " : " ")+EV_Price(m_plan.tp,m_digits),clrLimeGreen,ANCHOR_LEFT,"Target (zgjedhje e perkohshme)");
+         while(shown<EV_MAX_M15_FVG)
+           {
+            int pick=-1;
+            for(int i=0;i<nf;i++)
+              {
+               if(used[i]) continue;
+               if((pass==0) == feed.f[i].invalid) continue;                  // pass 0: not invalid; pass 1: invalid
+               if(pick<0 || feed.f[i].confirmed>feed.f[pick].confirmed) pick=i;
+              }
+            if(pick<0) break;
+            used[pick]=true;
+            DrawM15Zone(feed,pick,false,shown,end);
+            shown++;
+            if(pass==1) break;
+           }
         }
      }
+   void DrawM15Zone(const CEoFeed &feed,const int i,const bool chosen,const int slot,const datetime end)
+     {
+      string state=(feed.f[i].invalid ? "i pavlefshem" : (chosen ? "ZGJEDHUR nga plani" : (feed.f[i].returned ? "kandidat, cmimi u kthye" : "kandidat")));
+      color clr=(chosen ? clrGold : (feed.f[i].invalid ? clrDimGray : clrSilver));
+      datetime left=feed.f[i].confirmed-2700;
+      Zone(EV_PREFIX+"m15fvg_"+IntegerToString(slot),left,feed.f[i].lower,end,feed.f[i].upper,clr,(chosen ? 3 : 1),(feed.f[i].invalid ? STYLE_DOT : STYLE_SOLID),
+           "FVG M15 "+state+" "+EV_Price(feed.f[i].lower,m_digits)+" - "+EV_Price(feed.f[i].upper,m_digits)+" | "+feed.f[i].id);
+      Note(EV_PREFIX+"m15fvg_txt"+IntegerToString(slot),left,feed.f[i].lower,"M15 FVG "+state,clr,ANCHOR_LEFT_UPPER,"FVG M15 "+state+" | "+feed.f[i].id);
+     }
+   //--- the plan: entry, SL, 2R, TP as lines with labels and prices; no arrows
+   void DrawPlan(const CEoFeed &feed)
+     {
+      if(!m_plan.have) return;
+      datetime t0=m_plan.t0;
+      datetime end=feed.cut+16*900;
+      bool buy=(m_plan.direction==1);
+      color pc=(buy ? clrDodgerBlue : clrDarkOrange);
+      string ds=EV_DirectionText(m_plan.direction);
+      Segment(EV_PREFIX+"entry",t0,m_plan.entry,end,m_plan.entry,pc,2,STYLE_SOLID,"Hyrja LIMIT "+ds+" "+EV_Price(m_plan.entry,m_digits)+" (skaji i FVG)");
+      Segment(EV_PREFIX+"sl",t0,m_plan.sl,end,m_plan.sl,clrRed,2,STYLE_SOLID,"SL "+EV_Price(m_plan.sl,m_digits)+" (zgjedhje e perkohshme e prototipit)");
+      Segment(EV_PREFIX+"tp",t0,m_plan.tp,end,m_plan.tp,clrLimeGreen,2,STYLE_SOLID,"TP "+EV_Price(m_plan.tp,m_digits)+(m_plan.tp_is_2r ? " = 2R" : "")+" (zgjedhje e perkohshme e prototipit)");
+      if(!m_plan.tp_is_2r)
+         Segment(EV_PREFIX+"r2",t0,m_plan.level_2r,end,m_plan.level_2r,clrLimeGreen,1,STYLE_DOT,"Niveli 2R "+EV_Price(m_plan.level_2r,m_digits));
+      Note(EV_PREFIX+"entry_txt",end,m_plan.entry,"HYRJA LIMIT "+ds+" "+EV_Price(m_plan.entry,m_digits),pc,ANCHOR_LEFT,
+           "Vol "+DoubleToString(m_plan.volume,2)+" | risku i modeluar "+DoubleToString(m_plan.risk,2));
+      Note(EV_PREFIX+"sl_txt",end,m_plan.sl,"SL "+EV_Price(m_plan.sl,m_digits),clrRed,(buy ? ANCHOR_LEFT_UPPER : ANCHOR_LEFT_LOWER),"Stop loss");
+      Note(EV_PREFIX+"tp_txt",end,m_plan.tp,(m_plan.tp_is_2r ? "TP = 2R " : "TP ")+EV_Price(m_plan.tp,m_digits),clrLimeGreen,(buy ? ANCHOR_LEFT_LOWER : ANCHOR_LEFT_UPPER),"Target");
+      if(!m_plan.tp_is_2r)
+         Note(EV_PREFIX+"r2_txt",end,m_plan.level_2r,"2R "+EV_Price(m_plan.level_2r,m_digits),clrLimeGreen,(buy ? ANCHOR_LEFT_UPPER : ANCHOR_LEFT_LOWER),"Niveli 2R");
+     }
+   //--- panel: mode, H4, M15, decision, what is a temporary choice
    void DrawPanel(const SEoOutcome &out,const CEoFeed &feed,const bool real_entry,const bool mgmt_read_only)
      {
       m_panel.Begin();
-      if(real_entry || !mgmt_read_only) m_panel.Line("!! TRANSPORT REAL I ZGJEDHUR - jo ky simulim FAKE/READ_ONLY !!",clrRed);
-      else m_panel.Line("SIMULIM / FAKE / READ_ONLY - asnje porosi reale nuk dergohet",clrOrange);
-      if(out.risk_label!="") m_panel.Line("Risku: "+out.risk_label+" (1% e balances aktuale) "+EV_TAG_PROPOSAL+" | prototip, jo strategji e vleresuar nga klienti",clrSilver);
-      else m_panel.Line("Prototip simulimi, jo strategji e vleresuar nga klienti. "+EV_TAG_CONFIRMED+"=konfirmuar "+EV_TAG_PROPOSAL+"=zgjedhje e perkohshme",clrSilver);
-      //--- H4: the T003 result the build already computed for the last snapshot
-      if(feed.dg_have)
+      if(real_entry || !mgmt_read_only) m_panel.Line("ATENCION: TRANSPORT REAL I ZGJEDHUR - ky NUK eshte simulimi FAKE/READ_ONLY",clrRed);
+      else
         {
-         m_panel.Line("H4 "+EV_TAG_PROPOSAL+": "+EV_H4DirectionText(feed.dg_direction)+" | faza "+feed.dg_phase+" | rikonfirmuar "+(feed.dg_ready ? "PO" : "JO")+" | i besueshem "+(feed.dg_reliable ? "PO" : "JO"),
-                      (feed.dg_ready && feed.dg_reliable ? clrLimeGreen : clrWhite));
-         if(!feed.dg_reliable) m_panel.Line("  arsyeja: "+EV_Clip(feed.dg_reason,80),clrGray);
-         if(m_h4v.setup_text!="") m_panel.Line("  setup H4: "+EV_Clip(m_h4v.setup_text,84),clrGray);
-         if(m_h4v.fvg_last!="") m_panel.Line("  FVG H4: "+EV_Clip(m_h4v.fvg_last,84),clrGray);
-         if(m_h4v.liq_text!="") m_panel.Line("  likuiditet: "+EV_Clip(m_h4v.liq_text,84),clrGray);
+         m_panel.Line("SIMULIM - PA URDHRA REALE",clrOrange);
+         m_panel.Line("FAKE / READ_ONLY | prototip, jo strategji e vleresuar nga klienti",clrSilver);
         }
-      else m_panel.Line("H4 "+EV_TAG_PROPOSAL+": nuk ka vleresim T003 per kete grafik (feed jo gati ose burimi nuk eshte T003)",clrGray);
-      //--- M15: the observer state
-      m_panel.Line("M15 "+EV_TAG_PROPOSAL+": "+EV_M15PhaseText(feed.st.phase,feed.st.has_context),clrWhite);
+      //--- H4: the direction and what it waits for
+      if(feed.dv_have)
+        {
+         bool has_setup=(feed.dv_ev.st.dir!=H3_NONE && feed.dv_ev.st.setup_id!="");
+         string h4=EV_H4PhaseText(feed.dv_ev.st.phase,has_setup);
+         if(!feed.dv_ev.reliable) h4="drejtimi i pasigurt (historia H4 nuk konvergon); pret";
+         m_panel.Line("H4: "+EV_H4DirectionText(feed.dv_ev.st.dir)+" | "+h4,(feed.dv_ev.st.phase==H3_PH_RECONFIRMED ? clrLimeGreen : clrWhite));
+        }
+      else m_panel.Line("H4: nuk ka vleresim T003 per kete grafik (feed jo gati ose burimi nuk eshte T003)",clrGray);
+      //--- M15: what is confirmed and what is missing
+      string done="",missing="";
+      if(feed.st.has_context) done+="setup H4 i rikonfirmuar";
+      else missing+="setup H4 i rikonfirmuar";
       if(feed.st.has_context && feed.st.bos_time>0)
+         done+="; thyerje M15 "+StringSubstr(EV_Hm(feed.st.bos_time),11)+(feed.broken.valid && feed.broken.id==feed.st.bos_level ? " @"+EV_Price(feed.broken.price,m_digits) : "");
+      else missing+=(missing=="" ? "" : "; ")+"thyerja e nivelit M15";
+      int nvalid=0;
+      bool returned=false;
+      for(int i=0;i<ArraySize(feed.f);i++)
         {
-         string lvl=(feed.broken.valid && feed.broken.id==feed.st.bos_level ? EV_Price(feed.broken.price,m_digits) : "n/a (niveli nuk riprodhohet)");
-         m_panel.Line("  BOS "+TimeToString(feed.st.bos_time,TIME_DATE|TIME_MINUTES)+" thyen "+lvl+(out.spb.candidate_id!="" ? " | FVG zgjedhur "+EV_Clip(out.spb.candidate_id,40) : ""),clrGray);
+         if(feed.f[i].invalid) continue;
+         nvalid++;
+         if(feed.f[i].returned) returned=true;
         }
-      //--- plan
+      if(feed.st.has_context && feed.st.bos_time>0 && nvalid>0) done+="; FVG M15 ("+IntegerToString(nvalid)+")"+(out.spb.candidate_id!="" ? ", zgjedhur nga plani" : "");
+      else missing+=(missing=="" ? "" : "; ")+"FVG M15 pas thyerjes";
+      if(returned) done+="; cmimi u kthye ne FVG";
+      else missing+=(missing=="" ? "" : "; ")+"kthimi i cmimit ne FVG";
+      m_panel.Line("M15 konfirmuar: "+(done=="" ? "asgje ende" : done),(done=="" ? clrGray : clrWhite));
+      m_panel.Line("M15 mungon: "+(missing=="" ? "asgje" : missing),clrGray);
+      //--- the plan, when one exists
       if(m_plan.have)
         {
-         m_panel.Line("PLAN "+EV_DirectionText(m_plan.direction)+" LIMIT hyrja "+EV_Price(m_plan.entry,m_digits)+" "+EV_TAG_CONFIRMED+"skaji | SL "+EV_Price(m_plan.sl,m_digits)+" "+EV_TAG_PROPOSAL+
-                      " | TP "+EV_Price(m_plan.tp,m_digits)+(m_plan.tp_is_2r ? " =2R " : " ")+EV_TAG_PROPOSAL,(m_plan.direction==1 ? clrDodgerBlue : clrTomato));
-         m_panel.Line("  vol "+DoubleToString(m_plan.volume,2)+" | risku i modeluar "+DoubleToString(m_plan.risk,2)+" | sinjali "+EV_Clip(m_plan.signal_id,50),clrGray);
-         m_panel.Line(m_plan.decision,clrWhite);
+         m_panel.Line("PLAN "+EV_DirectionText(m_plan.direction)+" LIMIT: hyrja "+EV_Price(m_plan.entry,m_digits)+" | SL "+EV_Price(m_plan.sl,m_digits)+" | "+
+                      (m_plan.tp_is_2r ? "TP = 2R " : "2R "+EV_Price(m_plan.level_2r,m_digits)+" | TP ")+EV_Price(m_plan.tp,m_digits),(m_plan.direction==1 ? clrDodgerBlue : clrDarkOrange));
+         m_panel.Line("  volum "+DoubleToString(m_plan.volume,2)+" | risk i modeluar "+DoubleToString(m_plan.risk,2)+(out.risk_label!="" ? " ("+out.risk_label+": 1% e balances)" : ""),clrGray);
         }
-      m_panel.Line(EV_StatusText(out),(out.request ? clrLimeGreen : (out.status=="GATE_BLOCKED" ? clrOrange : clrWhite)));
-      m_panel.Line(out.status+" | "+EV_Clip(out.reason,90),clrDimGray);
+      //--- the decision
+      string label,reason;
+      EV_Verdict(out,m_plan,label,reason);
+      m_panel.Line("VENDIMI: "+label+" - "+EV_Clip(reason,92),EV_VerdictColor(label));
+      //--- what is a temporary choice (words, not only a tag)
+      m_panel.Line("Konfirmuar nga klienti: hyrja LIMIT ne skaj te FVG, seanca, lajmet, kufijte ditore.",clrDimGray);
+      m_panel.Line("E perkohshme (prototip): burimi H4, niveli M15 i thyer, zgjedhja e FVG, SL, TP/2R, risku 1%.",clrDimGray);
       m_panel.End();
+     }
+   //--- the legend, bottom left (own labels: the panel class cannot anchor at the bottom)
+   void DrawLegend(void)
+     {
+      string lines[6];
+      lines[0]="LEGJENDA";
+      lines[1]="Kuti blu/portokalli 'H4' = FVG H4 (e plote: rikonfirmuar, e ndrydhur: kandidat, pika: e pavlefshme)";
+      lines[2]="Vije e ndrydhur + pike + 'Sweep H4'/'Fitil H4' = niveli dhe qiriu i sweep-it";
+      lines[3]="Vije e bute + pike + 'Thyerje M15' = qiriu qe konfirmoi thyerjen (prototip BOS, jo MSS i vleresuar)";
+      lines[4]="Kuti M15: gri = kandidat, ARTE = FVG e zgjedhur nga plani, pika = e pavlefshme";
+      lines[5]="HYRJA LIMIT / SL / 2R / TP = vija me etikete dhe cmim";
+      for(int i=0;i<6;i++)
+        {
+         string name=EV_PANEL_PREFIX+"leg"+IntegerToString(i);
+         if(ObjectFind(m_chart,name)<0)
+           {
+            if(!ObjectCreate(m_chart,name,OBJ_LABEL,0,0,0)) {ResetLastError(); continue;}
+            ObjectSetInteger(m_chart,name,OBJPROP_CORNER,CORNER_LEFT_LOWER);
+            ObjectSetInteger(m_chart,name,OBJPROP_ANCHOR,ANCHOR_LEFT_LOWER);
+            ObjectSetInteger(m_chart,name,OBJPROP_XDISTANCE,10);
+            ObjectSetInteger(m_chart,name,OBJPROP_YDISTANCE,8+(5-i)*13);
+            ObjectSetInteger(m_chart,name,OBJPROP_FONTSIZE,8);
+            ObjectSetString(m_chart,name,OBJPROP_FONT,"Consolas");
+            ObjectSetInteger(m_chart,name,OBJPROP_SELECTABLE,false);
+            ObjectSetInteger(m_chart,name,OBJPROP_HIDDEN,true);
+            ObjectSetInteger(m_chart,name,OBJPROP_COLOR,(i==0 ? clrSilver : clrDimGray));
+           }
+         ObjectSetString(m_chart,name,OBJPROP_TEXT,lines[i]);
+        }
      }
 
 public:
@@ -328,18 +655,16 @@ public:
       m_on=false;
       m_chart=0;
       m_digits=2;
-      m_h4_drawn=false;
-      m_h4_cut=0;
       m_signature="";
+      m_n_objects=0;
       EV_PlanInit(m_plan);
      }
+   int  MarkCount(void) const {return(m_n_objects);}
    void Init(void)
      {
       m_on=true;
       m_chart=ChartID();
       m_digits=(int)SymbolInfoInteger(_Symbol,SYMBOL_DIGITS);
-      m_h4.Init(clrTomato,clrDodgerBlue,clrOrange,8);          // clears velo_t003_ objects left by a previous instance (that prefix only)
-      H3VViewInit(m_h4v);
       m_panel.Init(EV_PANEL_PREFIX,true,CORNER_LEFT_UPPER);
       ObjectsDeleteAll(m_chart,EV_PREFIX);                      // this component's own prefix only
      }
@@ -348,16 +673,19 @@ public:
      {
       if(!m_on) return;
       TrackPlan(out,feed);
-      DrawH4(feed);
-      string sig=out.status+"|"+out.reason+"|"+TimeToString(feed.cut,TIME_DATE|TIME_MINUTES)+"|"+feed.st.phase+"|"+feed.st.bos_level+"|"+out.spb.candidate_id+"|"+
-                 (m_plan.have ? EV_Price(m_plan.entry,m_digits)+EV_Price(m_plan.sl,m_digits)+EV_Price(m_plan.tp,m_digits)+m_plan.signal_id : "-")+"|"+IntegerToString(ArraySize(feed.f));
+      string sig=out.status+"|"+out.reason+"|"+EV_Hm(feed.cut)+"|"+feed.st.phase+"|"+feed.st.bos_level+"|"+out.spb.candidate_id+"|"+
+                 (m_plan.have ? EV_Price(m_plan.entry,m_digits)+EV_Price(m_plan.sl,m_digits)+EV_Price(m_plan.tp,m_digits)+m_plan.signal_id : "-")+"|"+IntegerToString(ArraySize(feed.f))+"|"+
+                 (feed.dv_have ? IntegerToString(feed.dv_ev.st.phase)+feed.dv_ev.st.setup_id+IntegerToString(ArraySize(feed.dv_tracks)) : "-");
       if(sig!=m_signature)
         {
          m_signature=sig;
          ClearObjects();
+         DrawH4(feed);
          DrawM15(out,feed);
+         DrawPlan(feed);
         }
       DrawPanel(out,feed,real_entry,mgmt_read_only);
+      DrawLegend();
       ChartRedraw(m_chart);
      }
    void Destroy(void)
@@ -365,7 +693,6 @@ public:
       if(!m_on) return;
       m_panel.Destroy();
       ObjectsDeleteAll(m_chart,EV_PREFIX);
-      m_h4.ClearAll();
       ChartRedraw(m_chart);
       m_on=false;
      }

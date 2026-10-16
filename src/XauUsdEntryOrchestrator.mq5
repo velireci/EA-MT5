@@ -9,7 +9,7 @@
 //   A filled order is registered with the existing T011 executor and then managed by the T011 driver inside this EA (OnTick = the 2R level, OnTimer = reconcile only) only when InpManagementRegistration is true;
 //   the registered fill stays in the lifecycle index until the T011 record is DONE or the position is proven closed (that index is the restart memory). Not proof of broker execution. UNVERIFIED: not compiled or run.
 #property strict
-#property version "1.15"
+#property version "1.16"
 #include "include/EntryOrchestratorFeed.mqh"
 #include "include/EntryOrchestratorView.mqh"      // chart view of the decision already taken (InpChartView); reads only
 #include "include/EntryTransportFake.mqh"
@@ -110,7 +110,7 @@ input long InpMgmtDeviation=-1;                // deviation of the closing reque
 input ENUM_EX_FILTER_POLICY InpMgmtFilterPolicy=EX_POL_UNSET;  // behaviour of the closing request towards spread / news / session filters; UNSET blocks (required when registration is on)
 input ENUM_EX_FILTER_STATE InpMgmtFilterState=EX_FS_UNKNOWN;   // state of those filters supplied by the owner (used only with NEEDS_CLEAR)
 input int InpPollSeconds=2;
-input bool InpChartView=false;              // true = Albanian panel + H4 / M15 / plan objects (prefixes velo_t016v_ and the T003 drawer's velo_t003_) drawn from the decision already taken; false = nothing drawn. It never changes a plan, a block or a FAKE request
+input bool InpChartView=false;              // true = Albanian panel + legend + H4 / M15 / plan marks (prefix velo_t016v_ only) drawn from the decision already taken; false = nothing drawn. It never changes a plan, a block or a FAKE request
 
 // FAKE transport: the execution side is the in-memory fake (every Send is a virtual request, logged with the label); the read side is READ-ONLY terminal state.
 class CEoTerminalFake : public CEnFakeTransport
