@@ -172,10 +172,10 @@ class SimulationPreset(unittest.TestCase):
         for frag in ('SIMULATION ONLY', '358175', 'NOT a demo proof', 'NOT a client confirmation', 'NOT a live approval'):
             self.assertIn(frag, text)
 
-    def test_it_differs_from_the_demo_preset_in_the_risk_source_and_comments_only(self):
+    def test_it_differs_from_the_demo_preset_in_the_risk_source_and_the_measured_offset_only(self):
         demo, _, _ = pc.parse_preset()
         sim = self.values
-        self.assertEqual({k for k in demo if demo[k] != sim.get(k)}, {'InpRiskSource'})
+        self.assertEqual({k for k in demo if demo[k] != sim.get(k)}, {'InpRiskSource', 'InpDailyServerOffsetSeconds'}, 'only the risk source and the offset MEASURED on Tauro differ')
 
     def test_every_real_transport_combination_with_the_simulation_policy_is_refused(self):
         for entry, mgmt, confirm, phrase in itertools.product((0, 1), (0, 1), (False, True), ('', pc.EN_PHRASE)):

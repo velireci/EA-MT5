@@ -71,8 +71,8 @@ InpMaxSpreadPoints=50
 ; [CONFIRMED S:73-83] daily result from the deal history (T012 bridge) with the day balance from the store (LOAD only).
 InpDailyHistoryBridge=true
 InpDailyEaMagic=777
-; [OWNER-FILL] server time minus UTC in seconds, a multiple of 900; 10800 = UTC+3 (broker summer time, 2026-10-15). It changes with the broker's DST: verify it.
-InpDailyServerOffsetSeconds=10800
+; [MEASURED, Tauro 358175, 2026-10-16] server time minus UTC in seconds, a multiple of 900: measured twice by the owner (XauUsdDailyHistoryDiag) = 0. This is a value of THIS Tauro proof, NOT a universal default and NOT a client answer; the demo preset keeps 10800. Measure it again whenever the broker's DST changes.
+InpDailyServerOffsetSeconds=0
 ; [DEMO-PROPOSAL, owner assertion] the owner asserts the deal history of the day is complete (demo account, no missing deals).
 InpDailyHistoryComplete=true
 ; [DEMO-PROPOSAL D12] result formula: net of all deals including commission, swap and fee.

@@ -89,6 +89,13 @@ assert 'g_feed.Poll(feed_ok);' in pre_step and 'return;' not in pre_step, 'timer
 assert poll.count('g_feed.Poll(') == 1 and poll.count('g_orch.Step(') == 1, 'one feed refresh and market evaluation per poll'
 assert 'if(exposure!=g_last_exposure)' in poll, 'unchanged exposure logs are suppressed'
 assert 'DBS_Load(' in fd and fd.count('DBS_Load(') == 1, 'the store is read with LOAD only'
+# the daily glue of the real market: the stored day balance is LOADED, fed to the bridge, and only then checked; one offset serves the history window and the store; nothing is captured or invented
+daily_fn = fd[fd.index('virtual bool Daily('):]
+for needle in ('DBS_Load(port,stored);', 'DBS_ForBridge(stored,balance);', 'DB_Check(verdict,facts,hcfg.utc_in_day,balance,policy,cl,'):
+    assert needle in daily_fn, 'daily glue: ' + needle
+assert daily_fn.index('DH_ReadAndBuild(') < daily_fn.index('DBS_Load(port,stored);') < daily_fn.index('DBS_ForBridge(stored,balance);') < daily_fn.index('DB_Check('), 'daily glue order: history, LOAD, bridge feed, check'
+assert 'hcfg.server_offset_seconds=daily_offset;' in daily_fn and 'CDbsRealPort port(mc.daily_magic,daily_offset,' in daily_fn, 'one offset for the history window and the store port'
+assert 'EO_OffsetSeconds(mc.daily_offset_seconds,daily_offset)' in daily_fn and daily_fn.index('EO_OffsetSeconds(') < daily_fn.index('DH_ReadAndBuild('), 'an invalid offset returns before any history read'
 # the status diagnostics reuse the existing T003 evaluation of the build; no second evaluation, nothing in a decision reads them
 assert fd.count('H3Evaluate(') == 1 and fd.count('H3SetupContext(') == 1, 'diagnostics: no second H3Evaluate / H3SetupContext'
 snap = fd[fd.index('void Snapshot('):fd.index('void BrokenLevel(')]
@@ -195,6 +202,10 @@ mut SM5.mqh $EA 's/InpManagementTransport!=EOI_MTR_READ_ONLY || InpManagementCon
 expect_assert "$NEG/o3.py" "$NEG/SM5.mqh $FEED" "a simulation policy allowed with a real management transport" "SIMULATION ONLY is allowed only"
 mut DG1.mqh $FEED 's/      dg_have=true; dg_state=e.has_state;/      H3Evaluate(hbars,n,params,e,tracks,events); dg_have=true; dg_state=e.has_state;/'
 expect_assert "$NEG/o3.py" "$EA $NEG/DG1.mqh" "a second evaluation for the diagnostics" "diagnostics"
+mut DG3.mqh $FEED 's/      DBS_ForBridge(stored,balance);/      balance.known=true; balance.amount=10000.0; balance.day=facts.day_key;/'
+expect_assert "$NEG/o3.py" "$EA $NEG/DG3.mqh" "a balance that does not come from the store" "daily glue"
+mut DG4.mqh $FEED 's/CDbsRealPort port(mc.daily_magic,daily_offset,/CDbsRealPort port(mc.daily_magic,0,/'
+expect_assert "$NEG/o3.py" "$EA $NEG/DG4.mqh" "a different offset for the store port" "one offset"
 mut DG2.mqh $EA 's/   text+=" | "+g_feed.Diag();/   text+="";/'
 expect_assert "$NEG/o3.py" "$NEG/DG2.mqh $FEED" "a status without the diagnostics" "diagnostic suffix"
 mut L.mqh $FEED 's/      DBS_Load(port,stored);/      DBS_Load(port,stored); DBS_Capture(port,stored);/'

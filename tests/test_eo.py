@@ -14,7 +14,10 @@ import eo_reference as eo  # noqa: E402
 import spb_reference as sp  # noqa: E402
 import t004_reference as m4  # noqa: E402
 import t007_planning_reference as tp  # noqa: E402
+import preset_check as pc  # noqa: E402
+import t012_balance_reference as bal  # noqa: E402
 import t012_bridge_reference as br  # noqa: E402
+import t012_history_reference as dh  # noqa: E402
 import test_spb as ts  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -548,6 +551,138 @@ class SimulationRisk(unittest.TestCase):
             out = w.live_candidate(self)[2]
             self.assertEqual(out.status, 'CONFIG_UNSET')
             self.assertIn('risk_source', out.reason)
+
+
+class TauroSimulationChain(unittest.TestCase):
+    """SYNTHETIC chain after a plan exists, with the Tauro simulation numbers of 2026-10-16 (balance 10000, combined risk cap 200, max trades 2, FAKE transport): day-balance record LOAD (T012 store mirror, a
+    fake port) -> DBS_ForBridge -> the bridge check (DailyBridge mirror) -> the orchestrator -> the entry gate -> the FAKE executor. It proves the composition of the existing mirrors; it does NOT read the
+    terminal, the history, the calendar or the quote: those stay terminal evidence. The EA glue that does the same with real ports is pinned in tools/entry-orchestrator-static-checks.sh (O3, the daily glue order); its real reads stay terminal evidence."""
+
+    UTC = 1792148400                                  # inside the Tirane day 2026-10-16 (checked by the first test)
+    LOGIN, SERVER, CURRENCY = 358175, 'SYNTHETIC-SERVER', 'USD'        # the server and the currency are placeholders: nothing about the real Tauro server is claimed here
+
+    class Port:
+        def __init__(self, utc, files):
+            self.utc, self.files = utc, files
+
+        def read_account(self):
+            return bal.Account(True, TauroSimulationChain.LOGIN, TauroSimulationChain.SERVER, TauroSimulationChain.CURRENCY)
+
+        def now_utc(self):
+            return self.utc
+
+        def exists(self, name):
+            return name in self.files
+
+        def read_file(self, name):
+            return (name in self.files), self.files.get(name, '')
+
+    def record_text(self, day, amount=10000.0, login=None, shift=0):
+        rec = bal.Record(login or self.LOGIN, self.SERVER, self.CURRENCY, day, amount, bal.SRC_WE, 1, 0, self.UTC - 3600 + shift, self.UTC - 3598 + shift)     # offset 0 = the value measured twice on Tauro
+        ok, text = bal.encode(rec)
+        self.assertTrue(ok, text)
+        return text
+
+    def today_file(self, text):
+        return {bal.file_name(self.LOGIN, dh.day_window(self.UTC)[0]): text}
+
+    def daily(self, files, facts_day=None, trades=0):
+        day = dh.day_window(self.UTC)[0]
+        stored = bal.load(self.Port(self.UTC, files))
+        balance, _ = bal.for_bridge(stored)
+        facts = dh.Facts(day_key=(facts_day or day), complete=True)
+        policy = br.Policy('PROFIT_COMMISSION_SWAP_FEE', br.CLASSIFICATION_SUPPORTED)
+        return stored, balance, br.check(br.READY, facts, self.UTC, balance, policy, br.Classified(trades, 0, 0), 2, True)
+
+    def world(self, d, result, cap=200.0):
+        w = World(d)
+        w.cfg = replace(w.cfg, risk_source=eo.RISK_SOURCE_SIMULATION_BALANCE_PCT, risk_budget=-1.0, max_trades=2, risk_cap=cap)
+        w.mk.bal = eo.Balance(True, 10000.0, w.tr.now, False, 2)       # MT5 reports REAL for 358175; the simulation policy does not depend on it
+        w.mk.daily_result = (True, result)
+        return w
+
+    def test_a_valid_record_lets_the_plan_through_to_one_fake_request_buy_and_sell(self):
+        day = dh.day_window(self.UTC)[0]
+        self.assertEqual(day, 20261016)
+        for d in (1, -1):
+            stored, balance, result = self.daily(self.today_file(self.record_text(day)))
+            self.assertEqual((stored.status, balance.known, balance.day, balance.amount, stored.source), (bal.USABLE, True, 20261016, 10000.0, bal.SRC_WE))
+            self.assertTrue(result.entry_allowed, result.reasons)
+            w = self.world(d, result)
+            ob, lvl, out = w.live_candidate(self)
+            self.assertEqual((out.status, out.request, out.risk_budget, out.risk_label), ('EXECUTOR', True, 100.0, 'SIMULATION ONLY'), out.reason)
+            self.assertEqual(w.tr.sends, 1, 'one FAKE request; nothing else is sent')
+            self.assertEqual(w.step(ob, lvl).status, 'ALREADY_HANDLED')
+            self.assertEqual(w.tr.sends, 1)
+
+    def test_the_combined_cap_of_200_holds_one_percent_of_10000_and_the_cap_below_the_plan_risk_blocks(self):
+        day = dh.day_window(self.UTC)[0]
+        _, _, result = self.daily(self.today_file(self.record_text(day)))
+        for d in (1, -1):
+            model = self.world(d, result).live_candidate(self)[2].spb.plan.risk_model
+            self.assertTrue(0.0 < model <= 100.0 <= 200.0, 'the modelled risk (%s) stays inside the 1%% budget and the cap of 200' % model)
+            self.assertEqual(self.world(d, result, cap=model).live_candidate(self)[2].status, 'EXECUTOR', 'exactly at the cap is allowed')
+            low = self.world(d, result, cap=model - 0.01)
+            out = low.live_candidate(self)[2]
+            self.assertEqual((out.status, out.request), ('GATE_BLOCKED', False))
+            self.assertIn('COMBINED_RISK_EXCEEDED', ' | '.join(out.decision.reasons))
+            low.untouched(self)
+
+    def test_a_missing_wrong_day_or_foreign_record_blocks_with_zero_sends(self):
+        day = dh.day_window(self.UTC)[0]
+        cases = (('no file for today', {}),
+                 ('only yesterday has a file', {bal.file_name(self.LOGIN, day - 1): self.record_text(day - 1, shift=-86400)}),
+                 ('the record inside the file names another day', self.today_file(self.record_text(day - 1, shift=-86400))),
+                 ('the record belongs to another login', self.today_file(self.record_text(day, login=1234567))),
+                 ('damaged text', self.today_file('garbage')))
+        for name, files in cases:
+            stored, balance, result = self.daily(files)
+            self.assertFalse(balance.known, name)
+            self.assertEqual(result.primary, 'BALANCE_START_UNSET', name)
+            for d in (1, -1):
+                with self.subTest('%s %d' % (name, d)):
+                    w = self.world(d, result)
+                    out = w.live_candidate(self)[2]
+                    self.assertEqual((out.status, out.request), ('GATE_BLOCKED', False))
+                    self.assertIn('BALANCE_START_UNSET', ' | '.join(out.decision.reasons))
+                    w.untouched(self)
+
+    def test_a_balance_of_another_day_than_the_history_blocks(self):
+        day = dh.day_window(self.UTC)[0]
+        stored, balance, result = self.daily(self.today_file(self.record_text(day)), facts_day=day - 1)
+        self.assertTrue(balance.known)
+        self.assertEqual(result.primary, 'BALANCE_DAY_MISMATCH')
+        for d in (1, -1):
+            w = self.world(d, result)
+            out = w.live_candidate(self)[2]
+            self.assertEqual((out.status, out.request), ('GATE_BLOCKED', False))
+            self.assertIn('BALANCE_DAY_MISMATCH', ' | '.join(out.decision.reasons))
+            w.untouched(self)
+
+    def test_news_spread_and_session_refusals_send_nothing_and_a_clear_gate_places_once(self):
+        day = dh.day_window(self.UTC)[0]
+        _, _, result = self.daily(self.today_file(self.record_text(day)))
+        clear = {'news': tp.NEWS_CLEAR, 'spread': tp.SPREAD_CLEAR, 'session': tp.SESSION_OPEN}
+        for d in (1, -1):
+            for name, attr, bad, frag in (('news blocked', 'news', tp.NEWS_BLOCKED, 'NEWS_BLOCK'), ('news unknown', 'news', tp.NEWS_UNKNOWN, 'NEWS_UNKNOWN'),
+                                          ('spread blocked', 'spread', tp.SPREAD_BLOCKED, 'SPREAD_BLOCK'), ('spread unknown', 'spread', tp.SPREAD_UNKNOWN, 'SPREAD_UNKNOWN'),
+                                          ('session closed', 'session', tp.SESSION_CLOSED, 'SESSION_CLOSED'), ('session unknown', 'session', tp.SESSION_UNKNOWN, 'SESSION_UNKNOWN')):
+                with self.subTest('%s %d' % (name, d)):
+                    w = self.world(d, result)
+                    setattr(w.mk, attr, bad)
+                    ob, lvl, out = w.live_candidate(self)
+                    self.assertEqual((out.status, out.request), ('GATE_BLOCKED', False))
+                    self.assertIn(frag, ' | '.join(out.decision.reasons))
+                    w.untouched(self)
+                    setattr(w.mk, attr, clear[attr])
+                    ob2, lvl2 = observer_n(d, 3)
+                    self.assertTrue(w.step(ob2, lvl2).request)
+                    self.assertEqual(w.tr.sends, 1)
+
+    def test_the_tauro_simulation_preset_carries_the_measured_values(self):
+        v, _, _ = pc.parse_preset(pc.SIMULATION_PRESET)
+        self.assertEqual((v['InpDailyServerOffsetSeconds'], v['InpCombinedRiskCap'], v['InpMaxTrades'], v['InpRiskSource'], v['InpPushNotifications']), ('0', '200', '2', '2', 'false'))
+        self.assertEqual((v['InpEntryTransport'], v['InpManagementTransport'], v['InpEntryAuthorisation']), ('0', '0', ''))
 
 
 SCENARIOS = ['buy_to_fake_request', 'sell_to_fake_request', 'replay_baseline_no_signal', 'restart_no_double', 'defect_rebases', 'context_change_rebases', 'unset_inputs_block',
