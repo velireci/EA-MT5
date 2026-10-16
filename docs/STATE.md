@@ -158,3 +158,12 @@ Risk-base refusals now distinguish BALANCE_READ_FAILED, ACCOUNT_NOT_DEMO, BALANC
 The already-pushed cancellation/notification package 2418a29 is preserved. New notifications and broker transports remain off unless explicitly selected; this change does not authorise running them.
 
 Codex verification of this correction: 80 focused Python tests passed; orchestrator static checks plus the new earlier-clock negative control passed (Git-base comparisons skipped in this export). EntryOrchestratorTest, EntryLifecycleTest and the EA each compiled 0 errors / 0 warnings. Owner MT5 rerun pending. These checks do not constitute a full review or live execution of the separate 2418a29 notification/cancellation package.
+
+
+## Codex test receiver capacity correction (2026-10-16, on 87c7121)
+
+Owner-relayed MT5: EntryOrchestratorTest-87c7121 155 passed / 0 failed at 02:12:26; EntryLifecycleTest-87c7121 275 passed / 1 failed at 02:11:21. The only failure was the many-position notification scenario, stopping at 22 positions.
+
+Confirmed fixture error: CNtFakeSink stored only 64 messages but reported NT_SENT even after filling its recorder. The scenario requires 40 positions times 3 events = 120 messages, so the 22nd position could not record all three events. The recorder now holds 256 messages and explicitly returns NT_FAILED on overflow; an MQL self-check verifies that successful records are counted and overflow is not reported as success. A Python source regression failed on the old 64-slot fixture. Production notifier, outbox, lifecycle, manager, EA and account gates are unchanged. Codex: 27 focused Python tests passed; owner MT5 rerun pending.
+
+Corrected EntryLifecycleTest compiled with 0 errors / 0 warnings. Only its MT5 rerun is required; the owner's EntryOrchestratorTest 155/0 remains applicable because no production source changed.

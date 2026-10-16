@@ -1693,6 +1693,16 @@ class Notifications(unittest.TestCase):
 
 
 class Sources(unittest.TestCase):
+    def test_mql_notification_recorder_holds_the_full_multi_position_scenario(self):
+        path = os.path.join(ROOT, 'src', 'tests', 'EntryLifecycleTest.mq5')
+        with open(path, encoding='ascii') as f:
+            text = f.read()
+        sink = text[text.index('class CNtFakeSink'):text.index('void NtBind(')]
+        capacity = int(re.search(r'string texts\[(\d+)\]', sink).group(1))
+        needed = 2 * (lc.Notifier.MAX_TRACKED + 4) * 3
+        self.assertGreaterEqual(capacity, needed, '40 positions need 120 recorded messages, not a 64-message recorder')
+        self.assertIn('if(n>=ArraySize(texts)) return(NT_FAILED);', sink)
+
     def test_regagain_uses_scripted_absence_instead_of_live_positions(self):
         with open(os.path.join(ROOT, 'src', 'tests', 'EntryLifecycleTest.mq5'), encoding='ascii') as f:
             text = f.read()
@@ -1825,5 +1835,6 @@ class Mutants(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
 
 

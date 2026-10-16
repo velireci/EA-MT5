@@ -1658,7 +1658,7 @@ void Scenario_direction_cancel_uncertain_halts_no_retry(void)
 class CNtFakeSink : public CNtSink
   {
 public:
-   string texts[64];
+   string texts[256]; // 40 distinct positions produce 120 events in the multi-position scenario
    int n;
    int calls;
    int mode;
@@ -1666,7 +1666,12 @@ public:
    virtual int Send(const string text)
      {
       calls++;
-      if(mode==NT_SENT && n<64) {texts[n]=text; n++;}
+      if(mode==NT_SENT)
+        {
+         if(n>=ArraySize(texts)) return(NT_FAILED); // never claim a message was recorded when the test receiver is full
+         texts[n]=text;
+         n++;
+        }
       return(mode);
      }
    int Count(const string frag)
@@ -2019,6 +2024,13 @@ void Scenario_notify_remainder_close_after_done_observed(void)
 
 void Scenario_notify_sixteen_plus_positions_one_process(void)
   {
+   CNtFakeSink recorder;
+   bool recorded=true;
+   for(int i=0;i<ArraySize(recorder.texts);i++)
+      if(recorder.Send("TEST EVENT "+IntegerToString(i))!=NT_SENT || recorder.n!=i+1) recorded=false;
+   int count_before=recorder.n;
+   int overflow=recorder.Send("OVERFLOW");
+   Check(recorded && overflow==NT_FAILED && recorder.n==count_before,"the fake receiver records each success and explicitly rejects overflow");
    CNtFakeSink sink;
    CNtNotifier nf;
    bool all_ok=true;
@@ -2116,6 +2128,7 @@ void OnStart()
    Scenario_notify_sixteen_plus_positions_one_process();
    PrintFormat("T019 ENTRY LIFECYCLE TEST finished: %d passed, %d failed",g_pass,g_fail);
   }
+
 
 
 
