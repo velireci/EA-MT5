@@ -2,7 +2,7 @@
 lines to keep when the chart is too small. Lines carry a priority (0 = never dropped, larger = dropped first, later lines before earlier ones of the same priority); a dropped line is announced by ONE
 marker row. Pure: no chart, no object."""
 
-MARKER = '(+%d rreshta te fshehura: zmadho grafikun)'
+MARKER = '(+%d te fshehura)'
 MIN_WIDTH = 8
 
 

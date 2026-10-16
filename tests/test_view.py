@@ -36,6 +36,51 @@ TEST = code(TEST_RAW)
 PANEL = VIEW[VIEW.index('void DrawPanels'):VIEW.index('public:\n   CEoView(void)')]
 
 
+def plain(text):
+    """the ~ markers of the sources as plain ASCII (to compare words)"""
+    return re.sub(r'~(.)', lambda m: {'e': 'e', 'c': 'c', 'E': 'E', 'C': 'C', 'b': '*', 'm': '-'}[m.group(1)], text)
+
+
+def call_args(src, name):
+    """the top-level arguments of every call 'name(' in src (strings and nested parentheses respected)"""
+    out = []
+    pos = 0
+    while True:
+        i = src.find(name + '(', pos)
+        if i < 0:
+            return out
+        j = i + len(name) + 1
+        depth, args, cur, k, instr = 1, [], '', j, False
+        while depth > 0:
+            ch = src[k]
+            if instr:
+                cur += ch
+                if ch == '\\':
+                    k += 1
+                    cur += src[k]
+                elif ch == '"':
+                    instr = False
+            elif ch == '"':
+                instr = True
+                cur += ch
+            elif ch in '([':
+                depth += 1
+                cur += ch
+            elif ch in ')]':
+                depth -= 1
+                if depth > 0:
+                    cur += ch
+            elif ch == ',' and depth == 1:
+                args.append(cur.strip())
+                cur = ''
+            else:
+                cur += ch
+            k += 1
+        args.append(cur.strip())
+        out.append(args)
+        pos = k
+
+
 def fn(name_start, name_end):
     return VIEW[VIEW.index(name_start):VIEW.index(name_end)]
 
@@ -59,8 +104,8 @@ class ViewIsReadOnly(unittest.TestCase):
             self.assertTrue(n.startswith('EV_PREFIX+'), n)
         self.assertIn('#define EV_PREFIX        "velo_t016v_"', RAW)
         for m in re.finditer(r'ObjectsDeleteAll\(([^)]*)\)', VIEW):
-            self.assertIn(m.group(1), ('m_chart,EV_PREFIX', 'm_chart,m_prefix'), m.group(0))
-        self.assertEqual(sorted(re.findall(r'\.Init\((EV_PANEL_PREFIX\+"\w+"),\d\)', VIEW)), ['EV_PANEL_PREFIX+"leg_"', 'EV_PANEL_PREFIX+"main_"'], 'the boxes delete only their own prefix, below the panel prefix')
+            self.assertIn(m.group(1), ('m_chart,EV_PREFIX', 'm_chart,m_prefix', 'm_chart,m_prefix+"s"'), m.group(0))
+        self.assertEqual(sorted(re.findall(r'\.Init\((EV_PANEL_PREFIX\+"\w+"),\d+,\d+\)', VIEW)), ['EV_PANEL_PREFIX+"leg_"', 'EV_PANEL_PREFIX+"main_"'], 'the boxes delete only their own prefix, below the panel prefix')
         self.assertIn('if(StringFind(name,EV_PREFIX)!=0) continue;', VIEW, 'the object loop skips foreign names (manual drawings)')
         self.assertIn('if(StringFind(name,EV_PANEL_PREFIX)==0) continue;', VIEW)
         self.assertNotIn('velo_t003', VIEW)
@@ -79,12 +124,31 @@ class ViewIsReadOnly(unittest.TestCase):
         self.assertIn('if(!feed.st.has_context) return;', fn('void DrawM15(', 'void DrawM15Zone'), 'without a context the view draws no M15 mark')
         self.assertIn('if(!m_plan.have) return;', fn('void DrawPlan', 'void DrawPanel'), 'without a plan the view draws no entry, SL or TP')
 
-    def test_the_text_is_ascii_and_the_technical_ids_stay_in_tooltips(self):
+    def test_the_text_is_ascii_the_rows_are_short_and_the_technical_ids_stay_in_tooltips(self):
         self.assertTrue(all(ord(ch) < 128 for ch in RAW))
-        panel = PANEL
-        self.assertIsNone(re.search(r'\+\s*[\w.\[\]]*(?:\.id|signal_id|bos_level|setup_id|dg_reason)\b', panel), 'a technical id or code appended to a panel line')
-        self.assertNotIn('out.reason', panel)
+        calls = call_args(PANEL, 'm_panel.Line')
+        self.assertGreaterEqual(len(calls), 7)
+        for args in calls:
+            row = args[0]
+            self.assertIsNone(re.search(r'(?:\.id|signal_id|bos_level|setup_id|dg_reason|out\.reason|out\.status|\.reason)\b', row), 'a technical id or code in a panel ROW: ' + row)
+            for lit in re.findall(r'"([^"]*)"', row):
+                self.assertLessEqual(len(lit), 40, 'a long sentence in a panel row (it belongs in the tooltip): ' + lit)
+        self.assertIn('string ptip="Sinjali "+m_plan.signal_id', PANEL, 'the signal id is in a tooltip')
+        self.assertIn('[kodi: "+out.status+" "+EV_Clip(out.reason,60)+"]', PANEL, 'the technical status and reason are in the tooltip of the decision row')
         self.assertIn('"FVG M15 "+state+" "+EV_Price(feed.f[i].lower,m_digits)+" - "+EV_Price(feed.f[i].upper,m_digits)+" | "+feed.f[i].id', VIEW, 'the id is in the tooltip')
+
+    def test_the_main_panel_has_five_short_rows_without_a_plan_and_three_more_with_one(self):
+        calls = call_args(PANEL, 'm_panel.Line')
+        rows = [a[0] for a in calls]
+        mandatory = [r for r in rows if 'PLAN' not in r and 'SL "' not in r and 'Lot "' not in r]
+        self.assertEqual(len(rows), 10)   # mode (two variants), H4 (two variants), M15, 3 plan rows, decision, note
+        self.assertTrue(any('SIMULIM ~b PA URDHRA REAL~E' in r for r in rows))
+        self.assertTrue(any('ATENCION ~b REAL (DEMO) ~b URDHRA REAL~E' in r for r in rows))
+        self.assertTrue(any(r.startswith('"H4: "') for r in rows))
+        self.assertTrue(any(r.startswith('"M15: "') for r in rows))
+        self.assertTrue(any(r.startswith('"Vendimi: "') for r in rows))
+        self.assertTrue(any('Prototip ~m jo i validuar' in r for r in rows))
+        self.assertEqual(len(mandatory), 7, 'without a plan one variant of the mode and of H4 shows: five rows')
 
     def test_the_view_speaks_in_the_four_decision_words_and_covers_every_status(self):
         verdict = fn('void EV_Verdict', 'color EV_VerdictColor')
@@ -95,11 +159,13 @@ class ViewIsReadOnly(unittest.TestCase):
         for st in sorted(statuses):
             self.assertIn('"%s"' % st, verdict, 'no Albanian verdict for the status ' + st)
         panel = PANEL
-        self.assertIn('"VENDIMI: "+label+" - "', panel)
-        self.assertIn('SIMULIM - PA URDHRA REALE', panel)
+        self.assertIn('"Vendimi: "+label', panel)
+        self.assertIn('"SIMULIM ~b PA URDHRA REAL~E"', panel)
         self.assertIn('FAKE / READ_ONLY', panel)
-        self.assertIn('if(real_entry || !mgmt_read_only)', panel)
-        self.assertIn('ATENCION: TRANSPORT REAL I ZGJEDHUR', panel)
+        self.assertIn('bool real_mode=(real_entry || !mgmt_read_only);', panel)
+        self.assertIn('"ATENCION ~b REAL (DEMO) ~b URDHRA REAL~E"', panel)
+        self.assertRegex(panel, r'SIMULIM ~b PA URDHRA REAL~E",clrOrange,0')
+        self.assertRegex(panel, r'ATENCION ~b REAL \(DEMO\) ~b URDHRA REAL~E",clrRed,0')
 
     def test_every_reason_code_of_the_gate_chain_has_a_short_meaning(self):
         short = fn('string EV_ReasonShort', 'bool EV_IsWaitingReason')
@@ -136,7 +202,8 @@ class TheMarksFollowTheRules(unittest.TestCase):
         self.assertEqual(sorted(dots), ['brk_dot', 'sweep_dot'])
 
     def test_gold_belongs_to_the_fvg_the_plan_bridge_selected_and_nothing_else(self):
-        self.assertEqual(VIEW.count('clrGold'), 1)
+        self.assertEqual(VIEW.count('clrGold'), 2, 'the gold of the selected FVG zone and the gold swatch of the legend')
+        self.assertEqual(len(re.findall(r'clrGold', fn('void DrawM15Zone', 'void DrawPlan'))), 1)
         zone = fn('void DrawM15Zone', 'void DrawPlan')
         self.assertIn('color clr=(chosen ? clrGold :', zone)
         m15 = fn('void DrawM15(', 'void DrawM15Zone')
@@ -175,12 +242,40 @@ class TheMarksFollowTheRules(unittest.TestCase):
         self.assertEqual(plan.count('if(!m_plan.tp_is_2r)'), 2, 'a separate 2R line and label only when TP is beyond 2R')
         self.assertIn('"HYRJA LIMIT "+ds+" "+EV_Price(m_plan.entry,m_digits)', plan)
 
-    def test_there_is_a_legend_on_the_chart_that_explains_every_kind_of_mark(self):
-        legend = PANEL
-        for part in ("'H4'", 'Sweep H4', 'Fitil H4', 'Thyerje M15', 'ARTE', 'HYRJA LIMIT / SL / 2R / TP', 'kandidat', 'rikonfirmuar', 'pavlefshme'):
-            self.assertIn(part, legend, part)
-        self.assertIn('m_legend.Line(', legend)
-        self.assertIn('EV_PANEL_PREFIX+"leg_"', VIEW)
+    def test_the_legend_uses_real_swatches_beside_short_labels(self):
+        legend = call_args(PANEL, 'm_legend.Line')
+        mapping = [(a[0], a[3]) for a in legend]
+        self.assertEqual(mapping, [('"LEGJEND~E"', 'SW_NONE'), ('"H4"', 'SW_H4'), ('"FVG M15"', 'SW_M15'), ('"FVG e zgjedhur"', 'SW_GOLD'), ('"Sweep"', 'SW_SWEEP'),
+                                   ('"Thyerje M15"', 'SW_BREAK'), ('"E | SL | 2R | TP"', 'SW_PLAN')])
+        for a in legend:
+            self.assertGreaterEqual(len(a), 5, 'every legend row explains itself in a tooltip')
+            self.assertGreater(len(a[4]), 30)
+        box = VIEW[VIEW.index('class CEvBox'):VIEW.index('class CEoView')]
+        for needle in ('OBJ_RECTANGLE_LABEL', 'OBJ_LABEL', '"Wingdings"', 'Outline(n+"a"', 'clrDodgerBlue', 'clrDarkOrange', 'clrSilver', 'clrGold', 'clrRed', 'clrLimeGreen'):
+            self.assertIn(needle, box, needle)
+        self.assertIn('Glyph(n+"g",x+(int)(u*1.65),y+1,159,', box, 'the legend dot is the same Wingdings 159 as the dot on the chart')
+        self.assertIn('ObjectSetInteger(m_chart,name,OBJPROP_ARROWCODE,159);', VIEW)
+        self.assertIn('Glyph(n+"g",x,y,234,dir_clr)', box)
+        self.assertIn('Glyph(n+"g",x,y,233,dir_clr)', box)
+        self.assertIn('m_legend.Render(', PANEL)
+
+    def test_no_emoji_and_no_non_ascii_glyph_in_the_source_the_letters_come_from_code_points(self):
+        self.assertTrue(all(ord(ch) < 128 for ch in RAW))
+        t = fn('string EV_T(', 'string EV_DirWord(')
+        for cp in ('0x00EB', '0x00E7', '0x00CB', '0x00C7', '0x2022', '0x2014'):
+            self.assertIn(cp, t)
+        used = set(re.findall(r'~([A-Za-z])', VIEW))
+        self.assertLessEqual(used, set('ecECbm'), 'only the declared markers are used')
+        self.assertIn('Prototip ~m jo i validuar', PANEL)
+
+    def test_the_box_measures_the_font_it_draws_with(self):
+        box = VIEW[VIEW.index('class CEvBox'):VIEW.index('class CEoView')]
+        self.assertIn('TextSetFont("Consolas",-10*m_font,0,0);', box)
+        self.assertIn('TextGetSize("MMMMMMMMMM",w,h)', box)
+        self.assertIn('widest=(int)MathMax((double)widest,(double)TextWidth(rows[i]));', box)
+        self.assertIn('if(w_px>chart_w-12) w_px=chart_w-12;', box)
+        self.assertNotIn('0.78', box, 'no guessed character width')
+        self.assertIn('void TestSize(const int w,const int h)', box)
 
 
 class ConfirmedAndTemporaryWordsEqualThePresetLabels(unittest.TestCase):
@@ -191,8 +286,9 @@ class ConfirmedAndTemporaryWordsEqualThePresetLabels(unittest.TestCase):
     def test_what_the_panel_calls_confirmed_is_confirmed_and_what_it_calls_temporary_is_a_proposal(self):
         lab = self.labels()
         panel = PANEL
-        conf = re.search(r'"Konfirmuar nga klienti: ([^"]+)"', panel).group(1)
-        temp = re.search(r'"E perkohshme \(prototip\): ([^"]+)"', panel).group(1)
+        pp = plain(panel)
+        conf = re.search(r'"Konfirmuar nga klienti: ([^"]+)"', pp).group(1)
+        temp = re.search(r'E perkohshme \(prototip\): ([^"]+)"', pp).group(1)
         for word, key in (('hyrja LIMIT ne skaj te FVG', 'InpEntryEdge'), ('seanca', 'InpSessionClock'), ('lajmet', 'InpNewsCalendar'), ('kufijte ditore', 'InpMaxPositions')):
             self.assertIn(word, conf)
             self.assertEqual(lab[key], 'CONFIRMED', key)
@@ -202,7 +298,7 @@ class ConfirmedAndTemporaryWordsEqualThePresetLabels(unittest.TestCase):
 
     def test_the_risk_line_names_the_simulation_policy(self):
         panel = PANEL
-        self.assertIn('(out.risk_label!="" ? " ("+out.risk_label+": 1% e balances)" : "")', panel)
+        self.assertIn('(out.risk_label!="" ? " | risku: "+out.risk_label+" = 1% e balances" : "")', panel)
 
 
 class TheViewDoesNotChangeTheDecision(unittest.TestCase):
@@ -326,9 +422,10 @@ class TheSyntheticMt5Test(unittest.TestCase):
         for scen in ('WAIT_CONTEXT SELL', 'WAIT_CONTEXT BUY', 'BUY accepted, TP = 2R', 'SELL accepted, TP = 2R', 'BUY accepted, TP beyond 2R', 'SELL accepted, TP beyond 2R',
                      'BUY blocked by the gate', 'SELL blocked by the gate'):
             self.assertIn(scen, TEST_RAW)
-        for needle in ('SIMULIM - PA URDHRA REALE', 'VENDIMI: PRET', 'VENDIMI: BLLOKUAR', 'VENDIMI: KERKESE VIRTUALE', 'CountGoldZones()==1', 'CountGoldZones()==0', 'no entry arrow',
+        for needle in ('SIMULIM ~b PA URDHRA REAL~E', 'Vendimi: PRET', 'Vendimi: BLLOKUAR', 'Vendimi: KERKESE VIRTUALE', 'Vendimi: KERKESE REALE', 'CountGoldZones()==1', 'CountGoldZones()==0', 'no entry arrow',
                        'the manual drawing is untouched', 'Thyerje M15', 'NUK eshte MSS', 'TP = 2R ', 'no M15 level, no zone, no plan line is invented', 'trajtuar me pare',
-                       'the swept level is dashed', 'the legend is on the chart'):
+                       'the swept level is dashed', 'the legend names every kind of mark', 'wide chart 1400 x 800', 'narrow chart 380 x 520', 'short chart 900 x 300', 'no text is cut',
+                       'do not overlap', 'Wingdings', 'the panel is short', 'legend swatch H4', 'down (SELL) or up (BUY) arrow glyph'):
             self.assertIn(needle, TEST_RAW, needle)
 
     def test_the_scenario_names_exist_for_the_screenshots_and_the_hold_is_off_by_default(self):

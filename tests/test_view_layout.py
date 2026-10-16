@@ -40,7 +40,7 @@ class Select(unittest.TestCase):
         keep, dropped, rows = lay.select(self.TEXTS, self.PRIOS, 120, 6)
         self.assertEqual(keep, [True, True, True, True, True, False, False])
         self.assertEqual((dropped, rows), (2, 6))
-        self.assertEqual(lay.MARKER % 2, '(+2 rreshta te fshehura: zmadho grafikun)')
+        self.assertEqual(lay.MARKER % 2, '(+2 te fshehura)')
 
     def test_the_later_line_of_the_same_priority_leaves_first(self):
         keep, dropped, rows = lay.select(['a', 'b', 'c', 'd'], [0, 2, 2, 2], 40, 3)

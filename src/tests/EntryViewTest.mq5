@@ -90,24 +90,51 @@ int CountArrowObjects(void)
    return(n);
   }
 
-//--- the background exists, is a rectangle label, holds every row and fits the chart
-bool BoxFits(const string prefix)
+//--- helpers over the boxes: the row whose text starts with a string, its tooltip, the pixel width of a text in the box font
+string RowName(const string prefix,const string start)
+  {
+   for(int i=0;i<60;i++)
+     {
+      string name=prefix+StringFormat("%03d",i);
+      if(!Exists(name)) break;
+      if(StringFind(ObjectGetString(0,name,OBJPROP_TEXT),start)==0) return(name);
+     }
+   return("");
+  }
+string TipOfRow(const string prefix,const string start)
+  {
+   string n=RowName(prefix,start);
+   return(n=="" ? "" : ObjectGetString(0,n,OBJPROP_TOOLTIP));
+  }
+string T(const string marked) {return(EV_T(marked));}
+
+//--- the background exists, is a rectangle label, holds every row, every label ends inside it (measured with the real font: no cut text) and it fits the chart
+bool BoxFits(const string prefix,const int chart_w,const int chart_h,const int font)
   {
    string bg=prefix+"bg";
    if(!Exists(bg) || (int)ObjectGetInteger(0,bg,OBJPROP_TYPE)!=OBJ_RECTANGLE_LABEL) return(false);
    int x=(int)ObjectGetInteger(0,bg,OBJPROP_XDISTANCE),y=(int)ObjectGetInteger(0,bg,OBJPROP_YDISTANCE);
    int w=(int)ObjectGetInteger(0,bg,OBJPROP_XSIZE),h=(int)ObjectGetInteger(0,bg,OBJPROP_YSIZE);
-   if(x+w>(int)ChartGetInteger(0,CHART_WIDTH_IN_PIXELS,0) || y+h>(int)ChartGetInteger(0,CHART_HEIGHT_IN_PIXELS,0) || y<0) return(false);
+   if(x+w>chart_w || y+h>chart_h || y<0) return(false);
    int rows=0;
+   TextSetFont("Consolas",-10*font,0,0);
    for(int i=0;i<60;i++)
      {
       string name=prefix+StringFormat("%03d",i);
       if(!Exists(name)) break;
-      int ly=(int)ObjectGetInteger(0,name,OBJPROP_YDISTANCE);
-      if(ly<y || ly+10>y+h) return(false);
+      int lx=(int)ObjectGetInteger(0,name,OBJPROP_XDISTANCE),ly=(int)ObjectGetInteger(0,name,OBJPROP_YDISTANCE);
+      uint tw=0,th=0;
+      if(!TextGetSize(ObjectGetString(0,name,OBJPROP_TEXT),tw,th)) return(false);
+      if(lx+(int)tw>x+w || ly<y || ly+(int)th>y+h) return(false);
       rows++;
      }
    return(rows>0);
+  }
+int BoxRows(const string prefix)
+  {
+   int n=0;
+   for(int i=0;i<60;i++) {if(!Exists(prefix+StringFormat("%03d",i))) break; n++;}
+   return(n);
   }
 
 #define KIND_WAIT_CONTEXT  0
@@ -225,21 +252,31 @@ void RunScenario(CEoView &view,const int dir,const int kind,const string title)
    Build(feed,out,dir,kind);
    view.Update(out,feed,false,true);
    string panel=PanelText();
+   string main=EV_PANEL_PREFIX+"main_";
    string ds=(dir==1 ? "BUY" : "SELL");
    color h4c=(dir==1 ? clrDodgerBlue : clrDarkOrange);
-   // ---- always: the mode, the legend, no arrow objects, the manual drawing is untouched
-   Check(Has(panel,"SIMULIM - PA URDHRA REALE"),title+": the panel says SIMULIM - PA URDHRA REALE");
-   Check(Has(panel,"FAKE / READ_ONLY"),title+": the panel says FAKE / READ_ONLY");
-   Check(Has(panel,"VENDIMI: "),title+": the panel has a decision line");
-   Check(Has(LegendText(),"LEGJENDA") && Has(LegendText(),"ARTE") && Has(LegendText(),"Thyerje M15"),title+": the legend is on the chart");
-   Check(BoxFits(EV_PANEL_PREFIX+"main_") && BoxFits(EV_PANEL_PREFIX+"leg_"),title+": both boxes have a background that holds their rows and fits the chart");
-   Check(Has(panel,"modaliteti: FAKE (virtuale)") || kind==KIND_WAIT_CONTEXT,title+": the plan row names the FAKE mode");
+   int cw=(int)ChartGetInteger(0,CHART_WIDTH_IN_PIXELS,0),ch=(int)ChartGetInteger(0,CHART_HEIGHT_IN_PIXELS,0);
+   // ---- always: the mode, a SHORT panel, the legend with real swatches, no arrow objects, the manual drawing untouched
+   Check(Has(panel,T("SIMULIM ~b PA URDHRA REAL~E")),title+": the first row says SIMULIM and PA URDHRA REALE");
+   Check(StringFind(TextOf(main+"000"),T("SIMULIM"))==0 && Has(TipOfRow(main,T("SIMULIM")),"FAKE / READ_ONLY"),title+": the mode is the first row and its tooltip says FAKE / READ_ONLY");
+   Check(Has(panel,"Vendimi: "),title+": the panel has a decision row");
+   Check(Has(panel,T("Prototip ~m jo i validuar")),title+": the short note 'Prototip - jo i validuar'");
+   Check(BoxRows(main)<=(kind==KIND_WAIT_CONTEXT ? 5 : 8),title+": the panel is short (5 rows without a plan, 8 with one)");
+   Check(Has(LegendText(),T("LEGJEND~E")) && Has(LegendText(),"FVG e zgjedhur") && Has(LegendText(),"Thyerje M15") && Has(LegendText(),"Sweep") && Has(LegendText(),"E | SL | 2R | TP"),title+": the legend names every kind of mark");
+   Check(BoxFits(main,cw,ch,9) && BoxFits(EV_PANEL_PREFIX+"leg_",cw,ch,8),title+": both boxes have a background that holds their rows, no text is cut, both fit the chart");
+   Check(ObjectGetInteger(0,EV_PANEL_PREFIX+"main_bg",OBJPROP_YDISTANCE)+ObjectGetInteger(0,EV_PANEL_PREFIX+"main_bg",OBJPROP_YSIZE)<=ObjectGetInteger(0,EV_PANEL_PREFIX+"leg_bg",OBJPROP_YDISTANCE),title+": the panel and the legend do not overlap");
+   Check(Exists(EV_PANEL_PREFIX+"leg_s1_ao") && ColorOf(EV_PANEL_PREFIX+"leg_s1_ao")==clrDodgerBlue && Exists(EV_PANEL_PREFIX+"leg_s1_bo") && ColorOf(EV_PANEL_PREFIX+"leg_s1_bo")==clrDarkOrange,title+": legend swatch H4 = a blue box and an orange box");
+   Check(ColorOf(EV_PANEL_PREFIX+"leg_s2_ao")==clrSilver && ColorOf(EV_PANEL_PREFIX+"leg_s3_ao")==clrGold,title+": legend swatches: grey box = FVG M15, gold box = selected FVG");
+   Check(Exists(EV_PANEL_PREFIX+"leg_s4_d0") && Exists(EV_PANEL_PREFIX+"leg_s4_d1") && Exists(EV_PANEL_PREFIX+"leg_s4_d2") && Exists(EV_PANEL_PREFIX+"leg_s4_g") && Exists(EV_PANEL_PREFIX+"leg_s5_d0") && Exists(EV_PANEL_PREFIX+"leg_s5_g"),title+": legend swatches: dashed line + dot (Sweep), solid line + dot (Thyerje M15)");
+   Check(StringGetCharacter(ObjectGetString(0,EV_PANEL_PREFIX+"leg_s4_g",OBJPROP_TEXT),0)==159 && ObjectGetString(0,EV_PANEL_PREFIX+"leg_s4_g",OBJPROP_FONT)=="Wingdings",title+": the legend dot is the same glyph as the dot on the chart (Wingdings 159), not an emoji");
+   Check(Exists(EV_PANEL_PREFIX+"leg_s6_e") && Exists(EV_PANEL_PREFIX+"leg_s6_s") && Exists(EV_PANEL_PREFIX+"leg_s6_r") && Exists(EV_PANEL_PREFIX+"leg_s6_t"),title+": legend swatch E | SL | 2R | TP = four labelled line samples");
    Check(CountArrowObjects()==0,title+": no entry arrow object (only the dots of the sweep and of the break exist)");
    Check(!Exists(EV_PREFIX+"entry_arrow") && CountPrefix(EV_PREFIX,OBJ_ARROW_BUY)==0 && CountPrefix(EV_PREFIX,OBJ_ARROW_SELL)==0,title+": no buy / sell arrow");
    Check(Exists("MANUAL_VIEW_TEST_LINE"),title+": the manual drawing is untouched");
-   Check(Has(panel,"Konfirmuar nga klienti") && Has(panel,"E perkohshme"),title+": the temporary choices are explained in words");
-   // ---- H4
-   Check(Has(panel,"H4: "+(dir==1 ? "NGRITES (BUY)" : "ZBRITES (SELL)")),title+": H4 direction in words");
+   Check(Has(TipOfRow(main,T("Prototip")),"Konfirmuar nga klienti") && Has(TipOfRow(main,T("Prototip")),T("E p~erkohshme")),title+": the temporary choices are explained in the tooltip");
+   // ---- H4: direction, the arrow glyph in the gutter, the short state
+   Check(Has(panel,"H4: "+ds+" | "),title+": H4 direction in two letters of text");
+   Check(Exists(main+"s1_g") && ObjectGetString(0,main+"s1_g",OBJPROP_FONT)=="Wingdings" && StringGetCharacter(ObjectGetString(0,main+"s1_g",OBJPROP_TEXT),0)==(dir==1 ? 233 : 234) && ColorOf(main+"s1_g")==h4c,title+": the H4 row has a down (SELL) or up (BUY) arrow glyph in the direction colour");
    Check(Exists(EV_PREFIX+"sweep_dot") && Exists(EV_PREFIX+"sweep_txt") && Exists(EV_PREFIX+"sweep_lvl"),title+": sweep mark, label and dashed level");
    Check(Has(TextOf(EV_PREFIX+"sweep_txt"),(dir==-1 ? "Sweep H4" : "Fitil H4")),title+": the sweep label names the event");
    Check((int)ObjectGetInteger(0,EV_PREFIX+"sweep_lvl",OBJPROP_STYLE)==STYLE_DASH,title+": the swept level is dashed");
@@ -248,36 +285,41 @@ void RunScenario(CEoView &view,const int dir,const int kind,const string title)
    Check(CountPrefix(EV_PREFIX+"h4fvg_",OBJ_RECTANGLE)<=EV_MAX_H4_FVG,title+": the number of H4 zones is limited");
    if(kind==KIND_WAIT_CONTEXT)
      {
-      Check(Has(panel,"SWEEP_WAIT")==false && Has(panel,"sweep i brendshem u pa"),title+": the phase is translated (no raw code)");
+      Check(Has(panel,"Pret rikonfirmim") && Has(TipOfRow(main,"H4:"),"sweep i brendshem u pa") && !Has(panel,"SWEEP_WAIT"),title+": the phase is translated (short state in the row, the sentence in the tooltip)");
       Check(Has(TextOf(EV_PREFIX+"h4fvg_txt0"),"kandidat"),title+": before the reconfirmation the H4 FVG is a candidate");
       Check((int)ObjectGetInteger(0,EV_PREFIX+"h4fvg_0",OBJPROP_STYLE)==STYLE_DASH,title+": a candidate H4 FVG is dashed");
-      Check(Has(panel,"VENDIMI: PRET"),title+": the decision is PRET");
-      Check(Has(panel,"M15 konfirmuar: asgje ende") && Has(panel,"M15 mungon: setup H4 i rikonfirmuar"),title+": M15 says what is missing");
+      Check(Has(panel,"Vendimi: PRET") && !Has(panel,"Vendimi: BLLOKUAR"),title+": the decision is PRET");
+      Check(Has(panel,T("M15: N~e pritje")) && Has(TipOfRow(main,"M15:"),"Mungon: setup H4 i rikonfirmuar"),title+": M15 says Ne pritje and the tooltip says what is missing");
       Check(CountPrefix(EV_PREFIX+"m15fvg_",-1)==0 && !Exists(EV_PREFIX+"brk_line") && !Exists(EV_PREFIX+"entry") && !Exists(EV_PREFIX+"sl") && !Exists(EV_PREFIX+"tp"),title+": no M15 level, no zone, no plan line is invented");
       Check(CountGoldZones()==0,title+": nothing is gold");
       return;
      }
    Check(Has(TextOf(EV_PREFIX+"h4fvg_txt0"),"rikonfirmuar") && (int)ObjectGetInteger(0,EV_PREFIX+"h4fvg_0",OBJPROP_STYLE)==STYLE_SOLID,title+": the reconfirmed H4 FVG is solid and says so");
+   Check(Has(panel,"H4: "+ds+" | Rikonfirmuar"),title+": the H4 row says Rikonfirmuar");
    // ---- M15
    Check(Exists(EV_PREFIX+"brk_line") && Exists(EV_PREFIX+"brk_dot") && Has(TextOf(EV_PREFIX+"brk_txt"),"Thyerje M15"),title+": M15 break line, candle mark and label 'Thyerje M15'");
    Check(!Has(TextOf(EV_PREFIX+"brk_txt"),"MSS") && Has(ObjectGetString(0,EV_PREFIX+"brk_line",OBJPROP_TOOLTIP),"NUK eshte MSS"),title+": the prototype break is not called a validated MSS");
    Check(CountGoldZones()==1 && ColorOf(EV_PREFIX+"m15fvg_0")==clrGold && Has(TextOf(EV_PREFIX+"m15fvg_txt0"),"ZGJEDHUR"),title+": exactly one gold M15 FVG, the one the plan bridge selected, drawn first");
    Check(Exists(EV_PREFIX+"m15fvg_1") && ColorOf(EV_PREFIX+"m15fvg_1")!=clrGold && Has(TextOf(EV_PREFIX+"m15fvg_txt1"),"kandidat"),title+": another M15 FVG is a plain candidate");
    Check(CountPrefix(EV_PREFIX+"m15fvg_",OBJ_RECTANGLE)<=EV_MAX_M15_FVG,title+": the number of M15 zones is limited");
-   Check(Has(panel,"M15 konfirmuar: ") && Has(panel,"thyerje M15") && Has(panel,"M15 mungon: kthimi i cmimit ne FVG"),title+": M15 confirmed / missing in words");
-   // ---- plan
+   Check(Has(panel,T("M15: Pret kthim n~e FVG")) && Has(TipOfRow(main,"M15:"),"Konfirmuar: ") && Has(TipOfRow(main,"M15:"),"thyerje M15") && Has(TipOfRow(main,"M15:"),"Mungon: kthimi i cmimit ne FVG"),title+": M15 short state + confirmed / missing in the tooltip");
+   // ---- plan: lines with labels and prices, short rows in the panel
    Check(Exists(EV_PREFIX+"entry") && Exists(EV_PREFIX+"sl") && Exists(EV_PREFIX+"tp") && Exists(EV_PREFIX+"entry_txt") && Exists(EV_PREFIX+"sl_txt") && Exists(EV_PREFIX+"tp_txt"),title+": entry, SL and TP lines with labels");
    Check(Has(TextOf(EV_PREFIX+"entry_txt"),"HYRJA LIMIT "+ds) && Has(TextOf(EV_PREFIX+"sl_txt"),"SL ") && Has(TextOf(EV_PREFIX+"tp_txt"),"TP"),title+": the labels carry the names and prices");
    if(kind==KIND_ACCEPTED_FAR)
       Check(Exists(EV_PREFIX+"r2") && Has(TextOf(EV_PREFIX+"r2_txt"),"2R ") && !Has(TextOf(EV_PREFIX+"tp_txt"),"= 2R"),title+": a TP beyond 2R has its own 2R line");
    else
       Check(!Exists(EV_PREFIX+"r2") && Has(TextOf(EV_PREFIX+"tp_txt"),"TP = 2R "),title+": when TP is 2R one line carries both names");
-   Check(Has(panel,"PLAN "+ds+" LIMIT: hyrja "),title+": the panel shows the plan");
+   Check(Has(panel,"PLAN "+ds+" LIMIT | E ") && Has(panel,"SL ") && Has(panel,"Lot 0.10 | Risk 100.00"),title+": the panel plan rows: E / SL / TP / lot / risk");
+   Check(Has(TipOfRow(main,"PLAN"),"modaliteti: FAKE (virtuale)"),title+": the plan row tooltip names the FAKE mode");
    if(kind==KIND_BLOCKED)
-      Check(Has(panel,"VENDIMI: BLLOKUAR") && Has(panel,"spread shume i larte") && Has(panel,"+1 arsye"),title+": blocked, with a short reason");
+     {
+      Check(Has(panel,"Vendimi: BLLOKUAR | spread"),title+": blocked, with one or two words of reason");
+      Check(Has(TipOfRow(main,"Vendimi:"),"spread shume i larte") && Has(TipOfRow(main,"Vendimi:"),"+1 arsye"),title+": the full reason is in the tooltip");
+     }
    else
      {
-      Check(Has(panel,"VENDIMI: KERKESE VIRTUALE"),title+": virtual request");
+      Check(Has(panel,"Vendimi: KERKESE VIRTUALE"),title+": virtual request");
       // the next step: the signal is handled; the kept plan stays and says so
       SEoOutcome again;
       EO_OutcomeInit(again);
@@ -286,7 +328,7 @@ void RunScenario(CEoView &view,const int dir,const int kind,const string title)
       EO_Set(again,"ALREADY_HANDLED",out.spb.signal_id);
       view.Update(again,feed,false,true);
       string p2=PanelText();
-      Check(Exists(EV_PREFIX+"entry") && Has(p2,"KERKESE VIRTUALE") && Has(p2,"trajtuar me pare"),title+": the plan of a handled signal stays with its verdict");
+      Check(Exists(EV_PREFIX+"entry") && Has(p2,"Vendimi: KERKESE VIRTUALE") && Has(TipOfRow(main,"Vendimi:"),"trajtuar me pare"),title+": the plan of a handled signal stays with its verdict");
       view.Update(out,feed,false,true);
      }
    if(InpHoldSeconds>0)
@@ -304,7 +346,6 @@ void RunScenario(CEoView &view,const int dir,const int kind,const string title)
       ObjectDelete(0,banner);
      }
   }
-
 
 //--- pure layout helpers: the same cases as tests/test_view_layout.py
 void TestLayout(void)
@@ -342,23 +383,57 @@ void TestRequestMode(CEoView &view)
   {
    CEoFeed feed;
    SEoOutcome out;
+   string main=EV_PANEL_PREFIX+"main_";
    Build(feed,out,1,KIND_ACCEPTED_2R);
    view.Update(out,feed,true,true);
    string panel=PanelText();
-   Check(Has(panel,"VENDIMI: KERKESE REALE") && !Has(panel,"KERKESE VIRTUALE"),"request mode: a request through the REAL transport is called REALE, never virtual");
-   Check(Has(panel,"modaliteti: REAL (DEMO)") && !Has(panel,"modaliteti: FAKE") && Has(panel,"ATENCION: TRANSPORT REAL"),"request mode: the plan row and the banner say REAL (DEMO)");
+   Check(Has(panel,"Vendimi: KERKESE REALE") && !Has(panel,"KERKESE VIRTUALE"),"request mode: a request through the REAL transport is called REALE, never virtual");
+   Check(Has(TipOfRow(main,"PLAN"),"modaliteti: REAL (DEMO)") && !Has(TipOfRow(main,"PLAN"),"modaliteti: FAKE") && Has(panel,T("ATENCION ~b REAL (DEMO)")) && !Has(panel,T("SIMULIM ~b")),"request mode: the first row says REAL (DEMO), never SIMULIM");
    SEoOutcome again;
    EO_OutcomeInit(again);
    again.spb.signal_id=out.spb.signal_id;
    EO_Set(again,"ALREADY_HANDLED",out.spb.signal_id);
    view.Update(again,feed,true,true);
    panel=PanelText();
-   Check(Has(panel,"KERKESE REALE") && Has(panel,"trajtuar me pare") && !Has(panel,"KERKESE VIRTUALE"),"request mode: the kept plan of a handled signal keeps the REAL mode");
+   Check(Has(panel,"Vendimi: KERKESE REALE") && Has(TipOfRow(main,"Vendimi:"),"trajtuar me pare") && !Has(panel,"KERKESE VIRTUALE"),"request mode: the kept plan of a handled signal keeps the REAL mode");
    Build(feed,out,1,KIND_ACCEPTED_2R);
    out.spb.signal_id="SYNTHETIC_SIGNAL_2";
    view.Update(out,feed,false,true);
    panel=PanelText();
-   Check(Has(panel,"VENDIMI: KERKESE VIRTUALE") && Has(panel,"modaliteti: FAKE (virtuale)") && !Has(panel,"KERKESE REALE") && Has(panel,"SIMULIM - PA URDHRA REALE"),"request mode: the FAKE transport is called virtual and the mode line says SIMULIM");
+   Check(Has(panel,"Vendimi: KERKESE VIRTUALE") && Has(TipOfRow(main,"PLAN"),"modaliteti: FAKE (virtuale)") && !Has(panel,"KERKESE REALE") && Has(panel,T("SIMULIM ~b PA URDHRA REAL~E")),"request mode: the FAKE transport is called virtual and the first row says SIMULIM");
+  }
+
+//--- wide, narrow and short charts: no cut text, no overlap, the mode and the decision always visible
+void TestSizes(CEoView &view)
+  {
+   int sizes_w[3]={1400,380,900};
+   int sizes_h[3]={800,520,300};
+   string names[3]={"wide chart 1400 x 800","narrow chart 380 x 520","short chart 900 x 300"};
+   for(int z=0;z<3;z++)
+     {
+      for(int dir=-1;dir<=1;dir+=2)
+        {
+         int kinds[3]={KIND_WAIT_CONTEXT,KIND_ACCEPTED_2R,KIND_BLOCKED};
+         string kn[3]={"waiting","accepted","blocked"};
+         for(int q=0;q<3;q++)
+           {
+            CEoFeed feed;
+            SEoOutcome out;
+            Build(feed,out,dir,kinds[q]);
+            view.TestSize(sizes_w[z],sizes_h[z]);
+            view.Update(out,feed,false,true);
+            string title=names[z]+(dir==1 ? " BUY " : " SELL ")+kn[q];
+            string main=EV_PANEL_PREFIX+"main_",leg=EV_PANEL_PREFIX+"leg_";
+            Check(BoxFits(main,sizes_w[z],sizes_h[z],9) && BoxFits(leg,sizes_w[z],sizes_h[z],8),title+": no text is cut and both boxes fit the chart");
+            long main_end=ObjectGetInteger(0,main+"bg",OBJPROP_YDISTANCE)+ObjectGetInteger(0,main+"bg",OBJPROP_YSIZE);
+            Check(main_end<=ObjectGetInteger(0,leg+"bg",OBJPROP_YDISTANCE),title+": the panel and the legend do not overlap");
+            string panel=PanelText();
+            Check(Has(panel,T("SIMULIM ~b PA URDHRA REAL~E")) && Has(panel,"Vendimi: "),title+": the mode and the decision rows are always visible");
+            if(sizes_h[z]<400) Check(Has(panel,"(+") || BoxRows(main)<=8,title+": a short chart drops the low-priority rows and says how many");
+           }
+        }
+     }
+   view.TestSize(0,0);
   }
 
 void OnStart()
@@ -370,7 +445,8 @@ void OnStart()
    datetime now=TimeCurrent();
    g_cut=now-(now%900);
    ObjectCreate(0,"MANUAL_VIEW_TEST_LINE",OBJ_HLINE,0,0,g_mid-20.0*g_u);       // a manual drawing that the view must never touch
-   Check((int)ChartGetInteger(0,CHART_WIDTH_IN_PIXELS,0)>=900 && (int)ChartGetInteger(0,CHART_HEIGHT_IN_PIXELS,0)>=500,"the chart is large enough for the assertions (900 x 500 px)");
+   Check((int)ChartGetInteger(0,CHART_WIDTH_IN_PIXELS,0)>=900 && (int)ChartGetInteger(0,CHART_HEIGHT_IN_PIXELS,0)>=500,"the chart is large enough for the scenarios (900 x 500 px); the narrow and short charts are simulated by TestSize");
+   Check(EV_T("~e~c~E~C~b~m")==ShortToString(0x00EB)+ShortToString(0x00E7)+ShortToString(0x00CB)+ShortToString(0x00C7)+ShortToString(0x2022)+ShortToString(0x2014),"the text markers become the Albanian letters, the bullet and the dash");
    TestLayout();
    CEoView view;
    view.Init();
@@ -383,6 +459,7 @@ void OnStart()
    RunScenario(view,1,KIND_BLOCKED,"BUY blocked by the gate");
    RunScenario(view,-1,KIND_BLOCKED,"SELL blocked by the gate");
    TestRequestMode(view);
+   TestSizes(view);
    view.Destroy();
    Check(CountPrefix(EV_PREFIX,-1)==0,"Destroy removes every object of the component");
    Check(Exists("MANUAL_VIEW_TEST_LINE"),"the manual drawing survives Destroy");
