@@ -71,6 +71,13 @@ public:
    datetime replay_start;
    bool built;
    string problem;
+   // chart view only (InpChartView): the arrays and the evaluation of the LAST snapshot, copied from what the build already computed; nothing here is read by a decision
+   bool keep_view;
+   bool dv_have;
+   int dv_n;                    // closed H4 bars of that snapshot (hbars[0..dv_n-1])
+   SH3Eval dv_ev;
+   SH3Track dv_tracks[];
+   SH3Event dv_events[];
    // diagnostics only: the result of the T003 evaluation that the existing build already computed for the LAST snapshot (no second evaluation, nothing here is read by a decision)
    bool dg_have;
    bool dg_ctx_ok;              // what M4ContextFromH3 returned for that snapshot
@@ -86,6 +93,8 @@ public:
    void Init(const SEoFeedCfg &c)
      {
       cfg=c;
+      keep_view=false;                         // the EA switches it on AFTER Init when the chart view is requested
+      dv_n=0;
       H3ParamsDefault(params);
       params.rebuild=c.h4_rebuild;
       params.lookback=c.h4_lookback;
@@ -102,6 +111,7 @@ public:
       problem=reason;
       replay_start=0;
       dg_have=false;
+      dv_have=false;
      }
    bool Ordinary(void) {return(cfg.source==EO_SRC_T002_AFTER_LOSS || cfg.source==EO_SRC_T002_FIRST_ONLY);}
    int CopyClosed(const ENUM_TIMEFRAMES tf,const datetime at,const int want,MqlRates &out[])
@@ -125,12 +135,34 @@ public:
         }
       return(ArraySize(out));
      }
+   // copy for the chart view; field by field (the structs hold strings); the evaluation is NOT repeated
+   void KeepView(const int n,const SH3Eval &e,const SH3Track &tracks[],const SH3Event &events[])
+     {
+      dv_have=true;
+      dv_n=n;
+      dv_ev.has_state=e.has_state; dv_ev.reliable=e.reliable; dv_ev.flag=e.flag; dv_ev.reason=e.reason; dv_ev.note=e.note;
+      dv_ev.r_request=e.r_request; dv_ev.r_req=e.r_req; dv_ev.r_eff=e.r_eff; dv_ev.b_depth=e.b_depth; dv_ev.warm=e.warm; dv_ev.chk=e.chk; dv_ev.n_avail=e.n_avail;
+      dv_ev.key=e.key; dv_ev.key_prev=e.key_prev; dv_ev.last_time=e.last_time; dv_ev.trusted_from=e.trusted_from; dv_ev.anchor=e.anchor; dv_ev.anchor_missing=e.anchor_missing;
+      dv_ev.prev_ok=e.prev_ok; dv_ev.cause=e.cause; dv_ev.nt=e.nt; dv_ev.ne=e.ne;
+      H3StateCopy(e.st,dv_ev.st);
+      int nt=(e.nt>0 ? MathMin(e.nt,ArraySize(tracks)) : 0);
+      int ne=(e.ne>0 ? MathMin(e.ne,ArraySize(events)) : 0);
+      ArrayResize(dv_tracks,nt);
+      for(int i=0;i<nt;i++) H3TrackCopy(tracks[i],dv_tracks[i]);
+      ArrayResize(dv_events,ne);
+      for(int j=0;j<ne;j++)
+        {
+         dv_events[j].type=events[j].type; dv_events[j].bar_time=events[j].bar_time; dv_events[j].ref=events[j].ref;
+         dv_events[j].detail=events[j].detail; dv_events[j].market=events[j].market; dv_events[j].sig=events[j].sig;
+        }
+     }
    void T003View(const int n,SH3Eval &e,SH3SetupCtx &c)
      {
       SH3Track tracks[];
       SH3Event events[];
       H3Evaluate(hbars,n,params,e,tracks,events);
       H3SetupContext(e.st,tracks,e.nt,c);
+      if(keep_view) KeepView(n,e,tracks,events);
      }
    void Snapshot(const int n,const datetime known)
      {

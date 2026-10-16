@@ -125,4 +125,6 @@ InpMgmtFilling=2
 InpMgmtDeviation=20
 InpMgmtFilterPolicy=1
 InpMgmtFilterState=1
+; [TECHNICAL] chart view (Albanian panel + H4 / M15 / plan objects) drawn from the decision already taken; it never changes a plan, a block or a FAKE request. ON here so the Tauro simulation can be compared with a client example; the objects use velo_t016v_ and the T003 drawer's velo_t003_ (do not run the T003 EA on the same chart).
+InpChartView=true
 InpPollSeconds=2

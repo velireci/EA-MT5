@@ -22,6 +22,7 @@ Kjo përmbledhje zëvendëson statuset historike më poshtë. [x] vlen vetëm p�
 - [x] Prova e mëparshme manuale BUY e T011 konfirmoi një pjesëmbyllje dhe reconcile; nuk zëvendëson ciklin automatik të orkestruesit.
 
 ### Puna aktive dhe çfarë mungon
+- [ ] Pamja vizuale e strategjisë brenda EA (v1.15, `InpChartView`): paneli shqip SIMULIM / FAKE / READ_ONLY, H4 (drawer-i ekzistues), M15 BOS/FVG, plani LIMIT/SL/TP/2R; ndërtuar dhe testuar vetëm statikisht, kompilimi dhe screenshot-et nga MT5 UNVERIFIED. Pamja nuk provon përputhjen me strategjinë e klientit; krahasimi me shembullin e klientit pritet pas screenshot-eve.
 - [x] Zinxhiri pas planit me numrat Tauro (sintetik, vetëm në teste; kërkon kompilim/MT5 UNVERIFIED): record balance LOAD → bridge → porta → ekzekutuesi FAKE, BUY/SELL, cap 200, mungesa/dita e gabuar e rekordit, lajmet/spread-i/seanca me zero dërgime. Preseti simulation ka offset=0 të matur (jo default universal). Leximi real i historisë, kalendarit, spread-it dhe orës së PC mbetet evidencë terminali.
 - [ ] Vëzhgimi i një setup-i të ri H4/M15 deri te plani, porta dhe kërkesa FAKE në Tauro. Deri në log-un e 03:00: virtual requests=0, lifecycle open=0; kjo rrugë në treg ende nuk është provuar.
 - [ ] Kontroll i përbashkët i pengesave pas planit: balanca ditore T012, numëruesit manualë, offset-i i serverit, spread-i, lajmet, seanca dhe combined risk cap. Preseti i plotë nuk provon të dhënat reale të këtyre burimeve.

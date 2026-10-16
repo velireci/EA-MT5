@@ -121,4 +121,6 @@ InpMgmtFilling=2
 InpMgmtDeviation=20
 InpMgmtFilterPolicy=1
 InpMgmtFilterState=1
+; [OFF] chart view (Albanian panel + H4 / M15 / plan objects) drawn from the decision already taken; it never changes a plan, a block or a FAKE request. OFF in the demo preset.
+InpChartView=false
 InpPollSeconds=2

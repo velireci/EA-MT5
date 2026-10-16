@@ -108,6 +108,7 @@ for ln in rest.split('\n'):
     if 'dg_' in ln:
         assert re.match(r'^\s*(bool|int|string|datetime) dg_\w+;\s*$', ln) or ln.strip() == 'dg_have=false;', 'diagnostic members outside Snapshot / Diag are declarations and the Reset clear only: ' + ln
 assert 'dg_' not in ea, 'the EA does not read the diagnostic members'
+assert 'dv_' not in ea, 'the EA does not read the chart-view copies of the feed'
 assert ea.count('g_feed.Diag()') == 1 and 'text+=" | "+g_feed.Diag();' in poll, 'one diagnostic suffix in the status text'
 assert poll.index('text+=" | "+g_feed.Diag();') > poll.index('g_orch.Step('), 'the diagnostics are appended after the decision step'
 assert 'class CEoTerminalFake : public CEnFakeTransport' in ea, 'fake transport class'
@@ -144,7 +145,7 @@ for n in ('InpContextSource=EOI_SRC_UNSELECTED', 'InpM15Level=EOI_SWING_UNSELECT
           'InpPermitMaxAgeSeconds=-1', 'InpOpenPositions=-1', 'InpTradesToday=-1', 'InpExistingRisk=-1', 'InpMaxPositions=-1', 'InpMaxTrades=-1', 'InpCombinedRiskCap=-1', 'InpSessionClock=false',
           'InpNewsCalendar=false', 'InpMaxSpreadPoints=-1', 'InpDailyHistoryBridge=false', 'InpDailyServerOffsetSeconds=99999', 'InpDailyHistoryComplete=false', 'InpFilling=EOI_FILL_UNSET', 'InpExpiryMode=EOI_EXP_UNSET'):
     assert n in ea, 'default not UNSET: ' + n
-assert sorted(re.findall(r'#include "([^"]+)"', ea)) == sorted(['include/EntryOrchestratorFeed.mqh', 'include/EntryStateFile.mqh', 'include/EntryTransportFake.mqh', 'include/EntryLifecycle.mqh', 'include/EntryManagementHandoff.mqh', 'include/EntryNotify.mqh', 'include/EntryTransportReal.mqh', 'include/ExitTransportReal.mqh', 'include/ExposureReaderReal.mqh']), 'EA includes'
+assert sorted(re.findall(r'#include "([^"]+)"', ea)) == sorted(['include/EntryOrchestratorFeed.mqh', 'include/EntryOrchestratorView.mqh', 'include/EntryStateFile.mqh', 'include/EntryTransportFake.mqh', 'include/EntryLifecycle.mqh', 'include/EntryManagementHandoff.mqh', 'include/EntryNotify.mqh', 'include/EntryTransportReal.mqh', 'include/ExitTransportReal.mqh', 'include/ExposureReaderReal.mqh']), 'EA includes'
 assert 'daily_on=InpDailyHistoryBridge' in ea
 daily = fd[fd.index('virtual bool Daily('):]
 assert 'EO_OffsetSeconds(mc.daily_offset_seconds,daily_offset)' in daily, 'offset validation'

@@ -9,8 +9,9 @@
 //   A filled order is registered with the existing T011 executor and then managed by the T011 driver inside this EA (OnTick = the 2R level, OnTimer = reconcile only) only when InpManagementRegistration is true;
 //   the registered fill stays in the lifecycle index until the T011 record is DONE or the position is proven closed (that index is the restart memory). Not proof of broker execution. UNVERIFIED: not compiled or run.
 #property strict
-#property version "1.14"
+#property version "1.15"
 #include "include/EntryOrchestratorFeed.mqh"
+#include "include/EntryOrchestratorView.mqh"      // chart view of the decision already taken (InpChartView); reads only
 #include "include/EntryTransportFake.mqh"
 #include "include/ExposureReaderReal.mqh"
 #include "include/EntryStateFile.mqh"
@@ -109,6 +110,7 @@ input long InpMgmtDeviation=-1;                // deviation of the closing reque
 input ENUM_EX_FILTER_POLICY InpMgmtFilterPolicy=EX_POL_UNSET;  // behaviour of the closing request towards spread / news / session filters; UNSET blocks (required when registration is on)
 input ENUM_EX_FILTER_STATE InpMgmtFilterState=EX_FS_UNKNOWN;   // state of those filters supplied by the owner (used only with NEEDS_CLEAR)
 input int InpPollSeconds=2;
+input bool InpChartView=false;              // true = Albanian panel + H4 / M15 / plan objects (prefixes velo_t016v_ and the T003 drawer's velo_t003_) drawn from the decision already taken; false = nothing drawn. It never changes a plan, a block or a FAKE request
 
 // FAKE transport: the execution side is the in-memory fake (every Send is a virtual request, logged with the label); the read side is READ-ONLY terminal state.
 class CEoTerminalFake : public CEnFakeTransport
@@ -155,6 +157,7 @@ public:
   };
 
 CEoFeed g_feed;
+CEoView g_view;
 // DEMO risk policy: the CURRENT balance of a DEMO account, read now (the feed header stays untouched); anything else is "unreadable" and the core blocks, with no fallback
 class CEoDemoMarket : public CEoRealMarket
   {
@@ -418,6 +421,7 @@ void Poll()
    if(out.risk_label!="") text+=" | risk "+out.risk_label+" account_mode="+IntegerToString(out.account_mode);
    if(out.request) text+=" | "+out.label+" | "+out.spb.signal_id;
    Status(text);
+   if(InpChartView) g_view.Update(out,g_feed,g_real_entry,InpManagementTransport==EOI_MTR_READ_ONLY);      // AFTER the decision: reads only
   }
 
 int OnInit()
@@ -452,12 +456,15 @@ int OnInit()
       LC_Release(g_lockp,g_guard.st);              // a failed start releases what this instance owns, and nothing else
       return(INIT_FAILED);
      }
+   g_feed.keep_view=InpChartView;                    // the feed only COPIES what its build already computed for the view
+   if(InpChartView) g_view.Init();
    Poll();
    return(INIT_SUCCEEDED);
   }
 void OnDeinit(const int reason)
   {
    EventKillTimer();
+   g_view.Destroy();
    LC_Release(g_lockp,g_guard.st);                  // only the owner releases, and only its own key
    Comment("");
    if(g_real_entry) PrintFormat("T016 stopped (reason %d).",reason);

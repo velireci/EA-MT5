@@ -175,7 +175,7 @@ class SimulationPreset(unittest.TestCase):
     def test_it_differs_from_the_demo_preset_in_the_risk_source_and_the_measured_offset_only(self):
         demo, _, _ = pc.parse_preset()
         sim = self.values
-        self.assertEqual({k for k in demo if demo[k] != sim.get(k)}, {'InpRiskSource', 'InpDailyServerOffsetSeconds'}, 'only the risk source and the offset MEASURED on Tauro differ')
+        self.assertEqual({k for k in demo if demo[k] != sim.get(k)}, {'InpRiskSource', 'InpDailyServerOffsetSeconds', 'InpChartView'}, 'only the risk source, the offset MEASURED on Tauro and the chart view differ')
 
     def test_every_real_transport_combination_with_the_simulation_policy_is_refused(self):
         for entry, mgmt, confirm, phrase in itertools.product((0, 1), (0, 1), (False, True), ('', pc.EN_PHRASE)):
