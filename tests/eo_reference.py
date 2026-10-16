@@ -76,7 +76,7 @@ class Facts:
     time: int = 0
 
 
-RISK_SOURCE_AMOUNT, RISK_SOURCE_DEMO_BALANCE_PCT = 0, 1
+RISK_SOURCE_AMOUNT, RISK_SOURCE_DEMO_BALANCE_PCT, RISK_SOURCE_SIMULATION_BALANCE_PCT = 0, 1, 2     # 2 = SIMULATION ONLY: the same 1%, whatever the account classification; refused with any real transport
 RISK_PCT_DEMO = 1.0                         # fixed: the demo policy is 1% and nothing else; it is NOT a client confirmation for live (D2)
 
 
@@ -86,6 +86,7 @@ class Balance:
     amount: float = 0.0
     time: int = 0
     demo: bool = False
+    trade_mode: int = -1                   # the raw ACCOUNT_TRADE_MODE as the terminal reported it (-1 = not read); only logged, never reinterpreted
 
 
 @dataclass
@@ -98,7 +99,9 @@ class Outcome:
     spb: object = None
     label: str = ''
     risk_budget: float = -1.0              # the budget this step sized the plan with AND checked the loss against (one value)
-    risk_base: float = -1.0                # the balance it came from (policy 1), else -1
+    risk_base: float = -1.0                # the balance it came from (policy 1 / 2), else -1
+    risk_label: str = ''                   # 'DEMO' | 'SIMULATION ONLY' | '' (the explicit amount)
+    account_mode: int = -1                 # the raw account trade mode that was read
 
 
 HANDLED_FINALS = (en.R_PLACED, en.R_FILLED, en.R_DUPLICATE, en.R_REJECTED, en.R_RECOVERY, en.R_BLOCKED, en.R_PRECHECK_REFUSED, en.R_CANCELLED, en.R_EXPIRED, en.R_NOCHANGE)
@@ -116,7 +119,7 @@ def _finite(x):
 
 def unset_config(cfg):
     bad = []
-    if cfg.risk_source not in (RISK_SOURCE_AMOUNT, RISK_SOURCE_DEMO_BALANCE_PCT):
+    if cfg.risk_source not in (RISK_SOURCE_AMOUNT, RISK_SOURCE_DEMO_BALANCE_PCT, RISK_SOURCE_SIMULATION_BALANCE_PCT):
         bad.append('risk_source')
     elif cfg.risk_source == RISK_SOURCE_AMOUNT and not cfg.risk_budget > 0:
         bad.append('risk_budget')
@@ -172,21 +175,26 @@ class Orchestrator:
         if not (q.read_ok and q.bid > 0 and q.ask >= q.bid and q.time > 0 and now > 0 and 0 <= now - q.time <= cfg.max_quote_age):
             self.defect()
             return Outcome('MARKET_NOT_READY', 'QUOTE_NOT_READY_OR_STALE')
-        budget, base = cfg.risk_budget, -1.0
-        if cfg.risk_source == RISK_SOURCE_DEMO_BALANCE_PCT:
+        budget, base, label, mode = cfg.risk_budget, -1.0, '', -1
+        sim = cfg.risk_source == RISK_SOURCE_SIMULATION_BALANCE_PCT
+        if sim and tr.is_real():
+            return Outcome('SIMULATION_REFUSED', 'SIMULATION_ONLY_REQUIRES_THE_FAKE_ENTRY_TRANSPORT: a real transport is never combined with the simulation risk policy', risk_label='SIMULATION ONLY')
+        if cfg.risk_source in (RISK_SOURCE_DEMO_BALANCE_PCT, RISK_SOURCE_SIMULATION_BALANCE_PCT):
+            label = 'SIMULATION ONLY' if sim else 'DEMO'
             before_balance = now
             b = mk.balance()
             now = mk.now()  # check the balance against a clock sampled AFTER the read
             if now <= 0 or now < before_balance:
                 self.defect()
                 return Outcome('RISK_BASE_NOT_READY', 'RISK_CLOCK_INVALID: server clock moved backwards or is unavailable; no fallback')
-            if not (b.read_ok and b.demo and _finite(b.amount) and b.amount > 0 and 0 <= now - b.time <= cfg.max_quote_age) or b.time <= 0:
-                code = ('BALANCE_READ_FAILED' if not b.read_ok else 'ACCOUNT_NOT_DEMO' if not b.demo else
+            mode = b.trade_mode
+            if not (b.read_ok and (b.demo or sim) and _finite(b.amount) and b.amount > 0 and 0 <= now - b.time <= cfg.max_quote_age) or b.time <= 0:
+                code = ('BALANCE_READ_FAILED' if not b.read_ok else 'ACCOUNT_NOT_DEMO' if not (b.demo or sim) else
                         'BALANCE_INVALID_AMOUNT' if not _finite(b.amount) or b.amount <= 0 else 'BALANCE_TIME_INVALID' if b.time <= 0 else
                         'BALANCE_FROM_FUTURE' if b.time > now else 'BALANCE_STALE')
                 self.defect()
                 return Outcome('RISK_BASE_NOT_READY', '%s | read_ok=%d demo=%d balance=%.8f age=%d limit=%d | no fallback' %
-                               (code, b.read_ok, b.demo, b.amount, now-b.time, cfg.max_quote_age))
+                               (code, b.read_ok, b.demo, b.amount, now-b.time, cfg.max_quote_age) + ' | account_mode=%d %s' % (b.trade_mode, label), risk_label=label, account_mode=b.trade_mode)
             if not (0 <= now - q.time <= cfg.max_quote_age):
                 self.defect()
                 return Outcome('MARKET_NOT_READY', 'QUOTE_EXPIRED_DURING_BALANCE_READ')
@@ -230,7 +238,7 @@ class Orchestrator:
         checks = eg.Checks(snapshot=snap, snapshot_time=now, snapshot_digest=digest, limits=lim, registry=reg, calc_ok=ok, profit=profit, tolerance=cfg.model_tolerance,
                            risk_budget=budget, loss_time=now, loss_digest=digest, daily_present=present, daily=daily, daily_time=now, daily_digest=digest)
         res, dec = eg.submit(cfg.gate, cfg.exec, tr, store, en.Runtime(), r2, checks, pre_send)
-        out = Outcome('EXECUTOR', res.reason, False, res, dec, r2, risk_budget=budget, risk_base=base)
+        out = Outcome('EXECUTOR', res.reason, False, res, dec, r2, risk_budget=budget, risk_base=base, risk_label=label, account_mode=mode)
         if not dec.allow:
             out.status = 'GATE_BLOCKED'
             return out

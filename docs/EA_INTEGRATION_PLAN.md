@@ -109,6 +109,9 @@ Rekomandimi është propozim i Claude, jo përgjigje; pa përgjigje shkon defaul
 
 Pa D4–D7 EA-ja nuk prodhon plan me përkufizime të klientit (prototipi mund të shërbejë si konfigurim pune, D5); pa D1–D3 dhe D12 porta bllokon; D8–D9 vendosin vetëm menaxhimin pas mbushjes; D10, D11, D13 nuk ndalojnë hyrjen.
 
+## Preseti SIMULATION FAKE/READ_ONLY (16.10.2026; `src/presets/XauUsdEntryOrchestrator_simulation_fake.set`, EA v1.13)
+Llogaria 358175 është DEMO në portalin Tauro, por MT5 kthen ACCOUNT_TRADE_MODE_REAL; support-i përgjigjet me email. Preseti ndryshon vetëm `InpRiskSource=2` (1% e balancës aktuale pa kontrollin e klasifikimit), vetëm me hyrje FAKE dhe menaxhim READ_ONLY; push OFF. Nuk është provë demo, konfirmim klienti ose miratim live. D2 dhe pyetjet B D1-D13 mbeten të hapura.
+
 ## Preseti demo FAKE/READ_ONLY: zgjedhjet e përkohshme (15.10.2026; `src/presets/XauUsdEntryOrchestrator_demo_fake.set`, EA v1.08)
 Të gjitha janë **vetëm për provë demo, jo miratim për live**; çdo "Pyetje klienti" mbetet në listën B. Konfirmimet e klientit (hyrja `NEAR_SIDE`, lot max 10, max 2 pozicione, seanca/lajmet, anulimet, 1% si fakt S:132) janë në preset me etiketën CONFIRMED dhe burimin. Buxheti i riskut = 1% e `ACCOUNT_BALANCE` aktuale (`InpRiskSource=1`): lexohet në çdo hap, vetëm llogari demo, pa fallback; i njëjti buxhet përcakton volumin dhe kontrollin e humbjes; baza e kufirit ditor −2% (balanca e fillimit të ditës nga store) nuk preket.
 

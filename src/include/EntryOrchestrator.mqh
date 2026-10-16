@@ -44,6 +44,7 @@ struct SEoQuote
 
 #define EO_RISK_SOURCE_AMOUNT 0
 #define EO_RISK_SOURCE_DEMO_BALANCE_PCT 1
+#define EO_RISK_SOURCE_SIMULATION_BALANCE_PCT 2   // SIMULATION ONLY: the same 1%, whatever the account classification; refused with any real transport
 #define EO_RISK_PCT_DEMO 1.0     // fixed: the demo policy is 1% and nothing else; it is NOT a client confirmation for live (D2)
 
 struct SEoBalance
@@ -52,6 +53,7 @@ struct SEoBalance
    double amount;               // ACCOUNT_BALANCE (the CURRENT balance)
    long time;
    bool demo;
+   int trade_mode;              // the raw ACCOUNT_TRADE_MODE as the terminal reported it (-1 = not read); only logged, never reinterpreted
   };
 
 // everything the core needs from the terminal; the EA implements it with READ-ONLY reads, the test with scripted values
@@ -64,7 +66,7 @@ public:
    virtual bool CalcProfit(const bool buy,const double volume,const double e,const double s,double &profit)=0;     // OrderCalcProfit; false = not obtained
    virtual void Filters(int &session,int &news,int &spread)=0;                                                    // TP_SESSION_* / TP_NEWS_* / TP_SPREAD_*; UNKNOWN when a filter is not configured or not readable
    virtual bool Daily(const STpPlan &plan,SDbResult &r)=0;                                                       // false = the T012 daily result was not evaluated
-   virtual void Balance(SEoBalance &b) {b.read_ok=false; b.amount=0.0; b.time=0; b.demo=false;}             // the CURRENT balance of a DEMO account; the default is 'unreadable' (blocks)
+   virtual void Balance(SEoBalance &b) {b.read_ok=false; b.amount=0.0; b.time=0; b.demo=false; b.trade_mode=-1;}             // the CURRENT balance of a DEMO account; the default is 'unreadable' (blocks)
   };
 
 struct SEoConfig
@@ -113,7 +115,9 @@ struct SEoOutcome
    SSpbResult spb;
    string label;
    double risk_budget;          // the budget this step sized the plan with AND checked the loss against (one value)
-   double risk_base;            // the balance it came from (policy 1), else -1
+   double risk_base;            // the balance it came from (policy 1 / 2), else -1
+   string risk_label;           // "DEMO" | "SIMULATION ONLY" | "" (the explicit amount)
+   int account_mode;            // the raw account trade mode that was read
   };
 
 void EO_OutcomeInit(SEoOutcome &o)
@@ -127,6 +131,8 @@ void EO_OutcomeInit(SEoOutcome &o)
    o.label="";
    o.risk_budget=-1.0;
    o.risk_base=-1.0;
+   o.risk_label="";
+   o.account_mode=-1;
   }
 
 void EO_Set(SEoOutcome &o,const string status,const string reason)
@@ -138,7 +144,7 @@ void EO_Set(SEoOutcome &o,const string status,const string reason)
 string EO_UnsetConfig(const SEoConfig &c)
   {
    string bad="";
-   if(c.risk_source!=EO_RISK_SOURCE_AMOUNT && c.risk_source!=EO_RISK_SOURCE_DEMO_BALANCE_PCT) bad+=(bad=="" ? "" : ", ")+"risk_source";
+   if(c.risk_source!=EO_RISK_SOURCE_AMOUNT && c.risk_source!=EO_RISK_SOURCE_DEMO_BALANCE_PCT && c.risk_source!=EO_RISK_SOURCE_SIMULATION_BALANCE_PCT) bad+=(bad=="" ? "" : ", ")+"risk_source";
    else
       if(c.risk_source==EO_RISK_SOURCE_AMOUNT && !(c.risk_budget>0.0)) bad+=(bad=="" ? "" : ", ")+"risk_budget";
    if(!(c.lot_cap>0.0)) bad+=(bad=="" ? "" : ", ")+"lot_cap";
@@ -244,21 +250,34 @@ public:
         {Defect(); EO_Set(out,"MARKET_NOT_READY","QUOTE_NOT_READY_OR_STALE"); return;}
       double budget=c.risk_budget;
       double base=-1.0;
-      if(c.risk_source==EO_RISK_SOURCE_DEMO_BALANCE_PCT)
+      string label="";
+      int mode=-1;
+      bool sim=(c.risk_source==EO_RISK_SOURCE_SIMULATION_BALANCE_PCT);
+      if(sim && tr.IsReal())
         {
+         out.risk_label="SIMULATION ONLY";
+         EO_Set(out,"SIMULATION_REFUSED","SIMULATION_ONLY_REQUIRES_THE_FAKE_ENTRY_TRANSPORT: a real transport is never combined with the simulation risk policy");
+         return;
+        }
+      if(c.risk_source==EO_RISK_SOURCE_DEMO_BALANCE_PCT || sim)
+        {
+         label=(sim ? "SIMULATION ONLY" : "DEMO");
          SEoBalance bal;
          long before_balance=now;
          mk.Balance(bal);
          now=mk.Now(); // evaluate timestamps against a clock sampled AFTER the balance read
          if(now<=0 || now<before_balance)
            {Defect(); EO_Set(out,"RISK_BASE_NOT_READY","RISK_CLOCK_INVALID: server clock moved backwards or is unavailable; no fallback"); return;}
-         if(!(bal.read_ok && bal.demo && TG_Finite(bal.amount) && bal.amount>0.0 && now-bal.time>=0 && now-bal.time<=c.max_quote_age) || bal.time<=0)
+         mode=bal.trade_mode;
+         if(!(bal.read_ok && (bal.demo || sim) && TG_Finite(bal.amount) && bal.amount>0.0 && now-bal.time>=0 && now-bal.time<=c.max_quote_age) || bal.time<=0)
            {
-            string code=(!bal.read_ok ? "BALANCE_READ_FAILED" : !bal.demo ? "ACCOUNT_NOT_DEMO" :
+            string code=(!bal.read_ok ? "BALANCE_READ_FAILED" : !(bal.demo || sim) ? "ACCOUNT_NOT_DEMO" :
                          !TG_Finite(bal.amount) || bal.amount<=0.0 ? "BALANCE_INVALID_AMOUNT" : bal.time<=0 ? "BALANCE_TIME_INVALID" :
                          bal.time>now ? "BALANCE_FROM_FUTURE" : "BALANCE_STALE");
             Defect();
-            EO_Set(out,"RISK_BASE_NOT_READY",StringFormat("%s | read_ok=%d demo=%d balance=%.8f age=%I64d limit=%I64d | no fallback",code,(int)bal.read_ok,(int)bal.demo,bal.amount,now-bal.time,c.max_quote_age));
+            out.risk_label=label;
+            out.account_mode=mode;
+            EO_Set(out,"RISK_BASE_NOT_READY",StringFormat("%s | read_ok=%d demo=%d balance=%.8f age=%I64d limit=%I64d | no fallback | account_mode=%d %s",code,(int)bal.read_ok,(int)bal.demo,bal.amount,now-bal.time,c.max_quote_age,mode,label));
             return;
            }
          if(!(now-q.time>=0 && now-q.time<=c.max_quote_age))
@@ -356,6 +375,8 @@ public:
       out.reason=out.res.reason;
       out.risk_budget=budget;
       out.risk_base=base;
+      out.risk_label=label;
+      out.account_mode=mode;
       if(!out.dec.allow) {out.status="GATE_BLOCKED"; return;}
       if(StringFind(out.res.reason,"PRE_SEND_RESERVATION_FAILED")==0) {out.status="RESERVATION_FAILED"; return;}      // nothing was placed and the signal is NOT consumed
       if(out.res.outcome==EN_R_PLACED || out.res.outcome==EN_R_FILLED)

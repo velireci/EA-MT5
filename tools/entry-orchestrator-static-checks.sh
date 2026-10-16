@@ -52,8 +52,12 @@ assert 'st.context.ready && st.context.reliable && st.context.selected && (st.co
 assert 'if(facts.valid) {facts.signal_direction=st.context.direction; facts.signal_id=r1.signal_id;}' in step, 'a signal fact exists only when the geometry produced a live signal'
 assert step.index('facts.valid=true;') < step.index('if(halted!="")') and step.index('facts.signal_id=r1.signal_id;') < step.index('Handled(r1.signal_id)'), 'order of the facts'
 assert 'EO_RISK_PCT_DEMO 1.0' in t, 'the demo policy is exactly 1%'
-assert 'if(c.risk_source==EO_RISK_SOURCE_DEMO_BALANCE_PCT)' in step and 'mk.Balance(bal);' in step, 'the balance is read at every step, inside the policy branch only'
-assert 'bal.read_ok && bal.demo && TG_Finite(bal.amount) && bal.amount>0.0 && now-bal.time>=0 && now-bal.time<=c.max_quote_age' in step, 'read ok, demo, finite, positive and fresh'
+assert 'if(c.risk_source==EO_RISK_SOURCE_DEMO_BALANCE_PCT || sim)' in step and 'mk.Balance(bal);' in step and step.count('mk.Balance(') == 1, 'the balance is read at every step, inside the policy branch only'
+assert 'bool sim=(c.risk_source==EO_RISK_SOURCE_SIMULATION_BALANCE_PCT);' in step and 'if(sim && tr.IsReal())' in step and step.index('if(sim && tr.IsReal())') < step.index('mk.Balance('), 'the simulation policy is refused with a real transport BEFORE the balance is read'
+assert 'SIMULATION_ONLY_REQUIRES_THE_FAKE_ENTRY_TRANSPORT' in step and 'label=(sim ? "SIMULATION ONLY" : "DEMO");' in step and 'out.risk_label=label;' in step and 'out.account_mode=mode;' in step, 'the label and the raw account mode are reported'
+assert 'bal.demo || sim' in step and step.count('sim') <= 14, 'the simulation policy relaxes ONLY the classification check, nowhere else'
+assert 'EO_RISK_SOURCE_SIMULATION_BALANCE_PCT 2' in t, 'one new source value'
+assert 'bal.read_ok && (bal.demo || sim) && TG_Finite(bal.amount) && bal.amount>0.0 && now-bal.time>=0 && now-bal.time<=c.max_quote_age' in step, 'read ok, demo, finite, positive and fresh'
 assert 'RISK_BASE_NOT_READY' in step and step.count('mk.Balance(') == 1, 'a failed read blocks (no fallback)'
 assert 'budget=bal.amount*EO_RISK_PCT_DEMO/100.0;' in step and 'm.risk_budget=budget;' in step and 'chk.risk_budget=budget;' in step and 'c.risk_budget' not in step.replace('double budget=c.risk_budget;', ''), 'one budget sizes the plan and checks the loss'
 balance_part = step[step.index('mk.Balance(bal);'):step.index('m.risk_budget=budget;')]
@@ -110,6 +114,9 @@ assert 'if(InpManagementTransport==EOI_MTR_BROKER_DEMO && (!InpManagementConfirm
 assert conf.index('!InpManagementConfirmAutoSend') < conf.index('GetPointer(g_mreal)'), 'the confirmation is checked before the real closing transport is selected'
 assert 'g_registrar.provenance=(g_real_entry ? MH_PROV_BROKER : MH_PROV_SYNTHETIC);' in conf, 'provenance follows the entry transport'
 assert 'g_cfg.exec.real_authorised=g_real_entry;' in ea, 'the executor authorisation follows the explicit selection'
+SIM = 'if(InpRiskSource==EOI_RISK_SIMULATION_1PCT_CURRENT_BALANCE && (InpEntryTransport!=EOI_ETR_FAKE || InpManagementTransport!=EOI_MTR_READ_ONLY || InpManagementConfirmAutoSend || InpEntryAuthorisation!=\"\")) return(false);'
+assert SIM in conf, 'SIMULATION ONLY is allowed only with the FAKE entry, READ_ONLY management, no confirmation and no phrase'
+assert conf.index(SIM) < conf.index('GetPointer(g_etr)'), 'the simulation refusal comes before any real transport is selected'
 # every selection / policy input is UNSET by default
 for n in ('InpContextSource=EOI_SRC_UNSELECTED', 'InpM15Level=EOI_SWING_UNSELECTED', 'InpFvgTiming=EOI_TIMING_UNSELECTED', 'InpCandidate=EOI_CAND_UNSELECTED', 'InpEntryEdge=EOI_EDGE_UNSELECTED',
           'InpSlRule=EOI_SL_UNSELECTED', 'InpRiskSource=EOI_RISK_AMOUNT', 'InpSlBuffer=-1', 'InpTargetRule=EOI_TGT_UNSELECTED', 'InpRiskBudget=-1', 'InpLotCap=-1', 'InpModelTolerance=-1', 'InpMaxQuoteAgeSeconds=-1', 'InpGateMaxAgeSeconds=-1',
@@ -170,6 +177,8 @@ mut J.mqh $EA 's/^input long InpEaMagic=0; /input bool InpRealTransport=false; \
 expect_assert "$NEG/o3.py" "$NEG/J.mqh $FEED" "a transport selector input" "transport selector input"
 mut K.mqh $EA 's/^input double InpRiskBudget=-1; /input double InpRiskBudget=100; /'
 expect_assert "$NEG/o3.py" "$NEG/K.mqh $FEED" "a policy input with a default value" "default not UNSET"
+mut SM5.mqh $EA 's/InpManagementTransport!=EOI_MTR_READ_ONLY || InpManagementConfirmAutoSend || //'
+expect_assert "$NEG/o3.py" "$NEG/SM5.mqh $FEED" "a simulation policy allowed with a real management transport" "SIMULATION ONLY is allowed only"
 mut L.mqh $FEED 's/      DBS_Load(port,stored);/      DBS_Load(port,stored); DBS_Capture(port,stored);/'
 expect_assert "$NEG/o3.py" "$EA $NEG/L.mqh" "a CAPTURE in the feed" "DBS_Capture\|LOAD only"
 mut M.mqh $EA 's/   virtual void Send(const SEnRequest \&req,SEnSendResult \&res)/   virtual void Send(const SEnRequest \&req,SEnSendResult \&res) {OrderSend(); }\n   virtual void SendUnused(const SEnRequest \&req,SEnSendResult \&res)/'
@@ -194,7 +203,7 @@ expect_assert "$NEG/o3.py" "$NEG/R4.mqh $FEED" "a FAKE entry transport declared 
 mut R5.mqh $FEED 's/      DBS_Load(port,stored);/      DBS_Load(port,stored); CEnRealTransport x;/'
 expect_assert "$NEG/o3.py" "$EA $NEG/R5.mqh" "the real transport in the feed" "feed: CEnRealTransport"
 
-mut S1.mqh $CORE 's/         if(!(bal.read_ok \&\& bal.demo \&\& TG_Finite(bal.amount)/         if(!(bal.read_ok \&\& TG_Finite(bal.amount)/'
+mut S1.mqh $CORE 's/         if(!(bal.read_ok \&\& (bal.demo || sim) \&\& TG_Finite(bal.amount)/         if(!(bal.read_ok \&\& TG_Finite(bal.amount)/'
 expect_assert "$NEG/o2.py" "$NEG/S1.mqh" "a balance that is not demo-checked" "read ok, demo"
 mut S2.mqh $CORE 's/      chk.risk_budget=budget;/      chk.risk_budget=c.risk_budget;/'
 expect_assert "$NEG/o2.py" "$NEG/S2.mqh" "a loss check against another budget than the sized one" "one budget"
@@ -215,6 +224,15 @@ expect_assert "$NEG/o2.py" "$NEG/F2.mqh" "facts that survive a defect" "cleared 
 
 mut S7.mqh $CORE 's/         now=mk.Now();/         now=before_balance;/'
 expect_assert "$NEG/o2.py" "$NEG/S7.mqh" "a balance compared to the earlier clock" "balance clock must be sampled"
+
+mut SM1.mqh $CORE 's/      if(sim \&\& tr.IsReal())/      if(false)/'
+expect_assert "$NEG/o2.py" "$NEG/SM1.mqh" "the simulation policy combined with a real transport" "BEFORE the balance is read"
+mut SM2.mqh $CORE 's/(bal.demo || sim) \&\& TG_Finite/true \&\& TG_Finite/'
+expect_assert "$NEG/o2.py" "$NEG/SM2.mqh" "a classification check that is dropped for every policy" "read ok, demo"
+mut SM3.mqh $CORE 's/ *out.risk_label=label;//'
+expect_assert "$NEG/o2.py" "$NEG/SM3.mqh" "a refusal without the SIMULATION ONLY label" "label and the raw account mode"
+mut SM4.mqh $CORE 's/EO_RISK_PCT_DEMO\/100.0/EO_RISK_PCT_DEMO\/50.0/'
+expect_assert "$NEG/o2.py" "$NEG/SM4.mqh" "a budget that is not one percent" "one budget sizes the plan"
 
 [ $FAIL -eq 0 ] && echo "ENTRY ORCHESTRATOR STATIC CHECKS: ALL PASS (static only; MetaEditor compile and MT5 run UNVERIFIED)" || echo "ENTRY ORCHESTRATOR STATIC CHECKS: FAILURES"
 exit $FAIL

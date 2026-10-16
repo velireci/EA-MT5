@@ -450,9 +450,109 @@ class RiskFromBalance(unittest.TestCase):
             w.untouched(self)
 
 
+class SimulationRisk(unittest.TestCase):
+    """SIMULATION_1PCT_CURRENT_BALANCE (account 358175: the portal says DEMO, MT5 says ACCOUNT_TRADE_MODE_REAL, support has not answered): the same 1% of the CURRENT balance, whatever the account
+    classification, ONLY with the FAKE entry transport; every failed / invalid / stale read still blocks with no fallback; the DEMO policy is unchanged and no real-transport gate is touched"""
+
+    def world(self, d, balance=10000.0, mode=2, demo=False):
+        w = World(d)
+        w.cfg.risk_source = eo.RISK_SOURCE_SIMULATION_BALANCE_PCT
+        w.cfg.risk_budget = -1.0                                  # the explicit amount is NOT a fallback
+        w.mk.bal = eo.Balance(True, balance, w.tr.now, demo, mode)    # REAL (2) reported for a demo account of the portal
+        return w
+
+    def test_one_percent_of_the_current_balance_buy_and_sell_whatever_the_classification(self):
+        for d in (1, -1):
+            for mode, demo in ((2, False), (0, True), (1, False)):          # REAL, DEMO, CONTEST: the classification does not decide the simulation
+                w = self.world(d, 10000.0, mode, demo)
+                ob, lvl, out = w.live_candidate(self)
+                self.assertEqual((out.status, out.request, out.risk_budget, out.risk_base, out.risk_label, out.account_mode), ('EXECUTOR', True, 100.0, 10000.0, 'SIMULATION ONLY', mode), out.reason)
+                ref = World(d)
+                self.assertEqual(out.spb.plan, ref.live_candidate(self)[2].spb.plan, 'the plan equals the plan of the explicit amount 100')
+            half = self.world(d, 5000.0)
+            self.assertEqual(half.live_candidate(self)[2].risk_budget, 50.0, 'the budget follows the balance')
+
+    def test_the_demo_policy_is_unchanged_and_still_refuses_a_non_demo_account(self):
+        for d in (1, -1):
+            w = World(d)
+            w.cfg.risk_source = eo.RISK_SOURCE_DEMO_BALANCE_PCT
+            w.cfg.risk_budget = -1.0
+            w.mk.bal = eo.Balance(True, 10000.0, w.tr.now, False, 2)
+            out = w.live_candidate(self)[2]
+            self.assertEqual(out.status, 'RISK_BASE_NOT_READY')
+            self.assertTrue(out.reason.startswith('ACCOUNT_NOT_DEMO'), out.reason)
+            w.untouched(self)
+            ok = World(d)
+            ok.cfg.risk_source = eo.RISK_SOURCE_DEMO_BALANCE_PCT
+            ok.cfg.risk_budget = -1.0
+            self.assertEqual((ok.live_candidate(self)[2].risk_label, ok.mk.bal.demo), ('DEMO', True))
+
+    def test_failed_invalid_and_untimely_reads_still_block_without_a_fallback(self):
+        cases = [('BALANCE_READ_FAILED', dict(read_ok=False)), ('BALANCE_INVALID_AMOUNT', dict(amount=0.0)), ('BALANCE_INVALID_AMOUNT', dict(amount=-5.0)),
+                 ('BALANCE_INVALID_AMOUNT', dict(amount=float('nan'))), ('BALANCE_INVALID_AMOUNT', dict(amount=float('inf'))), ('BALANCE_TIME_INVALID', dict(time=0)),
+                 ('BALANCE_FROM_FUTURE', dict(time=5)), ('BALANCE_STALE', dict(time=-31))]
+        for d in (1, -1):
+            for code, changes in cases:
+                w = self.world(d)
+                w.cfg.risk_budget = 100.0                                       # an explicit amount exists and must not be used
+                if 'time' in changes and changes['time'] != 0:
+                    changes = dict(changes, time=w.tr.now + changes['time'])
+                w.mk.bal = replace(w.mk.bal, **changes)
+                out = w.live_candidate(self)[2]
+                self.assertEqual((out.status, out.request), ('RISK_BASE_NOT_READY', False), '%s dir %d: %s' % (code, d, out.reason))
+                self.assertTrue(out.reason.startswith(code), out.reason)
+                self.assertIn('account_mode=2 SIMULATION ONLY', out.reason)
+                self.assertNotIn('ACCOUNT_NOT_DEMO', out.reason)
+                w.untouched(self)
+            for advance, status in [(31, 'MARKET_NOT_READY'), (-1, 'RISK_BASE_NOT_READY')]:
+                w = self.world(d)
+                def balance(w=w, advance=advance):
+                    w.tr.now += advance
+                    return eo.Balance(True, 10000.0, w.tr.now, False, 2)
+                w.mk.balance = balance
+                ob, lvl = observer_n(d, 2)
+                self.assertEqual(w.step(ob, lvl).status, status)
+                w.untouched(self)
+
+    def test_a_real_transport_is_refused_before_anything_is_read_or_sent(self):
+        for d in (1, -1):
+            w = self.world(d)
+            w.tr.real = True
+            ob, lvl, out = w.live_candidate(self)
+            self.assertEqual((out.status, out.request, out.risk_label), ('SIMULATION_REFUSED', False, 'SIMULATION ONLY'), out.reason)
+            self.assertEqual(w.mk.balance_calls, 0, 'the balance is not even read')
+            w.untouched(self)
+
+    def test_the_real_transport_gates_are_not_bypassed_by_the_simulation_policy(self):
+        """the entry executor still refuses a real transport on a non-demo account whatever the risk policy says (the simulation policy never reaches it: the core refuses first)"""
+        for d in (1, -1):
+            w = self.world(d)
+            w.tr.real = True
+            w.tr.account.demo = False                                           # what MT5 reports for 358175
+            w.cfg.exec.real_authorised = True
+            w.cfg.exec.authorisation = en.AUTH_PHRASE
+            out = w.live_candidate(self)[2]
+            self.assertEqual((out.status, out.request, w.tr.sends), ('SIMULATION_REFUSED', False, 0))
+            w2 = World(d)                                                       # the explicit-amount source: the executor alone decides, and it refuses
+            w2.tr.real = True
+            w2.tr.account.demo = False
+            w2.cfg.exec.real_authorised = True
+            w2.cfg.exec.authorisation = en.AUTH_PHRASE
+            out2 = w2.live_candidate(self)[2]
+            self.assertEqual((out2.request, out2.reason, out2.result.final, w2.tr.sends), (False, 'REAL_REQUIRES_DEMO_ACCOUNT', en.R_REFUSED, 0))
+
+    def test_unknown_source_values_stay_unset(self):
+        for d in (1, -1):
+            w = self.world(d)
+            w.cfg.risk_source = 3
+            out = w.live_candidate(self)[2]
+            self.assertEqual(out.status, 'CONFIG_UNSET')
+            self.assertIn('risk_source', out.reason)
+
+
 SCENARIOS = ['buy_to_fake_request', 'sell_to_fake_request', 'replay_baseline_no_signal', 'restart_no_double', 'defect_rebases', 'context_change_rebases', 'unset_inputs_block',
              'market_missing_blocks', 'gate_blocks_no_request', 'probe_uses_effective_tick', 'halt_after_uncertainty',
-             'market_recovery_rebases', 'context_fields_rebase', 'probe_independent_of_property', 'reservation_before_every_send', 'risk_budget_from_current_balance', 'risk_base_failure_blocks', 'cached_feed_market_recheck', 'facts_expose_direction_only_when_known', 'balance_clock_and_reasons']
+             'market_recovery_rebases', 'context_fields_rebase', 'probe_independent_of_property', 'reservation_before_every_send', 'risk_budget_from_current_balance', 'risk_base_failure_blocks', 'cached_feed_market_recheck', 'facts_expose_direction_only_when_known', 'balance_clock_and_reasons', 'simulation_budget_any_classification', 'simulation_failures_and_real_transport']
 
 
 class Reservation(unittest.TestCase):
@@ -586,7 +686,7 @@ class Mutants(unittest.TestCase):
         eo.Orchestrator = ns['Orchestrator']
         try:
             suite = unittest.TestSuite()
-            for cls in (Chain, Baseline, Blocks, ReviewRegressions, RiskFromBalance):
+            for cls in (Chain, Baseline, Blocks, ReviewRegressions, RiskFromBalance, SimulationRisk):
                 suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(cls))
             r = unittest.TestResult()
             suite.run(r)

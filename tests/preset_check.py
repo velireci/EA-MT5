@@ -11,6 +11,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 EA = os.path.join(ROOT, 'src', 'XauUsdEntryOrchestrator.mq5')
 EXIT_EXECUTOR = os.path.join(ROOT, 'src', 'include', 'ExitExecutor.mqh')
 DEFAULT_PRESET = os.path.join(ROOT, 'src', 'presets', 'XauUsdEntryOrchestrator_demo_fake.set')
+SIMULATION_PRESET = os.path.join(ROOT, 'src', 'presets', 'XauUsdEntryOrchestrator_simulation_fake.set')
 LABELS = ('CONFIRMED', 'DEMO-PROPOSAL', 'TECHNICAL', 'OFF', 'OWNER-FILL', 'MANUAL-DAILY', 'NOT-USED')
 EN_PHRASE = 'I_AUTHORISE_REAL_ENTRY_ORDERS_ON_THIS_DEMO_ACCOUNT'
 EX_PHRASE = 'I_AUTHORISE_T011_DEMO_PARTIAL_CLOSE'
@@ -107,8 +108,10 @@ def blockers(v):
     def add(stage, item, why):
         b.append((stage, item, why))
     # ---- Configure() refusals: the EA does not start
-    if v['InpRiskSource'] not in (0, 1):
+    if v['InpRiskSource'] not in (0, 1, 2):
         add('START', 'InpRiskSource', 'unknown value')
+    if v['InpRiskSource'] == 2 and (v['InpEntryTransport'] != 0 or v['InpManagementTransport'] != 0 or v['InpManagementConfirmAutoSend'] or v['InpEntryAuthorisation'] != ''):
+        add('START', 'InpRiskSource', 'SIMULATION ONLY is allowed only with the FAKE entry transport, the READ_ONLY management transport, no confirmation and no entry phrase')
     if v['InpEntryTransport'] not in (0, 1) or v['InpManagementTransport'] not in (0, 1):
         add('START', 'InpEntryTransport/InpManagementTransport', 'unknown value')
     if v['InpEntryTransport'] == 1 and (v['InpEntryAuthorisation'] != EN_PHRASE or not v['InpManagementRegistration'] or v['InpEaMagic'] <= 0 or v['InpFilling'] != 1):

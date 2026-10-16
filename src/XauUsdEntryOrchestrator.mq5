@@ -33,7 +33,7 @@ enum ENUM_EO_PENDING_RISK {EOI_PENDRISK_UNSET=0,EOI_PENDRISK_INCLUDE=1,EOI_PENDR
 enum ENUM_EO_FILLING {EOI_FILL_UNSET=0,EOI_FILL_RETURN=1};
 enum ENUM_EO_EXPIRY {EOI_EXP_UNSET=0,EOI_EXP_GTC=1,EOI_EXP_SECONDS=2};
 enum ENUM_EO_MGMT_RPOL {EOI_MGMT_RPOL_UNSET=0,EOI_MGMT_RPOL_R_GEOM=1};
-enum ENUM_EO_RISK_SOURCE {EOI_RISK_AMOUNT=0,EOI_RISK_DEMO_1PCT_CURRENT_BALANCE=1};
+enum ENUM_EO_RISK_SOURCE {EOI_RISK_AMOUNT=0,EOI_RISK_DEMO_1PCT_CURRENT_BALANCE=1,EOI_RISK_SIMULATION_1PCT_CURRENT_BALANCE=2};
 enum ENUM_EO_ENTRY_TRANSPORT {EOI_ETR_FAKE=0,EOI_ETR_BROKER_DEMO=1};
 enum ENUM_EO_MGMT_TRANSPORT {EOI_MTR_READ_ONLY=0,EOI_MTR_BROKER_DEMO=1};
 
@@ -46,7 +46,7 @@ input ENUM_EO_SL InpSlRule=EOI_SL_UNSELECTED;
 input double InpSlBuffer=-1;                 // price units; -1 = UNSET (blocks); 0 is a deliberate "no buffer"
 input ENUM_EO_TARGET InpTargetRule=EOI_TGT_UNSELECTED;
 input double InpRiskBudget=-1;               // account currency, NOT percent; -1 = UNSET
-input ENUM_EO_RISK_SOURCE InpRiskSource=EOI_RISK_AMOUNT; // AMOUNT = InpRiskBudget above (default). DEMO_1PCT_CURRENT_BALANCE = DEMO-ONLY policy: 1% of the CURRENT ACCOUNT_BALANCE read at every step (InpRiskBudget is then ignored, there is NO fallback: an unreadable / invalid / stale / non-demo balance blocks). Not a client confirmation for live (D2)
+input ENUM_EO_RISK_SOURCE InpRiskSource=EOI_RISK_AMOUNT; // AMOUNT = InpRiskBudget above (default). DEMO_1PCT_CURRENT_BALANCE = DEMO-ONLY policy: 1% of the CURRENT ACCOUNT_BALANCE read at every step (InpRiskBudget is then ignored, there is NO fallback: an unreadable / invalid / stale / non-demo balance blocks). Not a client confirmation for live (D2). SIMULATION_1PCT_CURRENT_BALANCE = SIMULATION ONLY: the same 1% whatever the account classification (for an account the portal calls DEMO while MT5 reports REAL); allowed ONLY with the FAKE entry transport and the READ_ONLY management transport, any real transport / confirmation / entry phrase refuses the start
 input double InpLotCap=-1;                   // -1 = UNSET
 input double InpModelTolerance=-1;           // 0..1; -1 = UNSET
 input long InpMaxQuoteAgeSeconds=-1;         // -1 = UNSET
@@ -163,7 +163,9 @@ public:
      {
       ResetLastError();
       b.amount=AccountInfoDouble(ACCOUNT_BALANCE);
-      b.demo=(AccountInfoInteger(ACCOUNT_TRADE_MODE)==ACCOUNT_TRADE_MODE_DEMO);
+      long raw_mode=AccountInfoInteger(ACCOUNT_TRADE_MODE);
+      b.demo=(raw_mode==ACCOUNT_TRADE_MODE_DEMO);
+      b.trade_mode=(int)raw_mode;                         // logged as it is, never reinterpreted
       b.time=(long)TimeTradeServer();
       b.read_ok=(GetLastError()==0 && TerminalInfoInteger(TERMINAL_CONNECTED)!=0 && AccountInfoInteger(ACCOUNT_LOGIN)>0 && MathIsValidNumber(b.amount));
      }
@@ -201,7 +203,7 @@ void Status(const string text)
    if(text==g_last) return;
    g_last=text;
    Print("T016 ",text);
-   Comment(g_real_entry ? "T016 ENTRY ORCHESTRATOR - REAL DEMO ORDERS ENABLED BY THE OWNER\n" : "T016 ENTRY ORCHESTRATOR - FAKE EXECUTION ONLY, nothing is sent to the terminal\n",text);
+   Comment((g_real_entry ? "T016 ENTRY ORCHESTRATOR - REAL DEMO ORDERS ENABLED BY THE OWNER\n" : "T016 ENTRY ORCHESTRATOR - FAKE EXECUTION ONLY, nothing is sent to the terminal\n")+(InpRiskSource==EOI_RISK_SIMULATION_1PCT_CURRENT_BALANCE ? "SIMULATION ONLY - the account classification is NOT demo-checked\n" : ""),text);
   }
 
 bool Configure(void)
@@ -213,7 +215,9 @@ bool Configure(void)
    g_trp=GetPointer(g_tr);
    g_storep=GetPointer(g_store);
    g_lockp=GetPointer(g_lockstore);
-   if((int)InpRiskSource!=(int)EOI_RISK_AMOUNT && (int)InpRiskSource!=(int)EOI_RISK_DEMO_1PCT_CURRENT_BALANCE) return(false);
+   if((int)InpRiskSource!=(int)EOI_RISK_AMOUNT && (int)InpRiskSource!=(int)EOI_RISK_DEMO_1PCT_CURRENT_BALANCE && (int)InpRiskSource!=(int)EOI_RISK_SIMULATION_1PCT_CURRENT_BALANCE) return(false);
+   // SIMULATION ONLY: never combined with a real transport, a real confirmation or the real-entry phrase (the executors' own gates are untouched)
+   if(InpRiskSource==EOI_RISK_SIMULATION_1PCT_CURRENT_BALANCE && (InpEntryTransport!=EOI_ETR_FAKE || InpManagementTransport!=EOI_MTR_READ_ONLY || InpManagementConfirmAutoSend || InpEntryAuthorisation!="")) return(false);
    if((int)InpEntryTransport!=(int)EOI_ETR_FAKE && (int)InpEntryTransport!=(int)EOI_ETR_BROKER_DEMO) return(false);
    if((int)InpManagementTransport!=(int)EOI_MTR_READ_ONLY && (int)InpManagementTransport!=(int)EOI_MTR_BROKER_DEMO) return(false);
    if(InpEntryTransport==EOI_ETR_BROKER_DEMO)
@@ -410,6 +414,7 @@ void Poll()
    SyncHalts();
    string text=out.status+" | "+out.reason+" | cut "+TimeToString(g_feed.cut,TIME_DATE|TIME_MINUTES)+" | baseline "+TimeToString((datetime)g_orch.baseline,TIME_DATE|TIME_MINUTES)+
                (g_real_entry ? " | REAL DEMO" : " | virtual requests "+IntegerToString(g_tr.sends))+" | lifecycle open "+IntegerToString(g_guard.st.n)+(g_guard.st.halted!="" ? " HALTED" : "");
+   if(out.risk_label!="") text+=" | risk "+out.risk_label+" account_mode="+IntegerToString(out.account_mode);
    if(out.request) text+=" | "+out.label+" | "+out.spb.signal_id;
    Status(text);
   }
@@ -426,6 +431,9 @@ int OnInit()
    PrintFormat("T016 ACCOUNT IDENTITY | login=%I64d server='%s' trade_mode_raw=%I64d trade_mode_name=%s mode_read_error=%d | enum DEMO=%d CONTEST=%d REAL=%d | connected=%d | READ ONLY account classification, no gate changed",
                account_login,account_server,account_mode,EnumToString((ENUM_ACCOUNT_TRADE_MODE)account_mode),mode_error,
                (int)ACCOUNT_TRADE_MODE_DEMO,(int)ACCOUNT_TRADE_MODE_CONTEST,(int)ACCOUNT_TRADE_MODE_REAL,(int)TerminalInfoInteger(TERMINAL_CONNECTED));
+   if(InpRiskSource==EOI_RISK_SIMULATION_1PCT_CURRENT_BALANCE)
+      PrintFormat("T016 SIMULATION ONLY | risk = 1%% of the current balance whatever the account classification | original classification: trade_mode_raw=%I64d (%s) login=%I64d server='%s' | FAKE entry + READ_ONLY management only; no real transport can be combined with this policy",
+                  account_mode,EnumToString((ENUM_ACCOUNT_TRADE_MODE)account_mode),account_login,account_server);
    if(g_real_entry) Print("T016 REAL DEMO ORDER MODE selected explicitly by the owner (phrase given). Symbol ",_Symbol,". Management transport: ",(InpManagementTransport==EOI_MTR_BROKER_DEMO ? "REAL closing requests" : "read-only (closing requests refused)"));
    else Print("T016 FAKE ENTRY EXECUTION: virtual requests only; the real entry transport is not selected. Symbol ",_Symbol,". Management transport: ",(InpManagementTransport==EOI_MTR_BROKER_DEMO ? "REAL closing requests" : "read-only (closing requests refused)"));
    string startup_notes="";

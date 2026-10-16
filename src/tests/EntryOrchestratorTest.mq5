@@ -98,6 +98,7 @@ public:
       bal.amount=10000.0;
       bal.time=0;
       bal.demo=true;
+      bal.trade_mode=0;
       tr=NULL;
       eff_tick=1.0;
       calls=0;
@@ -752,6 +753,95 @@ void Scenario_balance_clock_and_reasons(void)
      }
   }
 
+// ---- SIMULATION_1PCT_CURRENT_BALANCE (account 358175: the portal says DEMO, MT5 reports REAL): the same 1% whatever the classification, ONLY with the FAKE transport, no fallback
+void Scenario_simulation_budget_any_classification(void)
+  {
+   for(int d=0;d<2;d++)
+     {
+      int dir=(d==0 ? 1 : -1);
+      int modes[3]={2,0,1};
+      bool demos[3]={false,true,false};
+      for(int k=0;k<3;k++)
+        {
+         CW w;
+         w.Init(dir);
+         w.cfg.risk_source=EO_RISK_SOURCE_SIMULATION_BALANCE_PCT;
+         w.cfg.risk_budget=-1.0;
+         w.mk.bal.demo=demos[k];
+         w.mk.bal.trade_mode=modes[k];
+         w.Live();
+         CW ref;
+         ref.Init(dir);
+         ref.Live();
+         Check(w.out.status=="EXECUTOR" && w.out.request && w.out.risk_budget==100.0 && w.out.risk_base==10000.0 && w.out.risk_label=="SIMULATION ONLY" && w.out.account_mode==modes[k] &&
+               w.out.spb.plan.volume_out==ref.out.spb.plan.volume_out,StringFormat("dir %d mode %d: 1%% of the current balance, the label and the raw account mode, the plan of the explicit 100",dir,modes[k]));
+        }
+      CW h;
+      h.Init(dir);
+      h.cfg.risk_source=EO_RISK_SOURCE_SIMULATION_BALANCE_PCT;
+      h.cfg.risk_budget=-1.0;
+      h.mk.bal.amount=5000.0;
+      h.mk.bal.demo=false;
+      h.mk.bal.trade_mode=2;
+      h.Live();
+      Check(h.out.request && h.out.risk_budget==50.0,StringFormat("dir %d: the budget follows the balance",dir));
+      CW u;                                                    // the DEMO policy is unchanged
+      u.Init(dir);
+      u.cfg.risk_source=EO_RISK_SOURCE_DEMO_BALANCE_PCT;
+      u.cfg.risk_budget=-1.0;
+      u.mk.bal.demo=false;
+      u.mk.bal.trade_mode=2;
+      u.Live();
+      Check(u.out.status=="RISK_BASE_NOT_READY" && Starts(u.out.reason,"ACCOUNT_NOT_DEMO") && u.Untouched(),StringFormat("dir %d: the DEMO policy still refuses a non-demo account",dir));
+     }
+  }
+
+void Scenario_simulation_failures_and_real_transport(void)
+  {
+   string label[8]={"unreadable","zero","negative","not a number","infinite","time invalid","future","stale"};
+   for(int d=0;d<2;d++)
+     {
+      int dir=(d==0 ? 1 : -1);
+      for(int k=0;k<8;k++)
+        {
+         CW w;
+         w.Init(dir);
+         w.cfg.risk_source=EO_RISK_SOURCE_SIMULATION_BALANCE_PCT;
+         w.cfg.risk_budget=100.0;                               // an explicit amount exists: it must NOT be used as a fallback
+         w.mk.bal.demo=false;
+         w.mk.bal.trade_mode=2;
+         if(k==0) w.mk.bal.read_ok=false;
+         if(k==1) w.mk.bal.amount=0.0;
+         if(k==2) w.mk.bal.amount=-5.0;
+         if(k==3) w.mk.bal.amount=MathSqrt(-1.0);
+         if(k==4) w.mk.bal.amount=MathPow(10.0,400.0);
+         if(k==5) w.mk.bal.time=0;
+         if(k==6) w.mk.bal.time=w.t.now+5;
+         if(k==7) w.mk.bal.time=w.t.now-1000;
+         w.Live();
+         Check(w.out.status=="RISK_BASE_NOT_READY" && !w.out.request && w.t.sends==0 && Has(w.out.reason,"account_mode=2 SIMULATION ONLY") && !Has(w.out.reason,"ACCOUNT_NOT_DEMO"),
+               StringFormat("%s dir %d: blocked with no fallback, raw account mode and label in the reason",label[k],dir));
+        }
+      CW r;                                                     // a real transport is refused before anything is read or sent
+      r.Init(dir);
+      r.cfg.risk_source=EO_RISK_SOURCE_SIMULATION_BALANCE_PCT;
+      r.cfg.risk_budget=-1.0;
+      r.t.real=true;
+      r.mk.bal.demo=false;
+      r.mk.bal.trade_mode=2;
+      r.Live();
+      Check(r.out.status=="SIMULATION_REFUSED" && !r.out.request && r.mk.balance_calls==0 && r.t.sends==0 && r.out.risk_label=="SIMULATION ONLY",StringFormat("dir %d: a real transport is refused before the balance is read",dir));
+      CW g;                                                     // the executor's real-transport gates are untouched: a real transport on a non-demo account is refused
+      g.Init(dir);
+      g.t.real=true;
+      g.t.account.demo=false;
+      g.cfg.exec.real_authorised=true;
+      g.cfg.exec.authorisation=EN_AUTH_PHRASE;
+      g.Live();
+      Check(!g.out.request && g.t.sends==0 && Has(g.out.reason,"REAL_REQUIRES_DEMO_ACCOUNT"),StringFormat("dir %d: the entry executor still refuses a real transport on a non-demo account",dir));
+     }
+  }
+
 void OnStart()
   {
    Print("T016 ENTRY ORCHESTRATOR TEST: fake transport, fake store and a scripted market; no file, no terminal read, no order, no trade.");
@@ -775,6 +865,8 @@ void OnStart()
    Scenario_cached_feed_market_recheck();
    Scenario_balance_clock_and_reasons();
    Scenario_facts_expose_direction_only_when_known();
+   Scenario_simulation_budget_any_classification();
+   Scenario_simulation_failures_and_real_transport();
    TestOffsetValidation();
    PrintFormat("T016 ENTRY ORCHESTRATOR TEST finished: %d passed, %d failed",g_pass,g_fail);
   }

@@ -1,6 +1,7 @@
 """The FAKE/READ_ONLY demo preset of XauUsdEntryOrchestrator: complete, labelled, no input of the EA blocks, no real transport; every required input, reverted to its UNSET default, blocks (offline
 rules AND, where the Python mirror can see it, the mirrored pipeline). The rules in tests/preset_check.py are pinned to the EA source."""
 import os
+import itertools
 import re
 import sys
 import unittest
@@ -142,13 +143,70 @@ class Preset(unittest.TestCase):
                      'g_cfg.exec.filling=(InpFilling==EOI_FILL_RETURN ? EN_FILL_RETURN : EN_FILL_UNSET);', 'g_cfg.exec.permit_max_age=InpPermitMaxAgeSeconds;', 'g_cfg.gate.max_age=InpGateMaxAgeSeconds;'):
             self.assertIn(frag, ea)
         for frag in ('c.risk_source==EO_RISK_SOURCE_AMOUNT && !(c.risk_budget>0.0)', 'if(!(c.lot_cap>0.0))', 'c.model_tolerance>=0.0 && c.model_tolerance<=1.0', 'if(!(c.max_quote_age>0))',
-                     'bal.read_ok && bal.demo && TG_Finite(bal.amount) && bal.amount>0.0 && now-bal.time>=0 && now-bal.time<=c.max_quote_age', 'budget=bal.amount*EO_RISK_PCT_DEMO/100.0;',
+                     'bal.read_ok && (bal.demo || sim) && TG_Finite(bal.amount) && bal.amount>0.0 && now-bal.time>=0 && now-bal.time<=c.max_quote_age', 'budget=bal.amount*EO_RISK_PCT_DEMO/100.0;',
                      'chk.risk_budget=budget;', 'm.risk_budget=budget;'):
             self.assertIn(frag, core)
         self.assertIn('#define EO_RISK_PCT_DEMO 1.0', core)
         self.assertIn('AccountInfoDouble(ACCOUNT_BALANCE)', ea)
         self.assertIn('ACCOUNT_TRADE_MODE)==ACCOUNT_TRADE_MODE_DEMO', ea)
         self.assertIn('class CEoDemoMarket : public CEoRealMarket', ea)
+
+
+class SimulationPreset(unittest.TestCase):
+    """the SIMULATION ONLY preset (account 358175: portal DEMO, MT5 REAL): complete, labelled, push OFF, FAKE / READ_ONLY, and the policy cannot be combined with any real transport"""
+
+    def setUp(self):
+        self.values, self.labels, self.dups = pc.parse_preset(pc.SIMULATION_PRESET)
+        self.v = pc.typed(self.values, EA)
+
+    def test_complete_labelled_and_nothing_blocks(self):
+        problems, bl, v = pc.report(pc.SIMULATION_PRESET)
+        self.assertEqual((problems, bl, self.dups), ([], [], []))
+        self.assertEqual(set(self.values), set(EA))
+
+    def test_push_off_fake_read_only_and_the_policy_is_simulation(self):
+        v = self.v
+        self.assertEqual((v['InpRiskSource'], v['InpPushNotifications'], v['InpEntryTransport'], v['InpManagementTransport'], v['InpManagementConfirmAutoSend'], v['InpEntryAuthorisation'],
+                          v['InpManagementRegistration']), (2, False, 0, 0, False, '', False))
+        text = read('src', 'presets', 'XauUsdEntryOrchestrator_simulation_fake.set')
+        for frag in ('SIMULATION ONLY', '358175', 'NOT a demo proof', 'NOT a client confirmation', 'NOT a live approval'):
+            self.assertIn(frag, text)
+
+    def test_it_differs_from_the_demo_preset_in_the_risk_source_and_comments_only(self):
+        demo, _, _ = pc.parse_preset()
+        sim = self.values
+        self.assertEqual({k for k in demo if demo[k] != sim.get(k)}, {'InpRiskSource'})
+
+    def test_every_real_transport_combination_with_the_simulation_policy_is_refused(self):
+        for entry, mgmt, confirm, phrase in itertools.product((0, 1), (0, 1), (False, True), ('', pc.EN_PHRASE)):
+            v = dict(self.v, InpEntryTransport=entry, InpManagementTransport=mgmt, InpManagementConfirmAutoSend=confirm, InpEntryAuthorisation=phrase)
+            refused = any(b[1] == 'InpRiskSource' and 'SIMULATION ONLY' in b[2] for b in pc.blockers(v))
+            self.assertEqual(refused, (entry, mgmt, confirm, phrase) != (0, 0, False, ''), (entry, mgmt, confirm, phrase))
+
+    def test_the_demo_policy_and_the_real_transport_rules_are_unchanged_by_the_simulation_policy(self):
+        base = dict(self.v, InpRiskSource=1)
+        for entry, mgmt, confirm, phrase in itertools.product((0, 1), (0, 1), (False, True), ('', pc.EN_PHRASE)):
+            v = dict(base, InpEntryTransport=entry, InpManagementTransport=mgmt, InpManagementConfirmAutoSend=confirm, InpEntryAuthorisation=phrase)
+            sim = dict(v, InpRiskSource=2)
+            demo_items = [b for b in pc.blockers(v)]
+            sim_items = [b for b in pc.blockers(sim) if not (b[1] == 'InpRiskSource')]
+            self.assertEqual(demo_items, sim_items, 'the real-transport requirements (phrase, registration, confirmation, magic, filling) are evaluated identically: %s' % ((entry, mgmt, confirm, phrase),))
+            self.assertFalse(any(b[1] == 'InpRiskSource' for b in demo_items), 'the DEMO policy adds no simulation refusal')
+
+    def test_the_configure_source_pins_the_combination_and_leaves_the_real_gates_alone(self):
+        ea = re.sub(r'//[^\n]*', '', read('src', 'XauUsdEntryOrchestrator.mq5'))
+        frag = 'if(InpRiskSource==EOI_RISK_SIMULATION_1PCT_CURRENT_BALANCE && (InpEntryTransport!=EOI_ETR_FAKE || InpManagementTransport!=EOI_MTR_READ_ONLY || InpManagementConfirmAutoSend || InpEntryAuthorisation!="")) return(false);'
+        self.assertIn(frag, ea)
+        conf = ea[ea.index('bool Configure(void)'):ea.index('SEoFeedCfg fc;')]
+        self.assertLess(conf.index(frag), conf.index('g_trp=GetPointer(g_etr)'), 'the refusal comes before any real transport is selected')
+        # the real-transport selection rules are exactly the ones of before
+        self.assertIn('if(InpEntryAuthorisation!=EN_AUTH_PHRASE || !InpManagementRegistration || InpEaMagic<=0 || InpFilling!=EOI_FILL_RETURN) return(false);', conf)
+        self.assertIn('if(InpManagementTransport==EOI_MTR_BROKER_DEMO && (!InpManagementConfirmAutoSend || !InpManagementRegistration)) return(false);', conf)
+        self.assertIn('g_cfg.exec.real_authorised=g_real_entry;', ea)
+        self.assertNotIn('SIMULATION', re.sub(r'//[^\n]*', '', read('src', 'include', 'EntryExecutor.mqh')))
+        self.assertNotIn('SIMULATION', re.sub(r'//[^\n]*', '', read('src', 'include', 'ExitExecutor.mqh')))
+        self.assertIn('b.trade_mode=(int)raw_mode;', ea)
+        self.assertIn('SIMULATION ONLY', ea)
 
 
 if __name__ == '__main__':
