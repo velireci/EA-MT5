@@ -424,6 +424,23 @@ class ReturnBeyondLevelAfterBos(unittest.TestCase):
                 alone = sp.build(selection(candidate_selector=sp.CAND_EXPLICIT_ID, candidate_id=o.candidates[1].id), market(d), o, lvl, asof_of(o))
                 self.assertTrue(alone.plan_ready, alone.reason)
 
+    def test_a_return_into_the_first_candidate_blocks_the_untouched_second_one(self):
+        """CURRENT behaviour (Codex reproduction, 2026-10-16): only the first LATER bar changes, its low 93.5 (BUY) re-enters the
+        refused FVG [93,94]. The observer marks that candidate returned and sets the GLOBAL phase RETURN_OBSERVED; the second FVG
+        stays untouched and valid, but the bridge blocks on the phase before any per-candidate check, also for an explicit id."""
+        later = ((97.5, 93.5, 97),) + self.LATER[1:]
+        for d in (1, -1):
+            with self.subTest(d=d):
+                o, lvl = self.drive(d, self.rows(d, later))
+                self.assertEqual(o.phase, 'RETURN_OBSERVED')
+                self.assertEqual([(k.lower, k.upper, k.returned, k.invalid) for k in o.candidates],
+                                 [(93, 94, True, False), (98, 99, False, False)] if d == 1 else [(102, 103, True, False), (97, 98, False, False)])
+                blocked = 'RETURN_ALREADY_OBSERVED: the price already came back; no delayed entry'
+                self.assertEqual(sp.build(selection(), market(d), o, lvl, asof_of(o)).reason, blocked)
+                r = sp.build(selection(candidate_selector=sp.CAND_EXPLICIT_ID, candidate_id=o.candidates[1].id), market(d), o, lvl, asof_of(o))
+                self.assertFalse(r.plan_ready)
+                self.assertEqual(r.reason, blocked)
+
 
 class Mutants(unittest.TestCase):
     def _run(self, pairs):
