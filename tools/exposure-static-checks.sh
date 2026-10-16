@@ -79,9 +79,9 @@ python3 -I "$NEG/x3.py" $REAL $EA && echo "  PASS read-only port, opt-in default
 echo "=== X4: the test uses a scripted port only ==="
 grep -nE 'EntryTransportReal|ExposureReaderReal|OrderSend|PositionsTotal|OrdersTotal|AccountInfo|OrderCalcProfit' $TS >/dev/null && { echo "  FAIL the test touches the terminal"; FAIL=1; } || echo "  PASS the test uses the scripted fake port only"
 
-echo "=== X5: protected modules are untouched since $BASE ==="
+echo "=== X5: protected modules are untouched since $BASE (EntryOrchestratorFeed.mqh left out on 2026-10-16: the owner-requested status diagnostics; pinned by the orchestrator O3 checks) ==="
 for p in src/include/EntryTransport.mqh src/include/EntryTransportFake.mqh src/include/EntryTransportReal.mqh src/include/EntryStateFile.mqh src/include/EntryExecutor.mqh \
-         src/include/EntryOrchestratorFeed.mqh src/include/SetupPlanBridge.mqh src/include/TradePlanning.mqh src/include/BrokerLossCheck.mqh src/include/DailyBridge.mqh \
+         src/include/SetupPlanBridge.mqh src/include/TradePlanning.mqh src/include/BrokerLossCheck.mqh src/include/DailyBridge.mqh \
          src/include/DailyBalanceStore.mqh src/include/ExitExecutor.mqh src/include/ExitTickDriver.mqh src/XauUsdTradePreview.mq5 src/XauUsdT011ExitManager.mq5; do
   if git cat-file -e $BASE:$p 2>/dev/null; then
     if git diff --quiet $BASE -- $p; then echo "  PASS $p identical to $BASE"; else echo "  FAIL $p differs from $BASE"; FAIL=1; fi

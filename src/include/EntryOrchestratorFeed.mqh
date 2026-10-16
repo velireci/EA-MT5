@@ -71,6 +71,18 @@ public:
    datetime replay_start;
    bool built;
    string problem;
+   // diagnostics only: the result of the T003 evaluation that the existing build already computed for the LAST snapshot (no second evaluation, nothing here is read by a decision)
+   bool dg_have;
+   bool dg_ctx_ok;              // what M4ContextFromH3 returned for that snapshot
+   bool dg_state;
+   bool dg_reliable;
+   int dg_flag;
+   string dg_reason;
+   bool dg_valid;
+   bool dg_ready;
+   string dg_phase;
+   string dg_direction;
+   datetime dg_known;
    void Init(const SEoFeedCfg &c)
      {
       cfg=c;
@@ -89,6 +101,7 @@ public:
       M4NoLevel(broken);
       problem=reason;
       replay_start=0;
+      dg_have=false;
      }
    bool Ordinary(void) {return(cfg.source==EO_SRC_T002_AFTER_LOSS || cfg.source==EO_SRC_T002_FIRST_ONLY);}
    int CopyClosed(const ENUM_TIMEFRAMES tf,const datetime at,const int want,MqlRates &out[])
@@ -127,7 +140,9 @@ public:
       int k=ArraySize(updates);
       ArrayResize(updates,k+1,64);
       updates[k].known=known;
-      M4ContextFromH3(c,e.reliable,updates[k].context,cfg.source==EO_SRC_T003);
+      dg_ctx_ok=M4ContextFromH3(c,e.reliable,updates[k].context,cfg.source==EO_SRC_T003);
+      dg_have=true; dg_state=e.has_state; dg_reliable=e.reliable; dg_flag=e.flag; dg_reason=e.reason;
+      dg_valid=c.valid; dg_ready=c.ready; dg_phase=c.phase; dg_direction=c.direction; dg_known=known;
      }
    // the broken level of the current BOS: the level the SAME M15 selection offered to the bar that broke it (no new level rule; SetupPlanBridge verifies id / price / time)
    void BrokenLevel(const int nm)
@@ -189,6 +204,13 @@ public:
       built=true;
       problem="";
       return(true);
+     }
+   // one line for the status: the T003 result kept from the build, then the M15 observer state. The M15 context flags are cleared by the observer when has_context=0, so they never explain an H4 refusal.
+   string Diag(void)
+     {
+      string h=(dg_have ? StringFormat("h3[phase=%s valid=%d ready=%d dir=%s eval_state=%d eval_reliable=%d flag=%d reason='%s' ctx_ok=%d known=%s]",dg_phase,(int)dg_valid,(int)dg_ready,dg_direction,(int)dg_state,(int)dg_reliable,dg_flag,dg_reason,(int)dg_ctx_ok,TimeToString(dg_known,TIME_DATE|TIME_MINUTES))
+                                : (Ordinary() && built ? "h3[not used: ordinary T002 scan]" : "h3[no evaluation in the current build]"));
+      return(StringFormat("feed[problem='%s' timeline=%s] %s m15[phase=%s has_context=%d ready=%d reliable=%d selected=%d]",problem,info.status,h,st.phase,(int)st.has_context,(int)st.context.ready,(int)st.context.reliable,(int)st.context.selected));
      }
    // true = a (re)build ran this call; feed_ok = the confirmed data is usable (false = a defect: the caller restarts the baseline)
    bool Poll(bool &feed_ok)

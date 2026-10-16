@@ -9,7 +9,7 @@
 //   A filled order is registered with the existing T011 executor and then managed by the T011 driver inside this EA (OnTick = the 2R level, OnTimer = reconcile only) only when InpManagementRegistration is true;
 //   the registered fill stays in the lifecycle index until the T011 record is DONE or the position is proven closed (that index is the restart memory). Not proof of broker execution. UNVERIFIED: not compiled or run.
 #property strict
-#property version "1.13"
+#property version "1.14"
 #include "include/EntryOrchestratorFeed.mqh"
 #include "include/EntryTransportFake.mqh"
 #include "include/ExposureReaderReal.mqh"
@@ -414,6 +414,7 @@ void Poll()
    SyncHalts();
    string text=out.status+" | "+out.reason+" | cut "+TimeToString(g_feed.cut,TIME_DATE|TIME_MINUTES)+" | baseline "+TimeToString((datetime)g_orch.baseline,TIME_DATE|TIME_MINUTES)+
                (g_real_entry ? " | REAL DEMO" : " | virtual requests "+IntegerToString(g_tr.sends))+" | lifecycle open "+IntegerToString(g_guard.st.n)+(g_guard.st.halted!="" ? " HALTED" : "");
+   text+=" | "+g_feed.Diag();
    if(out.risk_label!="") text+=" | risk "+out.risk_label+" account_mode="+IntegerToString(out.account_mode);
    if(out.request) text+=" | "+out.label+" | "+out.spb.signal_id;
    Status(text);

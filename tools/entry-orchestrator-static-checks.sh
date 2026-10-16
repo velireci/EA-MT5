@@ -89,6 +89,20 @@ assert 'g_feed.Poll(feed_ok);' in pre_step and 'return;' not in pre_step, 'timer
 assert poll.count('g_feed.Poll(') == 1 and poll.count('g_orch.Step(') == 1, 'one feed refresh and market evaluation per poll'
 assert 'if(exposure!=g_last_exposure)' in poll, 'unchanged exposure logs are suppressed'
 assert 'DBS_Load(' in fd and fd.count('DBS_Load(') == 1, 'the store is read with LOAD only'
+# the status diagnostics reuse the existing T003 evaluation of the build; no second evaluation, nothing in a decision reads them
+assert fd.count('H3Evaluate(') == 1 and fd.count('H3SetupContext(') == 1, 'diagnostics: no second H3Evaluate / H3SetupContext'
+snap = fd[fd.index('void Snapshot('):fd.index('void BrokenLevel(')]
+assert snap.index('T003View(n,e,c);') < snap.index('dg_ctx_ok=M4ContextFromH3(c,e.reliable,') < snap.index('dg_reliable=e.reliable; dg_flag=e.flag; dg_reason=e.reason;') and 'dg_phase=c.phase;' in snap, 'diagnostics keep the result of the existing evaluation'
+diag = fd[fd.index('string Diag(void)'):fd.index('bool Poll(bool &feed_ok)')]
+for w in ('H3Evaluate', 'H3SetupContext', 'M4ContextFromH3', 'CopyRates', 'Refresh(', 'Build(', 'Reset('):
+    assert w not in diag, 'diagnostics must be read only: ' + w
+rest = fd.replace(snap, '').replace(diag, '')
+for ln in rest.split('\n'):
+    if 'dg_' in ln:
+        assert re.match(r'^\s*(bool|int|string|datetime) dg_\w+;\s*$', ln) or ln.strip() == 'dg_have=false;', 'diagnostic members outside Snapshot / Diag are declarations and the Reset clear only: ' + ln
+assert 'dg_' not in ea, 'the EA does not read the diagnostic members'
+assert ea.count('g_feed.Diag()') == 1 and 'text+=" | "+g_feed.Diag();' in poll, 'one diagnostic suffix in the status text'
+assert poll.index('text+=" | "+g_feed.Diag();') > poll.index('g_orch.Step('), 'the diagnostics are appended after the decision step'
 assert 'class CEoTerminalFake : public CEnFakeTransport' in ea, 'fake transport class'
 assert ea.count('CEoTerminalFake g_tr;') == 1 and 'g_trp=GetPointer(g_tr);' in ea, 'the FAKE transport is the default'
 assert 'EO_FAKE_LABEL' in ea and 'CEnFakeTransport::Send(req,res)' in ea, 'virtual request label'
@@ -179,6 +193,10 @@ mut K.mqh $EA 's/^input double InpRiskBudget=-1; /input double InpRiskBudget=100
 expect_assert "$NEG/o3.py" "$NEG/K.mqh $FEED" "a policy input with a default value" "default not UNSET"
 mut SM5.mqh $EA 's/InpManagementTransport!=EOI_MTR_READ_ONLY || InpManagementConfirmAutoSend || //'
 expect_assert "$NEG/o3.py" "$NEG/SM5.mqh $FEED" "a simulation policy allowed with a real management transport" "SIMULATION ONLY is allowed only"
+mut DG1.mqh $FEED 's/      dg_have=true; dg_state=e.has_state;/      H3Evaluate(hbars,n,params,e,tracks,events); dg_have=true; dg_state=e.has_state;/'
+expect_assert "$NEG/o3.py" "$EA $NEG/DG1.mqh" "a second evaluation for the diagnostics" "diagnostics"
+mut DG2.mqh $EA 's/   text+=" | "+g_feed.Diag();/   text+="";/'
+expect_assert "$NEG/o3.py" "$NEG/DG2.mqh $FEED" "a status without the diagnostics" "diagnostic suffix"
 mut L.mqh $FEED 's/      DBS_Load(port,stored);/      DBS_Load(port,stored); DBS_Capture(port,stored);/'
 expect_assert "$NEG/o3.py" "$EA $NEG/L.mqh" "a CAPTURE in the feed" "DBS_Capture\|LOAD only"
 mut M.mqh $EA 's/   virtual void Send(const SEnRequest \&req,SEnSendResult \&res)/   virtual void Send(const SEnRequest \&req,SEnSendResult \&res) {OrderSend(); }\n   virtual void SendUnused(const SEnRequest \&req,SEnSendResult \&res)/'

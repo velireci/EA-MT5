@@ -255,9 +255,9 @@ assert 'SendNotification' not in ea, 'the EA never calls the terminal itself'
 PYEOF
 python3 -I "$NEG/l7.py" $NT $EA $HD $MH && echo "  PASS one terminal call, ownership filter, once per key, baseline, bounded retries, proven facts only, distinct partial / modified / closed, no handle to act" || { echo "  FAIL"; FAIL=1; }
 
-echo "=== L5: protected modules are untouched since $BASE ==="
+echo "=== L5: protected modules are untouched since $BASE (EntryOrchestratorFeed.mqh left out on 2026-10-16: the owner-requested status diagnostics; pinned by the orchestrator O3 checks) ==="
 for p in src/include/EntryExecutor.mqh src/include/EntryTransport.mqh src/include/EntryTransportFake.mqh src/include/EntryTransportReal.mqh src/include/EntryStateFile.mqh \
-         src/include/EntryOrchestratorFeed.mqh src/include/ExposureReaderReal.mqh src/include/SetupPlanBridge.mqh src/include/TradePlanning.mqh \
+         src/include/ExposureReaderReal.mqh src/include/SetupPlanBridge.mqh src/include/TradePlanning.mqh \
          src/include/ExitExecutor.mqh src/include/ExitTickDriver.mqh src/include/ExitStateFile.mqh src/XauUsdTradePreview.mq5 src/XauUsdT011ExitManager.mq5 src/XauUsdT011ExitRegister.mq5; do
   if git cat-file -e $BASE:$p 2>/dev/null; then
     if git diff --quiet $BASE -- $p; then echo "  PASS $p identical to $BASE"; else echo "  FAIL $p differs from $BASE"; FAIL=1; fi
