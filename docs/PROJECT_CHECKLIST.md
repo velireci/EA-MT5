@@ -1,43 +1,41 @@
 # Checklist qendrore e projektit
 
-Përditësuar më 15.10.2026. Pamje e evidencës së njohur, jo kontroll i ri i GitHub. Nuk matet përqindja nga numri i testeve. Programuar ≠ testuar plotësisht ≠ validuar nga klienti.
+Përditësuar më 16.10.2026, me evidencën e fundit të pronarit në 03:00 (Europe/Tirane). Programuar ≠ provuar në broker ≠ validuar nga klienti. Përqindja 85% e diskutuar është vetëm vlerësim orientues, jo matje e checklist-it.
 
-## Statusi aktual — 15.10.2026, pas provës së orës 23:20
+## Statusi aktual — simulimi në Tauro është aktiv
 
-Kjo përmbledhje zëvendëson shënimet historike më poshtë. [x] vlen për bllokun e përshkruar, jo për EA-në e përfunduar. Nuk përdorim përqindje të matur nga skedarët/testet.
+Kjo përmbledhje zëvendëson statuset historike më poshtë. [x] vlen vetëm për bllokun e përshkruar.
 
-### E kryer dhe e provuar
-- [x] Zinxhiri H4/M15 → plan → portë → ekzekutues hyrjeje është lidhur me transport FAKE (T013–T016); testet e mëparshme të pronarit për portën/orkestruesin kaluan.
-- [x] Rekordet e hyrjeve në disk dhe rikuperimi (T017): EntryPersistenceTest 99/0, e2d20db, evidencë e pronarit.
-- [x] Ekspozimi nga llogaria (T018), struktura e riemërtuar pa përplasje: ExposureReaderTest-3318578 53/0, 22:35:16, evidencë e pronarit.
-- [x] Regjistrimi pas mbushjes dhe menaxhimi T011 brenda orkestruesit janë ndërtuar; nuk kërkohet më nisja manuale e ExitManager për secilin pozicion kur aktivizohet rruga e integruar.
-- [x] Cikli i integruar me prova sintetike, BUY/SELL, restart dhe lirimi i sloteve: EntryLifecycleTest-d5f7460 231/0 në XAUUSD.fx M15, 23:13:25, evidencë e pronarit. Në 6eab15d kishte 229/2 nga ndihmësi i testit që lexonte listën reale; d5f7460 korrigjon vetëm izolimin e testit.
-- [x] Codex: testi dhe EA-ja 6eab15d kompilohen secili 0 errors / 0 warnings; 106 teste Python fokale kaluan dhe kontrollet statike lifecycle me negative controls kaluan (krahasimet me historikun Git u kapërcyen në eksportin lokal). Testi d5f7460: 0/0, 11 teste Python fokale.
-- [x] Nisja reale e programit në grafik demo, me transport FAKE / READ_ONLY: log-u 23:16:26 konfirmon mënyrën. Në 23:20:19: CONFIG_UNSET vetëm risk_budget; virtual requests 0, lifecycle open 0. Kjo provon nisjen, jo tregti te brokeri.
-- [x] Ndarja DEMO/LIVE është ruajtur në EA_INTEGRATION_PLAN.md dhe STATE.md, commit 2703927.
-- [ ] Politika SIMULATION (EA v1.13): 1% e ACCOUNT_BALANCE aktuale pa kontrollin e klasifikimit, vetëm FAKE/READ_ONLY, çdo transport real refuzohet, DEMO e pandryshuar, preseti `XauUsdEntryOrchestrator_simulation_fake.set` (push OFF): ndërtuar në sandbox, kompilimi/MT5 UNVERIFIED; pritet përgjigjja e Tauro për klasifikimin e 358175; pyetjet para live mbeten në listën B.
-- [ ] Paketa demo (EA v1.08): buxheti = 1% e ACCOUNT_BALANCE aktuale (vetëm demo, pa fallback, i lidhur me planin dhe provat), preseti i plotë FAKE/READ_ONLY `src/presets/XauUsdEntryOrchestrator_demo_fake.set` dhe kontrolli offline `tests/preset_check.py`: ndërtuar në sandbox (787 teste Python), kompilimi/MT5 UNVERIFIED; zgjedhjet e përkohshme janë propozime demo (tabela te EA_INTEGRATION_PLAN), jo përgjigje klienti; pyetjet para live mbeten në listën B.
-- [ ] Anulimi i pending-it për drejtim të kundërt / sinjal të kundërt (S:29-30) dhe njoftimet push për fakte të provuara (S:100, S:173), EA v1.11: ndërtuar në sandbox me regresione BUY/SELL, disa pending me drejtime të ndryshme, restart dhe përgjigje të pasigurta; marrës FAKE; kompilimi/MT5 UNVERIFIED; asnjë njoftim real nuk u dërgua.
+### E ndërtuar dhe e verifikuar
+- [x] Zinxhiri H4/M15 → plan → portë → ekzekutues është lidhur; hyrjet aktuale janë FAKE dhe menaxhimi READ_ONLY.
+- [x] Persistence/rikuperimi T017: pronari EntryPersistenceTest-e2d20db 99/0.
+- [x] Ekspozimi T018: pronari ExposureReaderTest-3318578 53/0.
+- [x] Regjistrimi automatik dhe driver-i T011 janë brenda orkestruesit; nuk kërkohet ExitManager i veçantë kur aktivizohet rruga e integruar. Prova e këtij integrimi mbetet sintetike.
+- [x] Lifecycle, vëzhgimi i mbetjes pas DONE dhe outbox i njoftimeve: pronari EntryLifecycleTest-be6d868 277/0, 16.10.2026 02:16:00. Njoftimet në preset janë OFF; nuk provohet dërgim push real.
+- [x] Anulimi sipas drejtimit/sinjalit të kundërt është ndërtuar me prova sintetike; jo provë brokeri.
+- [x] Politika SIMULATION_1PCT_CURRENT_BALANCE në a74b4b8: 1% e balancës aktuale, vetëm FAKE/READ_ONLY; nuk ndryshon klasifikimin ose portat reale.
+- [x] Codex a74b4b8: testi dhe EA-ja kompilohen secili 0 errors / 0 warnings; 55 teste Python fokale kaluan. Skripti shell statik nuk u riekzekutua nga Codex sepse procesi u bllokua nga mjedisi; rezultati i Claude mbetet i përcjellë.
+- [x] Pronari EntryOrchestratorTest-a74b4b8 në XAUUSD.fx M15: 185 passed / 0 failed, 16.10.2026 02:48:48.
+- [x] Preseti i plotë simulation është dorëzuar dhe nisur në Tauro. Nuk ka më CONFIG_UNSET: risk_budget ose ACCOUNT_NOT_DEMO për këtë rrugë simulimi.
+- [x] Diagnostika vetëm-lexim 11e827e: Codex EA 0 errors / 0 warnings dhe 55 teste Python fokale kaluan; pronari e nisi me presetin simulation.
+- [x] Log-u Tauro 02:58:57 dhe 03:00:03: connected=1, exposure OK, feed.problem bosh, timeline=OK; H3 BEAR / SWEEP_WAIT / ready=0 / eval_reliable=1, konvergjencë 2000 vs 1700; M15 WAIT_CONTEXT. Cut përparoi 00:45 → 01:00. Në këto snapshot-e mungon rikonfirmimi H4; nuk është pengesë UNSET ose histori e pangarkuar.
+- [x] Prova e mëparshme manuale BUY e T011 konfirmoi një pjesëmbyllje dhe reconcile; nuk zëvendëson ciklin automatik të orkestruesit.
 
-### Puna aktive — konfigurimi demo funksional
-- [ ] Lidhja automatike e buxhetit demo: 1% e ACCOUNT_BALANCE aktuale, me dështim leximi → BLOCK. Kjo është zgjedhje e përkohshme demo, jo përgjigje e klientit për live. Sot InpRiskBudget është ende shumë monetare e dhënë si input.
-- [ ] Një preset i plotë pune, me të gjitha zgjedhjet e përkohshme demo të dukshme dhe të dokumentuara. Preseti i dorëzuar fake_work ka lot_cap=10, model_tolerance=0.01, max_quote_age=5; risk_budget=-1 dhe zgjedhjet e tjera të pazgjidhura mbeten bllokuese.
-- [ ] Kontroll i përbashkët i të gjitha politikave të sinjalit/planit/portës përpara raundit tjetër MT5; mos zbulojmë një input UNSET për çdo raund.
-- [ ] Rrjedha e plotë nga një setup deri te hyrja dhe menaxhimi me konfigurimin demo të përkohshëm.
+### Puna aktive dhe çfarë mungon
+- [ ] Vëzhgimi i një setup-i të ri H4/M15 deri te plani, porta dhe kërkesa FAKE në Tauro. Deri në log-un e 03:00: virtual requests=0, lifecycle open=0; kjo rrugë në treg ende nuk është provuar.
+- [ ] Kontroll i përbashkët i pengesave pas planit: balanca ditore T012, numëruesit manualë, offset-i i serverit, spread-i, lajmet, seanca dhe combined risk cap. Preseti i plotë nuk provon të dhënat reale të këtyre burimeve.
+- [ ] CAPTURE real i balancës fillestare dhe verifikimi i historikut ditor; LOAD pa rekord dhe testet sintetike nuk mjaftojnë.
+- [ ] Përgjigjja e Tauro: portali etiketon 358175 DEMO, por MT5 në JMFinancial-Server raporton REAL. Konfirmimi me email është në pritje. Simulimi lejohet; transportet reale mbeten të çaktivizuara.
+- [ ] Cikli i plotë me urdhra në broker: sinjal → LIMIT → mbushje → regjistrim → partial → reconcile/restart. Nuk është provuar nga orkestruesi.
+- [ ] Prova automatike e mëparshme SELL mbetet INCONCLUSIVE: SL e mbylli para aktivizimit të manager-it.
+- [ ] Krahasimi i sinjaleve dhe sjelljes me shembujt e klientit. T011/T012 dhe roboti i plotë nuk shpallen të përfunduar nga kalimi i testeve.
 
-### Provat që ende mungojnë
-- [ ] Cikli i plotë i orkestruesit me transport BROKER_DEMO: sinjal → LIMIT → mbushje → regjistrim → partial → reconcile/restart. Zgjedhja reale është ndërtuar, por nuk është aktivizuar ose provuar në këtë cikël.
-- [ ] CAPTURE real i balancës fillestare dhe politika reale e plotësisë/klasifikimit të historikut ditor. LOAD është provuar pa rekord; testet sintetike nuk e zëvendësojnë CAPTURE.
-- [ ] Mbyllja e boshllëqeve të konfirmuara: pending në ndryshim drejtimi/sinjal të kundërt, push notifications; zbatimi i BE/+0.2% dhe sjellja TP=2R varen nga konfigurimi i shprehur.
-- [ ] Provë e plotë demo dhe krahasim me shembujt e klientit. T011/T012 dhe EA-ja e plotë nuk shpallen të mbyllura vetëm nga testet e moduleve.
+### Para LIVE
+- [ ] Sqarimet e mbetura të klientit në listën B D1–D13 të EA_INTEGRATION_PLAN.md, me D9 si lidhje teknike tashmë të ndërtuar: baza/kostot e riskut, 2/3 trade, pending, përkufizimet H4/MSS/FVG/SL/target, BE/+0.2%/TP=2R dhe klasifikimi ditor.
+- [ ] Konfirmimi ose zëvendësimi i çdo zgjedhjeje të përkohshme të presetit.
+- [ ] Auditimi dhe prova e plotë e transportit në llogarinë e synuar, pastaj autorizimi i veçantë. Politika simulation nuk autorizon live.
 
-### Para LIVE — përgjigje të klientit dhe verifikim
-- [ ] Mbyllja e listës së vetme D1–D13 te EA_INTEGRATION_PLAN.md (D9 është lidhje teknike e zgjidhur): 2/3 trade, baza/kostot e 1%, pending, H4/MSS/FVG, SL/target, BE/+0.2%/TP=2R, jashtë orarit/lajmet, sinjal i kundërt, klasifikim trade dhe range.
-- [ ] Zëvendësimi ose konfirmimi i çdo zgjedhjeje të përkohshme demo me përgjigjen përfundimtare të klientit dhe verifikimi i konfigurimit.
-- [ ] Auditimi i plotë i transportit dhe autorizimi i veçantë për aktivizim. Codex lexoi dokumentacionin zyrtar për OrderSend, MqlTradeRequest dhe filling të pending; kjo nuk është auditim i plotë.
-- [ ] Llogaritë reale mbeten të refuzuara nga kodi aktual. Dokumentimi i pyetjeve për live nuk aktivizon live.
-
-**Ritmi:** një paketë për pjesët e lidhura, një listë kompilimi, një raund MT5; pa task-e/diagnostikë të panevojshme. Provat e pronarit më sipër janë të përcjella, jo ekzekutime të Codex-it.
+**Ritmi:** një paketë e lidhur dhe një raund MT5. Evidenca MT5 është e përcjellë nga pronari; kompilimet dhe 55 testet fokale më sipër u kryen nga Codex. Asnjë tregti ose njoftim real në këto ndryshime dokumentimi.
 
 ## Baza e ndërtuar — shënime historike (statuset e vjetra zëvendësohen nga përmbledhja më sipër)
 
