@@ -2,7 +2,7 @@
 // (TP_BuildPlan). PURE: no terminal read, no clock (asof and live_after are arguments), no order, no permit, no execution record, no file. It does NOT detect H4 / M15 structure (the T004 observer
 // state SM4State / SM4Candidate / SM4Level is the input), it does NOT copy the geometry or sizing formulas, and it chooses NOTHING: every selection is EXPLICIT and an unset one is a BLOCK with its name.
 // Output: a plan (plan_ready) or ONE concrete blocking reason. A plan is NOT a trade permission: the permit checks and the entry executor are separate steps.
-// WAIT_RETURN is the only phase that can yield a candidate for a PENDING order; RETURN_OBSERVED (a return already happened) never creates a delayed entry.
+// Only an UNTOUCHED candidate can yield a PENDING order; RETURN_OBSERVED (a return to SOME candidate) blocks while no valid untouched candidate is left; a touched candidate never creates a delayed entry.
 // Identities are deterministic from the observer's own identities: setup_id = "S|source|context.setup|context.fvg|broken level id", signal_id = setup_id + "|" + candidate id (the candidate id carries the
 // time of its first candle and the direction). A restart or a replay of the same bars gives the SAME ids, so the entry executor's one-record-per-signal rule keeps blocking.
 // OPEN CLIENT DECISIONS that stay explicit inputs (nothing here is a client rule): the swing selector, the FVG timing, the candidate selector, the entry edge (the client text says "the beginning of the
@@ -181,8 +181,12 @@ bool SPB_Prepare(const SSpbSelection &sel,const SSpbMarket &mkt,const SM4State &
      {SPB_Block(out,"CONTEXT_SOURCE_MISMATCH: the observer runs on "+st.context.source+", the selection names "+sel.context_source); return(false);}
    if(st.policy!=sel.timing_policy) {SPB_Block(out,"TIMING_MISMATCH: the observer policy differs from the selected timing"); return(false);}
    if(st.phase=="REPLAY_REQUIRED") {SPB_Block(out,"REPLAY_REQUIRED: a revised history never becomes a signal"); return(false);}
-   if(st.phase=="RETURN_OBSERVED") {SPB_Block(out,"RETURN_ALREADY_OBSERVED: the price already came back; no delayed entry"); return(false);}
-   if(st.phase!="WAIT_RETURN") {SPB_Block(out,"PHASE_NOT_WAIT_RETURN: "+st.phase); return(false);}
+   // RETURN_OBSERVED is global (any candidate touched); it blocks only when NO valid untouched candidate is left. A touched candidate stays refused below.
+   bool untouched=false;
+   for(int k=0;k<ArraySize(f);k++)
+      if(!f[k].invalid && !f[k].returned) untouched=true;
+   if(st.phase=="RETURN_OBSERVED" && !untouched) {SPB_Block(out,"RETURN_ALREADY_OBSERVED: the price already came back; no delayed entry"); return(false);}
+   if(st.phase!="WAIT_RETURN" && st.phase!="RETURN_OBSERVED") {SPB_Block(out,"PHASE_NOT_WAIT_RETURN: "+st.phase); return(false);}
    if(st.last_asof>asof || st.context.valid_from>asof || st.bos_known>asof) {SPB_Block(out,"FUTURE_DATA: the observer holds data newer than asof"); return(false);}
    if(!broken.valid || SPB_Blank(broken.id) || broken.id!=st.bos_level || !(SPB_Fin(broken.price) && broken.price>0.0) || !(broken.known>0 && broken.known<=st.bos_time))
      {SPB_Block(out,"BROKEN_LEVEL_MISMATCH: the supplied level is not the one the observer recorded"); return(false);}

@@ -86,7 +86,7 @@ expect_assert "$NEG/b2.py" "$NEG/E.mqh" "an include of the execution side" "Trad
 cp $HD "$NEG/F.mqh"; python3 - "$NEG/F.mqh" <<'PYEOF'
 import sys
 t = open(sys.argv[1]).read()
-a = '   if(st.phase=="RETURN_OBSERVED") {SPB_Block(out,"RETURN_ALREADY_OBSERVED: the price already came back; no delayed entry"); return(false);}\n'
+a = '   if(st.phase=="RETURN_OBSERVED" && !untouched) {SPB_Block(out,"RETURN_ALREADY_OBSERVED: the price already came back; no delayed entry"); return(false);}\n'
 assert a in t
 open(sys.argv[1], 'w').write(t.replace(a, ''))
 PYEOF

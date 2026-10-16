@@ -567,6 +567,79 @@ void Scenario_observer_untouched(void)
      }
   }
 
+// mirror of ReturnBeyondLevelAfterBos (tests/test_spb.py): after the BOS the price closes back beyond the level and later forms a near-side FVG.
+// BUY rows below; SELL = the exact mirror around 98 (x -> 196 - x, high and low swapped). Steps: 5 base bars, then the LATER bars (first one touching or not).
+void RbStep(CObs &o,const int dir,const int i,const double h,const double l,const double c)
+  {
+   if(dir==1) o.Step(i,h,l,c,i==0);
+   else o.Step(i,196.0-l,196.0-h,196.0-c,i==0);
+  }
+void RbMake(CObs &o,const int dir,const int later,const bool touch_first)
+  {
+   o.Make(dir);                                            // the standard context; its own bars are replaced below
+   M4Init(o.st,o.f,o.ev,M4_A_AT_OR_AFTER_BREAK);
+   SM4Context c;
+   M4ContextInit(c);
+   c.setup="H4SET1"; c.direction=dir; c.source="T003_PROTOTYPE"; c.fvg="H4F1"; c.lower=80; c.upper=120;
+   c.confirmed=START; c.valid_from=START; c.ready=true; c.reliable=true; c.selected=true;
+   M4SetContext(c,START,o.st,o.f,o.ev);
+   RbStep(o,dir,0,100,94,99);
+   RbStep(o,dir,1,99,91,92);
+   RbStep(o,dir,2,93,90,91);
+   RbStep(o,dir,3,95,91.5,95);
+   RbStep(o,dir,4,97,94,96.5);
+   if(later<1) return;
+   RbStep(o,dir,5,97.5,(touch_first ? 93.5 : 94.5),97);
+   RbStep(o,dir,6,98,96.5,97.8);
+   RbStep(o,dir,7,101,97.5,100.5);
+   RbStep(o,dir,8,103,99,102.5);
+  }
+
+void Scenario_return_beyond_level(void)
+  {
+   for(int d=0;d<2;d++)
+     {
+      int dir=(d==0 ? 1 : -1);
+      SSpbSelection s;
+      Sel(s);
+      SSpbMarket m;
+      Mkt(m,dir);
+      //--- the refused candidate: created by the observer, refused by the bridge
+      CObs a;
+      RbMake(a,dir,0,false);
+      SSpbResult ra;
+      SPB_Build(s,m,a.st,a.f,a.lvl,a.Asof(),ra);
+      Check(a.st.phase=="WAIT_RETURN" && ArraySize(a.f)==1 && !ra.plan_ready && Has(ra.reason,"SL_WRONG_SIDE"),
+            StringFormat("dir %d: after a return beyond the level the near-side candidate is created and its plan refused SL_WRONG_SIDE",dir));
+      //--- a later valid FVG beside the untouched refused one: ambiguous, nothing chosen
+      CObs b;
+      RbMake(b,dir,4,false);
+      SSpbResult rb;
+      SPB_Build(s,m,b.st,b.f,b.lvl,b.Asof(),rb);
+      Check(ArraySize(b.f)==2 && !b.f[0].returned && Starts(rb.reason,"AMBIGUOUS_CANDIDATES"),StringFormat("dir %d: the refused candidate stays eligible: a later valid one is ambiguous",dir));
+      //--- the refused candidate is touched: the global phase no longer blocks the untouched second one, the touched one stays refused
+      CObs c;
+      RbMake(c,dir,4,true);
+      SSpbResult rc,rid,rfirst;
+      SPB_Build(s,m,c.st,c.f,c.lvl,c.Asof(),rc);
+      SSpbSelection se=s;
+      se.candidate_selector=SPB_CAND_EXPLICIT_ID;
+      se.candidate_id=(ArraySize(c.f)==2 ? c.f[1].id : "");
+      SPB_Build(se,m,c.st,c.f,c.lvl,c.Asof(),rid);
+      se.candidate_id=(ArraySize(c.f)==2 ? c.f[0].id : "");
+      SPB_Build(se,m,c.st,c.f,c.lvl,c.Asof(),rfirst);
+      bool shape=(c.st.phase=="RETURN_OBSERVED" && ArraySize(c.f)==2 && c.f[0].returned && !c.f[0].invalid && !c.f[1].returned && !c.f[1].invalid);
+      Check(shape && rc.plan_ready && rc.candidate_id==c.f[1].id && rid.plan_ready && rid.signal_id==rc.signal_id,
+            StringFormat("dir %d: RETURN_OBSERVED with a valid untouched candidate builds that candidate (sole or explicit id)",dir));
+      Check(shape && !rfirst.plan_ready && rfirst.reason=="CANDIDATE_RETURN_ALREADY_OBSERVED: "+c.f[0].id,StringFormat("dir %d: the touched candidate is never a delayed entry",dir));
+      //--- only touched or invalid candidates left: the return still blocks
+      if(ArraySize(c.f)==2) c.f[1].invalid=true;
+      SSpbResult rd;
+      SPB_Build(s,m,c.st,c.f,c.lvl,c.Asof(),rd);
+      Check(Starts(rd.reason,"RETURN_ALREADY_OBSERVED"),StringFormat("dir %d: with no valid untouched candidate RETURN_OBSERVED still blocks",dir));
+     }
+  }
+
 void OnStart()
   {
    Print("T014 SETUP PLAN BRIDGE TEST: the T004 observer with closed bars; no terminal read, no order, no permit, no file, no trade.");
@@ -582,5 +655,6 @@ void OnStart()
    Scenario_identity_stability();
    Scenario_plan_refused();
    Scenario_observer_untouched();
+   Scenario_return_beyond_level();
    PrintFormat("T014 SETUP PLAN BRIDGE TEST finished: %d passed, %d failed",g_pass,g_fail);
   }

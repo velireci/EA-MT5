@@ -359,7 +359,7 @@ class Sources(unittest.TestCase):
 
 
 SCENARIOS = ['sell_plan', 'buy_plan', 'explicit_rules', 'unset_selections', 'several_candidates', 'invalidation', 'return_already_observed', 'context_and_phase', 'future_and_historical',
-             'identity_stability', 'plan_refused', 'observer_untouched']
+             'identity_stability', 'plan_refused', 'observer_untouched', 'return_beyond_level']
 
 
 class ReturnBeyondLevelAfterBos(unittest.TestCase):
@@ -424,22 +424,48 @@ class ReturnBeyondLevelAfterBos(unittest.TestCase):
                 alone = sp.build(selection(candidate_selector=sp.CAND_EXPLICIT_ID, candidate_id=o.candidates[1].id), market(d), o, lvl, asof_of(o))
                 self.assertTrue(alone.plan_ready, alone.reason)
 
-    def test_a_return_into_the_first_candidate_blocks_the_untouched_second_one(self):
-        """CURRENT behaviour (Codex reproduction, 2026-10-16): only the first LATER bar changes, its low 93.5 (BUY) re-enters the
-        refused FVG [93,94]. The observer marks that candidate returned and sets the GLOBAL phase RETURN_OBSERVED; the second FVG
-        stays untouched and valid, but the bridge blocks on the phase before any per-candidate check, also for an explicit id."""
-        later = ((97.5, 93.5, 97),) + self.LATER[1:]
+    TOUCH_FIRST = ((97.5, 93.5, 97),) + LATER[1:]   # Codex reproduction: only the first LATER bar changes, its low 93.5 (BUY) re-enters the refused FVG [93,94]
+
+    def test_a_return_into_the_first_candidate_no_longer_blocks_the_untouched_second_one(self):
+        """PROPOSAL under review (2026-10-16), not applied to the active EA: the observer marks the refused FVG returned and sets the GLOBAL phase RETURN_OBSERVED; the second FVG stays
+        untouched and valid. Before the change the bridge blocked RETURN_ALREADY_OBSERVED on the phase, also for the second candidate by explicit id.
+        Now the phase blocks only when no valid untouched candidate is left: the second candidate builds a plan (sole eligible or explicit id), the touched
+        one stays refused (no delayed entry)."""
         for d in (1, -1):
             with self.subTest(d=d):
-                o, lvl = self.drive(d, self.rows(d, later))
+                o, lvl = self.drive(d, self.rows(d, self.TOUCH_FIRST))
                 self.assertEqual(o.phase, 'RETURN_OBSERVED')
                 self.assertEqual([(k.lower, k.upper, k.returned, k.invalid) for k in o.candidates],
                                  [(93, 94, True, False), (98, 99, False, False)] if d == 1 else [(102, 103, True, False), (97, 98, False, False)])
-                blocked = 'RETURN_ALREADY_OBSERVED: the price already came back; no delayed entry'
-                self.assertEqual(sp.build(selection(), market(d), o, lvl, asof_of(o)).reason, blocked)
-                r = sp.build(selection(candidate_selector=sp.CAND_EXPLICIT_ID, candidate_id=o.candidates[1].id), market(d), o, lvl, asof_of(o))
+                first, second = o.candidates
+                sole = sp.build(selection(), market(d), o, lvl, asof_of(o))
+                self.assertTrue(sole.plan_ready, sole.reason)
+                self.assertEqual((sole.candidate_id, sole.plan.e_out, sole.plan.s_out), (second.id, 99.0, 97.5) if d == 1 else (second.id, 97.0, 98.5))
+                by_id = sp.build(selection(candidate_selector=sp.CAND_EXPLICIT_ID, candidate_id=second.id), market(d), o, lvl, asof_of(o))
+                self.assertTrue(by_id.plan_ready, by_id.reason)
+                self.assertEqual(by_id.signal_id, sole.signal_id)
+                touched = sp.build(selection(candidate_selector=sp.CAND_EXPLICIT_ID, candidate_id=first.id), market(d), o, lvl, asof_of(o))
+                self.assertFalse(touched.plan_ready)
+                self.assertEqual(touched.reason, 'CANDIDATE_RETURN_ALREADY_OBSERVED: ' + first.id)
+
+    def test_a_touched_candidate_beside_two_untouched_ones_is_still_ambiguous(self):
+        for d in (1, -1):
+            with self.subTest(d=d):
+                o, lvl = self.drive(d, self.rows(d, self.TOUCH_FIRST))
+                first, second = o.candidates
+                third = replace(second, id=second.id.replace('19800', '20700'), lower=second.lower + 2 * d, upper=second.upper + 2 * d, confirmed=second.confirmed + 900)
+                o.candidates.append(third)
+                r = sp.build(selection(), market(d), o, lvl, asof_of(o) + 900)
                 self.assertFalse(r.plan_ready)
-                self.assertEqual(r.reason, blocked)
+                self.assertEqual(r.reason, 'AMBIGUOUS_CANDIDATES: %s,%s; none is chosen' % (second.id, third.id))
+
+    def test_only_touched_or_invalid_candidates_still_block_as_a_return(self):
+        for d in (1, -1):
+            with self.subTest(d=d):
+                o, lvl = self.drive(d, self.rows(d, self.TOUCH_FIRST))
+                o.candidates[1].invalid = True
+                r = sp.build(selection(), market(d), o, lvl, asof_of(o))
+                self.assertEqual(r.reason, 'RETURN_ALREADY_OBSERVED: the price already came back; no delayed entry')
 
 
 class Mutants(unittest.TestCase):
@@ -455,7 +481,7 @@ class Mutants(unittest.TestCase):
             sp.__dict__[k] = ns[k]
         try:
             suite = unittest.TestSuite()
-            for cls in (Plans, Unset, CandidatesAndPhases, Identities):
+            for cls in (Plans, Unset, CandidatesAndPhases, Identities, ReturnBeyondLevelAfterBos):
                 suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(cls))
             r = unittest.TestResult()
             suite.run(r)
@@ -466,7 +492,9 @@ class Mutants(unittest.TestCase):
     def test_mutants_are_caught(self):
         cases = [
             ('ambiguity takes the first candidate', [("        if len(eligible) > 1:\n            return _block('AMBIGUOUS_CANDIDATES", "        if False:\n            return _block('AMBIGUOUS_CANDIDATES")]),
-            ('a returned phase still builds', [("    if ob.phase == 'RETURN_ALREADY_OBSERVED_X':", "")] if False else [("    if ob.phase == 'RETURN_OBSERVED':\n        return _block('RETURN_ALREADY_OBSERVED", "    if False:\n        return _block('RETURN_ALREADY_OBSERVED")]),
+            ('a returned phase still builds', [("    if ob.phase == 'RETURN_ALREADY_OBSERVED_X':", "")] if False else [("    if ob.phase == 'RETURN_OBSERVED' and not any(not k.invalid and not k.returned for k in ob.candidates):\n        return _block('RETURN_ALREADY_OBSERVED", "    if False:\n        return _block('RETURN_ALREADY_OBSERVED")]),
+            ('the global return phase blocks again', [("    if ob.phase == 'RETURN_OBSERVED' and not any(not k.invalid and not k.returned for k in ob.candidates):", "    if ob.phase == 'RETURN_OBSERVED':")]),
+            ('a returned phase is not accepted', [("    if ob.phase not in ('WAIT_RETURN', 'RETURN_OBSERVED'):", "    if ob.phase != 'WAIT_RETURN':")]),
             ('invalid candidates are eligible', [("eligible = [k for k in ob.candidates if not k.invalid and not k.returned]", "eligible = [k for k in ob.candidates if not k.returned]")]),
             ('returned candidates are eligible', [("eligible = [k for k in ob.candidates if not k.invalid and not k.returned]", "eligible = [k for k in ob.candidates if not k.invalid]")]),
             ('historical candidates are signals', [("    if cand.confirmed <= sel.live_after:", "    if False:")]),

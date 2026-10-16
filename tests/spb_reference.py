@@ -3,7 +3,8 @@ no clock (asof and live_after are arguments), no order, no permit, no execution 
 geometry or sizing formulas (the plan comes from t007_planning_reference.build_plan) and it chooses NOTHING: every selection below is EXPLICIT and an unset one is a BLOCK with its name.
 
 Output: a plan (plan_ready) or ONE concrete blocking reason. A plan is NOT a trade permission: the permit checks and the entry executor are separate steps.
-WAIT_RETURN is the only phase that can yield a candidate for a PENDING order (the FVG exists and the price has not come back). RETURN_OBSERVED (a return already happened) never creates a delayed entry.
+Only an UNTOUCHED candidate can yield a PENDING order (the FVG exists and the price has not come back). RETURN_OBSERVED (a return to SOME candidate already happened) blocks while no valid untouched
+candidate is left; a touched candidate never creates a delayed entry.
 Identities are deterministic from the observer's own identities (never from a clock, a counter or the number of replays):
   setup_id  = 'S|' + context.source + '|' + context.setup + '|' + context.fvg + '|' + broken level id
   signal_id = setup_id + '|' + candidate id            (the candidate id already carries the time of its first candle and the direction)
@@ -138,9 +139,11 @@ def prepare(sel, mkt, ob, broken, asof):
         return _block('TIMING_MISMATCH: the observer policy differs from the selected timing')
     if ob.phase == 'REPLAY_REQUIRED':
         return _block('REPLAY_REQUIRED: a revised history never becomes a signal')
-    if ob.phase == 'RETURN_OBSERVED':
+    # RETURN_OBSERVED is global (any candidate touched); it blocks only when NO valid untouched candidate is left. A touched candidate stays refused below
+    # (EXPLICIT_ID: CANDIDATE_RETURN_ALREADY_OBSERVED; SOLE_ELIGIBLE: never eligible), so no delayed entry and no automatic choice between two untouched ones.
+    if ob.phase == 'RETURN_OBSERVED' and not any(not k.invalid and not k.returned for k in ob.candidates):
         return _block('RETURN_ALREADY_OBSERVED: the price already came back; no delayed entry')
-    if ob.phase != 'WAIT_RETURN':
+    if ob.phase not in ('WAIT_RETURN', 'RETURN_OBSERVED'):
         return _block('PHASE_NOT_WAIT_RETURN: ' + ob.phase)
     if ob.last_asof > asof or c.valid_from > asof or ob.bos_known > asof:
         return _block('FUTURE_DATA: the observer holds data newer than asof')
