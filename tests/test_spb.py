@@ -362,6 +362,69 @@ SCENARIOS = ['sell_plan', 'buy_plan', 'explicit_rules', 'unset_selections', 'sev
              'identity_stability', 'plan_refused', 'observer_untouched']
 
 
+class ReturnBeyondLevelAfterBos(unittest.TestCase):
+    """CURRENT behaviour, documented (2026-10-16, docs/EA_INTEGRATION_PLAN.md 'Korrigjim'); not a client rule and not an MT5 run.
+    After a recorded BOS the price closes back beyond the broken level and LATER forms an FVG on the near side of the level.
+    The observer has no check for that return: it CREATES the candidate (A is after the BOS bar); the bridge then REFUSES the plan
+    because the broken-level SL lies beyond the entry (SL_WRONG_SIDE). The refused candidate stays eligible, so a later valid FVG
+    gives AMBIGUOUS_CANDIDATES instead of a plan. SELL rows are the exact mirror of the BUY rows around the level 98."""
+    BUY = ((100, 94, 99), (99, 91, 92), (93, 90, 91), (95, 91.5, 95), (97, 94, 96.5))   # BOS on bar 0, back below 98 on bar 1, FVG [93,94] from bars 2-4
+    LATER = ((97.5, 94.5, 97), (98, 96.5, 97.8), (101, 97.5, 100.5), (103, 99, 102.5))   # back above the level, exactly one new FVG [98,99] from bars 6-8
+
+    def rows(self, d, extra=()):
+        r = self.BUY + extra
+        return r if d == 1 else tuple((196 - lo, 196 - h, 196 - c) for h, lo, c in r)
+
+    def drive(self, d, rows):
+        o = m4.Observer(m4.A_AT_OR_AFTER_BREAK)
+        o.set_context(context(d), START)
+        lvl = m4.Level('L-BUY' if d == 1 else 'L-SELL', 98.0, START)
+        for i, (h, lo, c) in enumerate(rows):
+            b = bar(i, h, lo, c)
+            o.step(b, b.time + 900, lvl if i == 0 else None)
+        return o, lvl
+
+    def test_the_observer_creates_a_candidate_on_the_near_side_of_the_broken_level(self):
+        for d in (1, -1):
+            with self.subTest(d=d):
+                o, lvl = self.drive(d, self.rows(d))
+                self.assertEqual((o.bos_time, o.bos_level, o.phase), (START, lvl.id, 'WAIT_RETURN'))
+                self.assertTrue(d * (self.rows(d)[1][2] - lvl.price) < 0)   # bar 1 closed back beyond the level
+                self.assertEqual(len(o.candidates), 1)
+                k = o.candidates[0]
+                self.assertEqual((k.lower, k.upper), (93, 94) if d == 1 else (102, 103))
+                self.assertFalse(k.invalid or k.returned)
+                self.assertTrue(k.upper < lvl.price if d == 1 else k.lower > lvl.price)   # the whole FVG is on the near side
+
+    def test_the_bridge_refuses_the_plan_with_sl_wrong_side(self):
+        for d in (1, -1):
+            for edge, e in ((sp.EDGE_NEAR_SIDE, 94 if d == 1 else 102), (sp.EDGE_FAR_SIDE, 93 if d == 1 else 103)):
+                with self.subTest(d=d, edge=edge):
+                    o, lvl = self.drive(d, self.rows(d))
+                    g, geo = sp.geometry(selection(entry_edge=edge), market(d), o, lvl, asof_of(o))   # the geometry pass the EA runs first (SPB_Geometry)
+                    self.assertEqual((g.e_raw, g.s_raw, geo), (e, 97.5 if d == 1 else 98.5, None))
+                    self.assertEqual(g.reason, 'GEOMETRY_REFUSED: SL is on the wrong side of the entry after normalization')   # geometry pass: text only
+                    r = sp.build(selection(entry_edge=edge), market(d), o, lvl, asof_of(o))
+                    self.assertFalse(r.plan_ready)
+                    self.assertEqual(r.reason, 'PLAN_REFUSED: GEOMETRY_REFUSED: geometry SL_WRONG_SIDE: SL is on the wrong side of the entry after normalization')
+
+    def test_the_refused_candidate_stays_eligible_and_a_later_valid_one_is_ambiguous(self):
+        for d in (1, -1):
+            with self.subTest(d=d):
+                o, lvl = self.drive(d, self.rows(d, self.LATER))
+                self.assertEqual(o.phase, 'WAIT_RETURN')
+                self.assertEqual([(k.lower, k.upper, k.invalid, k.returned) for k in o.candidates],
+                                 [(93, 94, False, False), (98, 99, False, False)] if d == 1 else [(102, 103, False, False), (97, 98, False, False)])
+                r = sp.build(selection(), market(d), o, lvl, asof_of(o))
+                self.assertFalse(r.plan_ready)
+                self.assertTrue(r.reason.startswith('AMBIGUOUS_CANDIDATES'), r.reason)
+                self.assertIn(o.candidates[0].id, r.reason)
+                self.assertIn(o.candidates[1].id, r.reason)
+                # the later candidate alone is a valid geometry: only the eligible refused one blocks it
+                alone = sp.build(selection(candidate_selector=sp.CAND_EXPLICIT_ID, candidate_id=o.candidates[1].id), market(d), o, lvl, asof_of(o))
+                self.assertTrue(alone.plan_ready, alone.reason)
+
+
 class Mutants(unittest.TestCase):
     def _run(self, pairs):
         src = _read('tests', 'spb_reference.py')
