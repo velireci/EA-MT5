@@ -44,6 +44,7 @@
 #define EV_PANEL_PREFIX  "velo_t016v_pnl_"
 #define EV_MAX_H4_FVG    4
 #define EV_MAX_M15_FVG   4
+#define EV_TIP_MAX       250     // a tooltip is clipped here; the facts that matter come first
 
 //--- the plan the chart keeps after the step that built it (the orchestrator keeps only geometry once a signal is handled)
 struct SEvPlan
@@ -448,11 +449,13 @@ private:
    color    m_clr[];
    int      m_prio[];
    int      m_sw[];
+   color    m_swc[];
    string   m_tip[];
    int      m_n;
    int      m_made;
    int      m_test_w;
    int      m_test_h;
+   int      m_tip_max;        // characters of a tooltip that the terminal keeps (measured once; EV_TIP_MAX at most)
 
    void Put(const string name,const ENUM_OBJECT type)
      {
@@ -469,6 +472,19 @@ private:
       TextSetFont("Consolas",-10*m_font,0,0);
       if(TextGetSize("MMMMMMMMMM",w,h) && w>0 && h>0) {m_char_px=(int)MathCeil(w/10.0); m_lh=(int)h+3;}
       else {m_char_px=(int)MathMax(6.0,MathCeil(m_font*0.95)); m_lh=m_font+8;}
+     }
+   //--- how many characters of a tooltip the terminal really keeps: set 400, read back; a clipped tooltip then loses its tail, never its start
+   void MeasureTip(void)
+     {
+      string probe=m_prefix+"probe";
+      m_tip_max=EV_TIP_MAX;
+      if(!ObjectCreate(m_chart,probe,OBJ_LABEL,0,0,0)) {ResetLastError(); return;}
+      string t="";
+      while(StringLen(t)<400) t+="0123456789";
+      ObjectSetString(m_chart,probe,OBJPROP_TOOLTIP,t);
+      int kept=StringLen(ObjectGetString(m_chart,probe,OBJPROP_TOOLTIP));
+      ObjectDelete(m_chart,probe);
+      if(kept>=40 && kept<m_tip_max) m_tip_max=kept;
      }
    int  TextWidth(const string text)
      {
@@ -494,16 +510,30 @@ private:
       Fill(name+"o",x,y,w,h,c,c);
       Fill(name+"i",x+thick,y+thick,w-2*thick,h-2*thick,m_bgc,m_bgc);
      }
-   void Glyph(const string name,const int x,const int y,const int code,const color c)
+   //--- a small filled square used as a dot (stable on every machine: no symbol font, no code point)
+   void Dot(const string name,const int x,const int y,const int d,const color c)
      {
-      Put(name,OBJ_LABEL);
-      ObjectSetInteger(m_chart,name,OBJPROP_ANCHOR,ANCHOR_LEFT_UPPER);
-      ObjectSetInteger(m_chart,name,OBJPROP_XDISTANCE,x);
-      ObjectSetInteger(m_chart,name,OBJPROP_YDISTANCE,y);
-      ObjectSetInteger(m_chart,name,OBJPROP_FONTSIZE,m_font+1);
-      ObjectSetString(m_chart,name,OBJPROP_FONT,"Wingdings");
-      ObjectSetString(m_chart,name,OBJPROP_TEXT,ShortToString((ushort)code));
-      ObjectSetInteger(m_chart,name,OBJPROP_COLOR,c);
+      Fill(name,x,y,d,d,c,c);
+     }
+   //--- an arrow made of rectangles: a stem and a three-row head
+   void Arrow(const string n,const int x,const int y,const bool down,const color c)
+     {
+      int stem=(int)MathMax(4.0,(double)(m_lh-14));
+      int ty=y+2;
+      if(down)
+        {
+         Fill(n+"a0",x+4,ty,3,stem,c,c);
+         Fill(n+"a1",x,ty+stem,11,2,c,c);
+         Fill(n+"a2",x+2,ty+stem+2,7,2,c,c);
+         Fill(n+"a3",x+4,ty+stem+4,3,2,c,c);
+        }
+      else
+        {
+         Fill(n+"a1",x+4,ty,3,2,c,c);
+         Fill(n+"a2",x+2,ty+2,7,2,c,c);
+         Fill(n+"a3",x,ty+4,11,2,c,c);
+         Fill(n+"a0",x+4,ty+6,3,stem,c,c);
+        }
      }
    void Swatch(const int kind,const int row,const int x,const int y,const color dir_clr)
      {
@@ -526,7 +556,7 @@ private:
             for(int k=0;k<3;k++) Fill(n+"d"+IntegerToString(k),x+k*(int)(u*0.55),ly,(int)(u*0.35),2,clrSilver,clrSilver);
            }
          else Fill(n+"d0",x,ly,(int)(u*1.6),2,clrWhite,clrWhite);
-         Glyph(n+"g",x+(int)(u*1.65),y+1,159,(kind==SW_SWEEP ? clrSilver : clrWhite));
+         Dot(n+"g",x+(int)(u*1.65),y+u/2-3,6,(kind==SW_SWEEP ? clrSilver : clrWhite));
         }
       else if(kind==SW_PLAN)
         {
@@ -536,8 +566,8 @@ private:
          Fill(n+"r",x+(int)(u*1.4),ly,(int)(u*0.55),3,clrLimeGreen,clrLimeGreen);
          Fill(n+"t",x+(int)(u*2.1),ly,(int)(u*0.55),3,clrLimeGreen,clrLimeGreen);
         }
-      else if(kind==SW_ARROW_DOWN) Glyph(n+"g",x,y,234,dir_clr);
-      else if(kind==SW_ARROW_UP) Glyph(n+"g",x,y,233,dir_clr);
+      else if(kind==SW_ARROW_DOWN) Arrow(n,x,y,true,dir_clr);
+      else if(kind==SW_ARROW_UP) Arrow(n,x,y,false,dir_clr);
      }
 
 public:
@@ -555,7 +585,9 @@ public:
       m_made=0;
       m_test_w=0;
       m_test_h=0;
+      m_tip_max=EV_TIP_MAX;
      }
+   int  TipMax(void) const {return(m_tip_max);}
    void Init(const string prefix,const int font,const int gutter_x10)
      {
       m_prefix=prefix;
@@ -566,23 +598,26 @@ public:
       m_made=0;
       Metrics();
       ObjectsDeleteAll(m_chart,m_prefix);
+      MeasureTip();
      }
    void TestSize(const int w,const int h) {m_test_w=w; m_test_h=h;}
    int  LineHeight(void) {Metrics(); return(m_lh);}
    void Begin(void) {m_n=0;}
    //--- text with the ~ markers; swatch kind SW_*; tip = the long explanation (hover); priority as in EV_Select
-   void Line(const string text,const color clr,const int priority,const int swatch=0,const string tip="")
+   void Line(const string text,const color clr,const int priority,const int swatch=0,const string tip="",const color swatch_clr=clrNONE)
      {
       ArrayResize(m_text,m_n+1);
       ArrayResize(m_clr,m_n+1);
       ArrayResize(m_prio,m_n+1);
       ArrayResize(m_sw,m_n+1);
+      ArrayResize(m_swc,m_n+1);
       ArrayResize(m_tip,m_n+1);
       m_text[m_n]=EV_T(text);
       m_clr[m_n]=clr;
       m_prio[m_n]=priority;
       m_sw[m_n]=swatch;
-      m_tip[m_n]=EV_T(tip);
+      m_swc[m_n]=(swatch_clr==clrNONE ? clr : swatch_clr);      // the symbol keeps ITS colour (e.g. the H4 direction), whatever the colour of the text
+      m_tip[m_n]=EV_T(EV_Clip(tip,m_tip_max));
       m_n++;
      }
    //--- draws the lines that fit; returns the pixel height of the box. from_bottom: the box sits on the lower edge of the chart, else its top is top_px.
@@ -651,7 +686,7 @@ public:
          ObjectSetInteger(m_chart,name,OBJPROP_COLOR,rclr[i]);
          // the swatch sits beside the FIRST row of its line
          if(rline[i]>=0 && m_sw[rline[i]]!=SW_NONE && (i==0 || rline[i-1]!=rline[i]))
-            Swatch(m_sw[rline[i]],i,6+m_pad,ry,rclr[i]);
+            Swatch(m_sw[rline[i]],i,6+m_pad,ry,m_swc[rline[i]]);
         }
       for(int i=nr;i<m_made;i++)
         {
@@ -668,6 +703,29 @@ public:
       m_n=0;
      }
   };
+
+//--- a digest of everything the marks are drawn from (the content, not only the counts): two snapshots that differ in the direction, a level, an event or a zone must redraw
+string EV_Px(const double v) {return(MathIsValidNumber(v) ? DoubleToString(v,8) : "n");}
+string EV_FeedSig(const CEoFeed &feed)
+  {
+   string g="";
+   if(feed.dv_have)
+     {
+      g+="H4|"+IntegerToString(feed.dv_ev.st.dir)+"|"+IntegerToString(feed.dv_ev.st.phase)+"|"+feed.dv_ev.st.setup_id+"|"+feed.dv_ev.st.setup_type+"|"+IntegerToString((long)feed.dv_ev.st.sweep_time)+"|"+
+         IntegerToString((long)feed.dv_ev.st.wk_src)+"|"+EV_Px(feed.dv_ev.st.snap_price)+"|"+IntegerToString((long)feed.dv_ev.st.snap_known)+"|"+feed.dv_ev.st.rec_id+"|"+IntegerToString(feed.dv_n)+"|"+(feed.dv_ev.reliable ? "1" : "0")+";";
+      for(int i=0;i<ArraySize(feed.dv_tracks);i++)
+         g+=feed.dv_tracks[i].id+","+EV_Px(feed.dv_tracks[i].lower)+","+EV_Px(feed.dv_tracks[i].upper)+","+IntegerToString((long)feed.dv_tracks[i].time_a)+","+IntegerToString((long)feed.dv_tracks[i].conf)+","+(feed.dv_tracks[i].invalid ? "1" : "0")+";";
+      for(int j=0;j<ArraySize(feed.dv_events);j++)
+         g+=IntegerToString(feed.dv_events[j].type)+","+IntegerToString((long)feed.dv_events[j].bar_time)+","+feed.dv_events[j].ref+","+feed.dv_events[j].detail+";";
+     }
+   if(feed.dv_have && feed.dv_n>0 && ArraySize(feed.hbars)>=feed.dv_n)
+      g+="|bar|"+IntegerToString((long)feed.hbars[feed.dv_n-1].time)+","+EV_Px(feed.hbars[feed.dv_n-1].high)+","+EV_Px(feed.hbars[feed.dv_n-1].low)+","+EV_Px(feed.hbars[feed.dv_n-1].close);
+   g+="|M15|"+IntegerToString(feed.st.context.direction)+"|"+feed.st.context.setup+"|"+IntegerToString((long)feed.st.bos_time)+"|"+feed.st.bos_level+"|"+(feed.broken.valid ? "1" : "0")+","+feed.broken.id+","+
+      EV_Px(feed.broken.price)+","+IntegerToString((long)feed.broken.known)+";";
+   for(int k=0;k<ArraySize(feed.f);k++)
+      g+=feed.f[k].id+","+EV_Px(feed.f[k].lower)+","+EV_Px(feed.f[k].upper)+","+IntegerToString((long)feed.f[k].confirmed)+","+(feed.f[k].returned ? "1" : "0")+","+(feed.f[k].invalid ? "1" : "0")+";";
+   return(g);
+  }
 
 class CEoView
   {
@@ -979,18 +1037,18 @@ private:
       if(feed.dv_have)
         {
          bool has_setup=(feed.dv_ev.st.dir!=H3_NONE && feed.dv_ev.st.setup_id!="");
-         string h4tip=EV_H4PhaseText(feed.dv_ev.st.phase,has_setup)+(feed.dv_ev.reliable ? "" : ". Historia H4 nuk konvergon: drejtimi eshte i pasigurt ("+feed.dv_ev.reason+")")+". Drejtimi: "+EV_H4DirectionText(h4dir);
+         string h4tip=EV_H4DirectionText(h4dir)+". "+EV_H4PhaseText(feed.dv_ev.st.phase,has_setup)+(feed.dv_ev.reliable ? "" : ". Historia H4 nuk konvergon ("+feed.dv_ev.reason+")");
          m_panel.Line("H4: "+EV_DirWord(h4dir)+" | "+EV_H4Short(feed.dv_ev.st.phase,has_setup,feed.dv_ev.reliable),(feed.dv_ev.st.phase==H3_PH_RECONFIRMED ? clrLimeGreen : clrWhite),1,
-                      (h4dir==H3_BEAR ? SW_ARROW_DOWN : (h4dir==H3_BULL ? SW_ARROW_UP : SW_NONE)),h4tip);
+                      (h4dir==H3_BEAR ? SW_ARROW_DOWN : (h4dir==H3_BULL ? SW_ARROW_UP : SW_NONE)),h4tip,dcol);
         }
       else m_panel.Line("H4: pa vler~esim",grey,1,SW_NONE,"Nuk ka vleresim T003 per kete grafik (feed jo gati ose burimi nuk eshte T003).");
       //--- M15: a short state; what is confirmed and what is missing is in the tooltip
       string done="",missing="";
-      if(feed.st.has_context) done+="setup H4 i rikonfirmuar";
-      else missing+="setup H4 i rikonfirmuar";
+      if(feed.st.has_context) done+="H4";
+      else missing+="H4 rikonfirmim";
       if(feed.st.has_context && feed.st.bos_time>0)
-         done+="; thyerje M15 "+StringSubstr(EV_Hm(feed.st.bos_time),11)+(feed.broken.valid && feed.broken.id==feed.st.bos_level ? " @"+EV_Price(feed.broken.price,m_digits) : "");
-      else missing+=(missing=="" ? "" : "; ")+"thyerja e nivelit M15";
+         done+=(done=="" ? "" : "; ")+"thyerje M15 "+StringSubstr(EV_Hm(feed.st.bos_time),11)+(feed.broken.valid && feed.broken.id==feed.st.bos_level ? " @"+EV_Price(feed.broken.price,m_digits) : "");
+      else missing+=(missing=="" ? "" : "; ")+"thyerje M15";
       int nvalid=0;
       bool returned=false;
       for(int i=0;i<ArraySize(feed.f);i++)
@@ -999,19 +1057,18 @@ private:
          nvalid++;
          if(feed.f[i].returned) returned=true;
         }
-      if(feed.st.has_context && feed.st.bos_time>0 && nvalid>0) done+="; FVG M15 ("+IntegerToString(nvalid)+")"+(out.spb.candidate_id!="" ? ", zgjedhur nga plani" : "");
-      else missing+=(missing=="" ? "" : "; ")+"FVG M15 pas thyerjes";
-      if(returned) done+="; cmimi u kthye ne FVG";
-      else missing+=(missing=="" ? "" : "; ")+"kthimi i cmimit ne FVG";
+      if(feed.st.has_context && feed.st.bos_time>0 && nvalid>0) done+=(done=="" ? "" : "; ")+"FVG M15 x"+IntegerToString(nvalid)+(out.spb.candidate_id!="" ? " (zgjedhur)" : "");
+      else missing+=(missing=="" ? "" : "; ")+"FVG M15";
+      if(returned) done+=(done=="" ? "" : "; ")+"kthim n~e FVG";
+      else missing+=(missing=="" ? "" : "; ")+"kthim n~e FVG";
       m_panel.Line("M15: "+EV_M15Short(feed.st.phase,feed.st.has_context),(feed.st.has_context ? clrWhite : grey),1,SW_NONE,
-                   EV_M15PhaseText(feed.st.phase,feed.st.has_context)+". Konfirmuar: "+(done=="" ? "asgje ende" : done)+". Mungon: "+(missing=="" ? "asgje" : missing)+".");
+                   "Konfirmuar: "+(done=="" ? "asgje" : done)+". Mungon: "+(missing=="" ? "asgje" : missing)+".");
       //--- the plan, when one exists: short rows
       if(m_plan.have)
         {
          string mode=(m_plan.real ? "REAL (DEMO)" : "FAKE (virtuale)");
          color pcol=(m_plan.direction==1 ? clrDodgerBlue : clrDarkOrange);
-         string ptip="Sinjali "+m_plan.signal_id+" | modaliteti: "+mode+(out.risk_label!="" ? " | risku: "+out.risk_label+" = 1% e balances" : "")+
-                     ". Hyrja LIMIT ne skaj te FVG = konfirmuar nga klienti; SL, TP/2R dhe risku 1% = zgjedhje e perkohshme e prototipit.";
+         string ptip="modaliteti: "+mode+" | sinjali "+m_plan.signal_id+(out.risk_label!="" ? " | "+out.risk_label+" 1%" : "")+". Hyrja = konfirmuar; SL, TP/2R, risku = prototip.";
          m_panel.Line("PLAN "+EV_DirectionText(m_plan.direction)+" LIMIT | E "+EV_Price(m_plan.entry,m_digits),pcol,1,SW_NONE,ptip);
          m_panel.Line("SL "+EV_Price(m_plan.sl,m_digits)+" | "+(m_plan.tp_is_2r ? "TP = 2R " : "2R "+EV_Price(m_plan.level_2r,m_digits)+" | TP ")+EV_Price(m_plan.tp,m_digits),pcol,1,SW_NONE,ptip);
          m_panel.Line("Lot "+DoubleToString(m_plan.volume,2)+" | Risk "+DoubleToString(m_plan.risk,2),grey,2,SW_NONE,ptip);
@@ -1033,8 +1090,7 @@ private:
          else if(out.status=="RESERVATION_FAILED") tiny="rezervim";
         }
       m_panel.Line("Vendimi: "+label+(tiny!="" ? " | "+tiny : ""),EV_VerdictColor(label),0,SW_NONE,reason+" [kodi: "+out.status+" "+EV_Clip(out.reason,60)+"]");
-      m_panel.Line("Prototip ~m jo i validuar",grey,3,SW_NONE,
-                   "Konfirmuar nga klienti: hyrja LIMIT n~e skaj t~e FVG, seanca, lajmet, kufijt~e ditor~e. E p~erkohshme (prototip): burimi H4, niveli M15 i thyer, zgjedhja e FVG, SL, TP/2R, risku 1%.");
+      m_panel.Line("Prototip ~m jo i validuar",grey,3,SW_NONE,"Konfirmuar: hyrja LIMIT, seanca, lajmet, limitet. Prototip: burimi H4, niveli M15, FVG, SL, TP/2R, risku 1%.");
       m_panel.Render(main_rows,16,false);
      }
 
@@ -1052,6 +1108,7 @@ public:
    //--- MT5 test only: simulate a chart of this size for the boxes (0, 0 = the real chart)
    void TestSize(const int w,const int h) {m_test_h=h; m_panel.TestSize(w,h); m_legend.TestSize(w,h);}
    int  MarkCount(void) const {return(m_n_objects);}
+   int  TipMax(void) const {return(m_panel.TipMax());}
    void Init(void)
      {
       m_on=true;
@@ -1066,9 +1123,9 @@ public:
      {
       if(!m_on) return;
       TrackPlan(out,feed,real_entry);
-      string sig=out.status+"|"+out.reason+"|"+EV_Hm(feed.cut)+"|"+feed.st.phase+"|"+feed.st.bos_level+"|"+out.spb.candidate_id+"|"+
-                 (m_plan.have ? EV_Price(m_plan.entry,m_digits)+EV_Price(m_plan.sl,m_digits)+EV_Price(m_plan.tp,m_digits)+m_plan.signal_id : "-")+"|"+IntegerToString(ArraySize(feed.f))+"|"+
-                 (feed.dv_have ? IntegerToString(feed.dv_ev.st.phase)+feed.dv_ev.st.setup_id+IntegerToString(ArraySize(feed.dv_tracks)) : "-");
+      string sig=out.status+"|"+out.reason+"|"+EV_Hm(feed.cut)+"|"+feed.st.phase+"|"+out.spb.candidate_id+"|"+
+                 (m_plan.have ? IntegerToString(m_plan.direction)+","+EV_Px(m_plan.entry)+","+EV_Px(m_plan.sl)+","+EV_Px(m_plan.tp)+","+EV_Px(m_plan.level_2r)+","+(m_plan.tp_is_2r ? "1" : "0")+","+m_plan.signal_id : "-")+"|"+
+                 EV_FeedSig(feed);
       if(sig!=m_signature)
         {
          m_signature=sig;

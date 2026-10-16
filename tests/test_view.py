@@ -101,7 +101,7 @@ class ViewIsReadOnly(unittest.TestCase):
             n = m.group(1)
             if n == 'const string name':
                 continue
-            self.assertTrue(n.startswith('EV_PREFIX+'), n)
+            self.assertTrue(n.startswith('EV_PREFIX+') or n.startswith('n+"'), n)      # n+ = a swatch of a box: its name starts with the box prefix
         self.assertIn('#define EV_PREFIX        "velo_t016v_"', RAW)
         for m in re.finditer(r'ObjectsDeleteAll\(([^)]*)\)', VIEW):
             self.assertIn(m.group(1), ('m_chart,EV_PREFIX', 'm_chart,m_prefix', 'm_chart,m_prefix+"s"'), m.group(0))
@@ -133,7 +133,7 @@ class ViewIsReadOnly(unittest.TestCase):
             self.assertIsNone(re.search(r'(?:\.id|signal_id|bos_level|setup_id|dg_reason|out\.reason|out\.status|\.reason)\b', row), 'a technical id or code in a panel ROW: ' + row)
             for lit in re.findall(r'"([^"]*)"', row):
                 self.assertLessEqual(len(lit), 40, 'a long sentence in a panel row (it belongs in the tooltip): ' + lit)
-        self.assertIn('string ptip="Sinjali "+m_plan.signal_id', PANEL, 'the signal id is in a tooltip')
+        self.assertIn('m_plan.signal_id', re.search(r'string ptip=(.*?);\n', PANEL).group(1), 'the signal id is in a tooltip')
         self.assertIn('[kodi: "+out.status+" "+EV_Clip(out.reason,60)+"]', PANEL, 'the technical status and reason are in the tooltip of the decision row')
         self.assertIn('"FVG M15 "+state+" "+EV_Price(feed.f[i].lower,m_digits)+" - "+EV_Price(feed.f[i].upper,m_digits)+" | "+feed.f[i].id', VIEW, 'the id is in the tooltip')
 
@@ -251,12 +251,15 @@ class TheMarksFollowTheRules(unittest.TestCase):
             self.assertGreaterEqual(len(a), 5, 'every legend row explains itself in a tooltip')
             self.assertGreater(len(a[4]), 30)
         box = VIEW[VIEW.index('class CEvBox'):VIEW.index('class CEoView')]
-        for needle in ('OBJ_RECTANGLE_LABEL', 'OBJ_LABEL', '"Wingdings"', 'Outline(n+"a"', 'clrDodgerBlue', 'clrDarkOrange', 'clrSilver', 'clrGold', 'clrRed', 'clrLimeGreen'):
+        for needle in ('OBJ_RECTANGLE_LABEL', 'OBJ_LABEL', 'Outline(n+"a"', 'clrDodgerBlue', 'clrDarkOrange', 'clrSilver', 'clrGold', 'clrRed', 'clrLimeGreen'):
             self.assertIn(needle, box, needle)
-        self.assertIn('Glyph(n+"g",x+(int)(u*1.65),y+1,159,', box, 'the legend dot is the same Wingdings 159 as the dot on the chart')
-        self.assertIn('ObjectSetInteger(m_chart,name,OBJPROP_ARROWCODE,159);', VIEW)
-        self.assertIn('Glyph(n+"g",x,y,234,dir_clr)', box)
-        self.assertIn('Glyph(n+"g",x,y,233,dir_clr)', box)
+        self.assertIn('Dot(n+"g",x+(int)(u*1.65),y+u/2-3,6,', box, 'the legend dot is a small filled graphic square')
+        self.assertIn('Arrow(n,x,y,true,dir_clr)', box)
+        self.assertIn('Arrow(n,x,y,false,dir_clr)', box)
+        self.assertNotIn('Wingdings', VIEW, 'no symbol font: the legend dots showed as boxes in the screenshot (code point 159 is a control character)')
+        self.assertNotIn('ShortToString((ushort)code)', VIEW)
+        self.assertNotIn('void Glyph(', VIEW)
+        self.assertIn('ObjectSetInteger(m_chart,name,OBJPROP_ARROWCODE,159);', VIEW, 'the dot ON THE CHART is the terminal\'s own OBJ_ARROW code 159, drawn by the terminal, not a font glyph')
         self.assertIn('m_legend.Render(', PANEL)
 
     def test_no_emoji_and_no_non_ascii_glyph_in_the_source_the_letters_come_from_code_points(self):
@@ -287,18 +290,18 @@ class ConfirmedAndTemporaryWordsEqualThePresetLabels(unittest.TestCase):
         lab = self.labels()
         panel = PANEL
         pp = plain(panel)
-        conf = re.search(r'"Konfirmuar nga klienti: ([^"]+)"', pp).group(1)
-        temp = re.search(r'E perkohshme \(prototip\): ([^"]+)"', pp).group(1)
-        for word, key in (('hyrja LIMIT ne skaj te FVG', 'InpEntryEdge'), ('seanca', 'InpSessionClock'), ('lajmet', 'InpNewsCalendar'), ('kufijte ditore', 'InpMaxPositions')):
+        note = re.search(r'"Konfirmuar: ([^"]+)"', pp).group(1)
+        conf, temp = note.split(' Prototip: ')
+        for word, key in (('hyrja LIMIT', 'InpEntryEdge'), ('seanca', 'InpSessionClock'), ('lajmet', 'InpNewsCalendar'), ('limitet', 'InpMaxPositions')):
             self.assertIn(word, conf)
             self.assertEqual(lab[key], 'CONFIRMED', key)
-        for word, key in (('burimi H4', 'InpContextSource'), ('niveli M15 i thyer', 'InpM15Level'), ('zgjedhja e FVG', 'InpCandidate'), ('SL', 'InpSlRule'), ('TP/2R', 'InpTargetRule'), ('risku 1%', 'InpRiskSource')):
+        for word, key in (('burimi H4', 'InpContextSource'), ('niveli M15', 'InpM15Level'), ('FVG', 'InpCandidate'), ('SL', 'InpSlRule'), ('TP/2R', 'InpTargetRule'), ('risku 1%', 'InpRiskSource')):
             self.assertIn(word, temp)
             self.assertEqual(lab[key], 'DEMO-PROPOSAL', key)
 
     def test_the_risk_line_names_the_simulation_policy(self):
         panel = PANEL
-        self.assertIn('(out.risk_label!="" ? " | risku: "+out.risk_label+" = 1% e balances" : "")', panel)
+        self.assertIn('(out.risk_label!="" ? " | "+out.risk_label+" 1%" : "")', panel)
 
 
 class TheViewDoesNotChangeTheDecision(unittest.TestCase):
@@ -404,6 +407,73 @@ class CodexReviewRegressions(unittest.TestCase):
             self.assertIn(needle, TEST_RAW, needle)
 
 
+class MT5FailuresOfTheLastRound(unittest.TestCase):
+    """the owner's MT5 round of 8cf59e2 (363 passed / 16 failed) and the Codex findings: the arrow colour, the stale signature, the M15 tooltip, the legend dots"""
+
+    def test_1_the_symbol_keeps_its_own_colour(self):
+        box = VIEW[VIEW.index('class CEvBox'):VIEW.index('class CEoView')]
+        self.assertIn('const string tip="",const color swatch_clr=clrNONE)', box)
+        self.assertIn('m_swc[m_n]=(swatch_clr==clrNONE ? clr : swatch_clr);', box)
+        self.assertIn('Swatch(m_sw[rline[i]],i,6+m_pad,ry,m_swc[rline[i]]);', box, 'the swatch gets the colour of the symbol, not of the row text (rclr)')
+        self.assertNotIn('Swatch(m_sw[rline[i]],i,6+m_pad,ry,rclr[i]);', box)
+        h4 = [a for a in call_args(PANEL, 'm_panel.Line') if a[0].startswith('"H4: "+EV_DirWord')]
+        self.assertEqual(len(h4), 1)
+        self.assertEqual(h4[0][-1], 'dcol', 'the H4 row passes the direction colour to the arrow')
+        self.assertIn('color dcol=(h4dir==H3_BULL ? clrDodgerBlue : (h4dir==H3_BEAR ? clrDarkOrange : clrWhite));', PANEL)
+
+    def test_2_the_signature_covers_the_direction_and_the_content_of_what_is_drawn(self):
+        sig = fn('string EV_FeedSig', 'class CEoView')
+        for needle in ('feed.dv_ev.st.dir', 'feed.dv_ev.st.setup_type', 'feed.dv_ev.st.sweep_time', 'feed.dv_ev.st.wk_src', 'feed.dv_ev.st.snap_price', 'feed.dv_ev.st.rec_id',
+                       'feed.dv_tracks[i].lower', 'feed.dv_tracks[i].upper', 'feed.dv_tracks[i].invalid', 'feed.dv_events[j].ref', 'feed.dv_events[j].detail', 'feed.dv_events[j].bar_time',
+                       'feed.broken.price', 'feed.f[k].lower', 'feed.f[k].upper', 'feed.f[k].returned', 'feed.f[k].invalid', 'feed.st.context.direction', 'feed.hbars[feed.dv_n-1]'):
+            self.assertIn(needle, sig, needle)
+        upd = VIEW[VIEW.index('void Update('):VIEW.index('void Destroy(void)', VIEW.index('void Update('))]
+        self.assertIn('EV_FeedSig(feed)', upd)
+        self.assertNotIn('IntegerToString(ArraySize(feed.f))', upd, 'a count is not a signature')
+        self.assertIn('IntegerToString(m_plan.direction)+","+EV_Px(m_plan.entry)', upd)
+
+    def test_3_the_tooltips_that_carry_a_fact_are_short_and_the_clip_follows_the_measured_limit(self):
+        self.assertIn('#define EV_TIP_MAX       250', RAW)
+        self.assertIn('m_tip[m_n]=EV_T(EV_Clip(tip,m_tip_max));', VIEW)
+        self.assertIn('if(kept>=40 && kept<m_tip_max) m_tip_max=kept;', VIEW)
+        calls = call_args(PANEL, 'm_panel.Line')
+        m15 = [a for a in calls if a[0].startswith('"M15: "')]
+        self.assertEqual(len(m15), 1)
+        tip = m15[0][4]
+        self.assertLess(tip.index('"Konfirmuar: "'), tip.index('". Mungon: "'))
+        self.assertNotIn('EV_M15PhaseText', tip, 'the M15 tooltip is only the two lists: the owner\'s MT5 round lost the tail of the long one (6 of 8 scenarios)')
+        # the literal text of every tooltip that a test reads must stay short enough for a terminal that keeps about 127 characters
+        note = [a for a in calls if 'Prototip ~m' in a[0]][0][4]
+        self.assertLessEqual(len(plain(note)), 115)
+        ptip = re.search(r'string ptip=(.*?);\n', PANEL).group(1)
+        self.assertTrue(ptip.startswith('"modaliteti: "+mode'), 'the request mode comes first in the plan tooltip')
+
+    def test_4_no_symbol_font_anywhere_in_the_boxes(self):
+        self.assertNotIn('Wingdings', VIEW)
+        self.assertNotIn('Glyph(', VIEW)
+        box = VIEW[VIEW.index('class CEvBox'):VIEW.index('class CEoView')]
+        arrow = box[box.index('void Arrow('):box.index('void Swatch(')]
+        self.assertEqual(arrow.count('Fill(n+"a'), 8, 'the arrow is made of rectangles (stem + three-row head, both directions)')
+        self.assertIn('Fill(name,x,y,d,d,c,c);', box)
+
+    def test_5_the_mt5_test_prints_the_real_row_tooltip_and_chart_on_every_fail_and_keeps_the_same_instance_flip(self):
+        self.assertIn('void Check(const bool ok,const string message,const string detail="")', TEST)
+        self.assertIn('Print("     detail: ",detail);', TEST)
+        self.assertIn('Print("     chart : ",g_ctx);', TEST)
+        self.assertIn('string RowInfo(', TEST)
+        self.assertIn('"row \'"+ObjectGetString(0,n,OBJPROP_TEXT)+"\' | tooltip("', TEST_RAW)
+        self.assertEqual(len(re.findall(r'RowInfo\(main,"M15:"\)', TEST)), 5, 'every M15 tooltip check prints the row and the tooltip it saw')
+        flip = TEST[TEST.index('void TestSameInstanceFlip'):TEST.index('void TestRequestMode')]
+        self.assertIn('view.Update(o1,sell,false,true);', flip)
+        self.assertIn('view.Update(o2,buy,false,true);', flip)
+        self.assertEqual(flip.count('CEoView'), 1, 'one view instance: a fresh one would hide the stale marks')
+        self.assertIn('same time, phase, setup id', TEST_RAW)
+        start = TEST[TEST.index('void OnStart()'):]
+        self.assertLess(start.index('TestRequestMode(view);'), start.index('TestSameInstanceFlip(view);'))
+        self.assertIn('RunScenario(view,-1,KIND_WAIT_CONTEXT', start)
+        self.assertLess(start.index('RunScenario(view,-1,KIND_WAIT_CONTEXT'), start.index('RunScenario(view,1,KIND_WAIT_CONTEXT'), 'the sequential SELL -> BUY scenarios on one instance stay')
+
+
 class TheSyntheticMt5Test(unittest.TestCase):
     def test_it_is_a_labelled_synthetic_script_that_touches_nothing_but_the_view(self):
         self.assertIn('SYNTHETIC', TEST_RAW)
@@ -416,7 +486,7 @@ class TheSyntheticMt5Test(unittest.TestCase):
         for w in ('OnTick', 'OnTimer'):
             self.assertNotIn(w, TEST)
         deleted = re.findall(r'ObjectDelete\(0,([^)]*)\)', TEST)
-        self.assertEqual(sorted(set(deleted)), ['"MANUAL_VIEW_TEST_LINE"', 'banner'])
+        self.assertEqual(sorted(set(deleted)), ['"MANUAL_VIEW_TEST_LINE"', 'banner', 'name'])
 
     def test_it_covers_the_requested_scenarios_and_the_assertions_of_the_requested_criteria(self):
         for scen in ('WAIT_CONTEXT SELL', 'WAIT_CONTEXT BUY', 'BUY accepted, TP = 2R', 'SELL accepted, TP = 2R', 'BUY accepted, TP beyond 2R', 'SELL accepted, TP beyond 2R',
@@ -425,7 +495,8 @@ class TheSyntheticMt5Test(unittest.TestCase):
         for needle in ('SIMULIM ~b PA URDHRA REAL~E', 'Vendimi: PRET', 'Vendimi: BLLOKUAR', 'Vendimi: KERKESE VIRTUALE', 'Vendimi: KERKESE REALE', 'CountGoldZones()==1', 'CountGoldZones()==0', 'no entry arrow',
                        'the manual drawing is untouched', 'Thyerje M15', 'NUK eshte MSS', 'TP = 2R ', 'no M15 level, no zone, no plan line is invented', 'trajtuar me pare',
                        'the swept level is dashed', 'the legend names every kind of mark', 'wide chart 1400 x 800', 'narrow chart 380 x 520', 'short chart 900 x 300', 'no text is cut',
-                       'do not overlap', 'Wingdings', 'the panel is short', 'legend swatch H4', 'down (SELL) or up (BUY) arrow glyph'):
+                       'do not overlap', 'the panel is short', 'legend swatch H4', 'DIRECTION colour', 'the arrow points down for SELL', 'small filled graphic squares', 'same instance',
+                       'TOOLTIP PROBE', 'detail: ', 'chart : '):
             self.assertIn(needle, TEST_RAW, needle)
 
     def test_the_scenario_names_exist_for_the_screenshots_and_the_hold_is_off_by_default(self):

@@ -23,10 +23,17 @@
 input int InpHoldSeconds=0;         // seconds each scenario stays on the chart (for screenshots); 0 = run the assertions only
 
 int g_pass=0,g_fail=0;
-void Check(const bool ok,const string message)
+string g_ctx="";                    // what is on the chart right now (the rows and tooltips of the boxes), printed with every FAIL
+void Check(const bool ok,const string message,const string detail="")
   {
    if(ok) {g_pass++; Print("PASS ",message);}
-   else {g_fail++; Print("FAIL ",message);}
+   else
+     {
+      g_fail++;
+      Print("FAIL ",message);
+      if(detail!="") Print("     detail: ",detail);
+      if(g_ctx!="") Print("     chart : ",g_ctx);
+     }
   }
 
 bool Exists(const string name) {return(ObjectFind(0,name)>=0);}
@@ -107,6 +114,31 @@ string TipOfRow(const string prefix,const string start)
    return(n=="" ? "" : ObjectGetString(0,n,OBJPROP_TOOLTIP));
   }
 string T(const string marked) {return(EV_T(marked));}
+//--- the real text and the real tooltip of the row that starts with a string (for the detail of a FAIL)
+string RowInfo(const string prefix,const string start)
+  {
+   string n=RowName(prefix,start);
+   if(n=="") return("no row starts with '"+start+"'");
+   string tip=ObjectGetString(0,n,OBJPROP_TOOLTIP);
+   return("row '"+ObjectGetString(0,n,OBJPROP_TEXT)+"' | tooltip("+IntegerToString(StringLen(tip))+" chars)='"+tip+"'");
+  }
+//--- every row of both boxes with the length of its tooltip
+string DumpBoxes(void)
+  {
+   string all="";
+   string prefixes[2]={EV_PANEL_PREFIX+"main_",EV_PANEL_PREFIX+"leg_"};
+   for(int b=0;b<2;b++)
+     {
+      for(int i=0;i<60;i++)
+        {
+         string name=prefixes[b]+StringFormat("%03d",i);
+         if(!Exists(name)) break;
+         all+="["+ObjectGetString(0,name,OBJPROP_TEXT)+"](tip "+IntegerToString(StringLen(ObjectGetString(0,name,OBJPROP_TOOLTIP)))+")";
+        }
+      all+=" // ";
+     }
+   return(all);
+  }
 
 //--- the background exists, is a rectangle label, holds every row, every label ends inside it (measured with the real font: no cut text) and it fits the chart
 bool BoxFits(const string prefix,const int chart_w,const int chart_h,const int font)
@@ -252,6 +284,7 @@ void RunScenario(CEoView &view,const int dir,const int kind,const string title)
    Build(feed,out,dir,kind);
    view.Update(out,feed,false,true);
    string panel=PanelText();
+   g_ctx=title+" :: "+DumpBoxes();
    string main=EV_PANEL_PREFIX+"main_";
    string ds=(dir==1 ? "BUY" : "SELL");
    color h4c=(dir==1 ? clrDodgerBlue : clrDarkOrange);
@@ -268,15 +301,22 @@ void RunScenario(CEoView &view,const int dir,const int kind,const string title)
    Check(Exists(EV_PANEL_PREFIX+"leg_s1_ao") && ColorOf(EV_PANEL_PREFIX+"leg_s1_ao")==clrDodgerBlue && Exists(EV_PANEL_PREFIX+"leg_s1_bo") && ColorOf(EV_PANEL_PREFIX+"leg_s1_bo")==clrDarkOrange,title+": legend swatch H4 = a blue box and an orange box");
    Check(ColorOf(EV_PANEL_PREFIX+"leg_s2_ao")==clrSilver && ColorOf(EV_PANEL_PREFIX+"leg_s3_ao")==clrGold,title+": legend swatches: grey box = FVG M15, gold box = selected FVG");
    Check(Exists(EV_PANEL_PREFIX+"leg_s4_d0") && Exists(EV_PANEL_PREFIX+"leg_s4_d1") && Exists(EV_PANEL_PREFIX+"leg_s4_d2") && Exists(EV_PANEL_PREFIX+"leg_s4_g") && Exists(EV_PANEL_PREFIX+"leg_s5_d0") && Exists(EV_PANEL_PREFIX+"leg_s5_g"),title+": legend swatches: dashed line + dot (Sweep), solid line + dot (Thyerje M15)");
-   Check(StringGetCharacter(ObjectGetString(0,EV_PANEL_PREFIX+"leg_s4_g",OBJPROP_TEXT),0)==159 && ObjectGetString(0,EV_PANEL_PREFIX+"leg_s4_g",OBJPROP_FONT)=="Wingdings",title+": the legend dot is the same glyph as the dot on the chart (Wingdings 159), not an emoji");
+   Check((int)ObjectGetInteger(0,EV_PANEL_PREFIX+"leg_s4_g",OBJPROP_TYPE)==OBJ_RECTANGLE_LABEL && (int)ObjectGetInteger(0,EV_PANEL_PREFIX+"leg_s5_g",OBJPROP_TYPE)==OBJ_RECTANGLE_LABEL && ColorOf(EV_PANEL_PREFIX+"leg_s4_g")==clrSilver && ColorOf(EV_PANEL_PREFIX+"leg_s5_g")==clrWhite &&
+         ObjectGetInteger(0,EV_PANEL_PREFIX+"leg_s4_g",OBJPROP_XSIZE)>=5,title+": the legend dots are small filled graphic squares, with no symbol font and no code point (the glyph showed as a box)");
+   Check(StringFind(ObjectGetString(0,EV_PANEL_PREFIX+"leg_s4_g",OBJPROP_FONT),"Wingdings")<0 && ObjectGetString(0,EV_PANEL_PREFIX+"leg_s4_g",OBJPROP_TEXT)=="",title+": no label with a symbol font in the legend");
    Check(Exists(EV_PANEL_PREFIX+"leg_s6_e") && Exists(EV_PANEL_PREFIX+"leg_s6_s") && Exists(EV_PANEL_PREFIX+"leg_s6_r") && Exists(EV_PANEL_PREFIX+"leg_s6_t"),title+": legend swatch E | SL | 2R | TP = four labelled line samples");
    Check(CountArrowObjects()==0,title+": no entry arrow object (only the dots of the sweep and of the break exist)");
    Check(!Exists(EV_PREFIX+"entry_arrow") && CountPrefix(EV_PREFIX,OBJ_ARROW_BUY)==0 && CountPrefix(EV_PREFIX,OBJ_ARROW_SELL)==0,title+": no buy / sell arrow");
    Check(Exists("MANUAL_VIEW_TEST_LINE"),title+": the manual drawing is untouched");
-   Check(Has(TipOfRow(main,T("Prototip")),"Konfirmuar nga klienti") && Has(TipOfRow(main,T("Prototip")),T("E p~erkohshme")),title+": the temporary choices are explained in the tooltip");
+   Check(Has(TipOfRow(main,T("Prototip")),"Konfirmuar: ") && Has(TipOfRow(main,T("Prototip")),"Prototip: "),title+": the confirmed and the temporary choices are explained in the tooltip",RowInfo(main,T("Prototip")));
    // ---- H4: direction, the arrow glyph in the gutter, the short state
    Check(Has(panel,"H4: "+ds+" | "),title+": H4 direction in two letters of text");
-   Check(Exists(main+"s1_g") && ObjectGetString(0,main+"s1_g",OBJPROP_FONT)=="Wingdings" && StringGetCharacter(ObjectGetString(0,main+"s1_g",OBJPROP_TEXT),0)==(dir==1 ? 233 : 234) && ColorOf(main+"s1_g")==h4c,title+": the H4 row has a down (SELL) or up (BUY) arrow glyph in the direction colour");
+   Check(Exists(main+"s1_a0") && Exists(main+"s1_a1") && Exists(main+"s1_a2") && Exists(main+"s1_a3") && ColorOf(main+"s1_a0")==h4c && ColorOf(main+"s1_a1")==h4c && ColorOf(main+"s1_a2")==h4c && ColorOf(main+"s1_a3")==h4c,
+         title+": the H4 arrow is drawn in the DIRECTION colour (blue BUY, orange SELL), not in the colour of the row text",
+         "expected colour "+IntegerToString((int)h4c)+", got a0="+IntegerToString((int)ColorOf(main+"s1_a0"))+" a1="+IntegerToString((int)ColorOf(main+"s1_a1"))+" row text colour="+IntegerToString((int)ColorOf(RowName(main,"H4:"))));
+   Check(Exists(main+"s1_a0") && Exists(main+"s1_a1") && (dir==-1 ? ObjectGetInteger(0,main+"s1_a1",OBJPROP_YDISTANCE)>ObjectGetInteger(0,main+"s1_a0",OBJPROP_YDISTANCE) : ObjectGetInteger(0,main+"s1_a1",OBJPROP_YDISTANCE)<ObjectGetInteger(0,main+"s1_a0",OBJPROP_YDISTANCE)),
+         title+": the arrow points down for SELL and up for BUY (the head is below / above the stem)");
+   Check(StringFind(DumpBoxes(),"?")<0,title+": no placeholder question marks in the boxes");
    Check(Exists(EV_PREFIX+"sweep_dot") && Exists(EV_PREFIX+"sweep_txt") && Exists(EV_PREFIX+"sweep_lvl"),title+": sweep mark, label and dashed level");
    Check(Has(TextOf(EV_PREFIX+"sweep_txt"),(dir==-1 ? "Sweep H4" : "Fitil H4")),title+": the sweep label names the event");
    Check((int)ObjectGetInteger(0,EV_PREFIX+"sweep_lvl",OBJPROP_STYLE)==STYLE_DASH,title+": the swept level is dashed");
@@ -285,11 +325,11 @@ void RunScenario(CEoView &view,const int dir,const int kind,const string title)
    Check(CountPrefix(EV_PREFIX+"h4fvg_",OBJ_RECTANGLE)<=EV_MAX_H4_FVG,title+": the number of H4 zones is limited");
    if(kind==KIND_WAIT_CONTEXT)
      {
-      Check(Has(panel,"Pret rikonfirmim") && Has(TipOfRow(main,"H4:"),"sweep i brendshem u pa") && !Has(panel,"SWEEP_WAIT"),title+": the phase is translated (short state in the row, the sentence in the tooltip)");
+      Check(Has(panel,"Pret rikonfirmim") && Has(TipOfRow(main,"H4:"),"sweep i brendshem u pa") && !Has(panel,"SWEEP_WAIT"),title+": the phase is translated (short state in the row, the sentence in the tooltip)",RowInfo(main,"H4:"));
       Check(Has(TextOf(EV_PREFIX+"h4fvg_txt0"),"kandidat"),title+": before the reconfirmation the H4 FVG is a candidate");
       Check((int)ObjectGetInteger(0,EV_PREFIX+"h4fvg_0",OBJPROP_STYLE)==STYLE_DASH,title+": a candidate H4 FVG is dashed");
       Check(Has(panel,"Vendimi: PRET") && !Has(panel,"Vendimi: BLLOKUAR"),title+": the decision is PRET");
-      Check(Has(panel,T("M15: N~e pritje")) && Has(TipOfRow(main,"M15:"),"Mungon: setup H4 i rikonfirmuar"),title+": M15 says Ne pritje and the tooltip says what is missing");
+      Check(Has(panel,T("M15: N~e pritje")) && Has(TipOfRow(main,"M15:"),"Mungon: H4 rikonfirmim"),title+": M15 says Ne pritje and the tooltip says what is missing",RowInfo(main,"M15:"));
       Check(CountPrefix(EV_PREFIX+"m15fvg_",-1)==0 && !Exists(EV_PREFIX+"brk_line") && !Exists(EV_PREFIX+"entry") && !Exists(EV_PREFIX+"sl") && !Exists(EV_PREFIX+"tp"),title+": no M15 level, no zone, no plan line is invented");
       Check(CountGoldZones()==0,title+": nothing is gold");
       return;
@@ -302,7 +342,10 @@ void RunScenario(CEoView &view,const int dir,const int kind,const string title)
    Check(CountGoldZones()==1 && ColorOf(EV_PREFIX+"m15fvg_0")==clrGold && Has(TextOf(EV_PREFIX+"m15fvg_txt0"),"ZGJEDHUR"),title+": exactly one gold M15 FVG, the one the plan bridge selected, drawn first");
    Check(Exists(EV_PREFIX+"m15fvg_1") && ColorOf(EV_PREFIX+"m15fvg_1")!=clrGold && Has(TextOf(EV_PREFIX+"m15fvg_txt1"),"kandidat"),title+": another M15 FVG is a plain candidate");
    Check(CountPrefix(EV_PREFIX+"m15fvg_",OBJ_RECTANGLE)<=EV_MAX_M15_FVG,title+": the number of M15 zones is limited");
-   Check(Has(panel,T("M15: Pret kthim n~e FVG")) && Has(TipOfRow(main,"M15:"),"Konfirmuar: ") && Has(TipOfRow(main,"M15:"),"thyerje M15") && Has(TipOfRow(main,"M15:"),"Mungon: kthimi i cmimit ne FVG"),title+": M15 short state + confirmed / missing in the tooltip");
+   Check(Has(panel,T("M15: Pret kthim n~e FVG")),title+": the M15 row says Pret kthim ne FVG",RowInfo(main,"M15:"));
+   Check(Has(TipOfRow(main,"M15:"),"Konfirmuar: "),title+": the M15 tooltip lists what is confirmed",RowInfo(main,"M15:"));
+   Check(Has(TipOfRow(main,"M15:"),"thyerje M15"),title+": the M15 tooltip names the break",RowInfo(main,"M15:"));
+   Check(Has(TipOfRow(main,"M15:"),T("Mungon: kthim n~e FVG")),title+": the M15 tooltip lists what is missing",RowInfo(main,"M15:"));
    // ---- plan: lines with labels and prices, short rows in the panel
    Check(Exists(EV_PREFIX+"entry") && Exists(EV_PREFIX+"sl") && Exists(EV_PREFIX+"tp") && Exists(EV_PREFIX+"entry_txt") && Exists(EV_PREFIX+"sl_txt") && Exists(EV_PREFIX+"tp_txt"),title+": entry, SL and TP lines with labels");
    Check(Has(TextOf(EV_PREFIX+"entry_txt"),"HYRJA LIMIT "+ds) && Has(TextOf(EV_PREFIX+"sl_txt"),"SL ") && Has(TextOf(EV_PREFIX+"tp_txt"),"TP"),title+": the labels carry the names and prices");
@@ -378,6 +421,81 @@ void TestLayout(void)
    Check(keep[0] && keep[4] && !keep[1] && !keep[2] && !keep[3] && !keep[5] && !keep[6],"layout: priority 0 is never dropped even when nothing fits");
   }
 
+//--- what the platform keeps of a long tooltip (so a tooltip test never guesses): prints the retained length for 100 / 200 / 255 / 400 characters
+void TestTooltipLimit(CEoView &view)
+  {
+   string name=EV_PREFIX+"probe";
+   ObjectCreate(0,name,OBJ_LABEL,0,0,0);
+   int kept[4];
+   int want[4]={100,200,255,400};
+   for(int i=0;i<4;i++)
+     {
+      string t="";
+      while(StringLen(t)<want[i]) t+="0123456789";
+      t=StringSubstr(t,0,want[i]);
+      ObjectSetString(0,name,OBJPROP_TOOLTIP,t);
+      kept[i]=StringLen(ObjectGetString(0,name,OBJPROP_TOOLTIP));
+     }
+   ObjectDelete(0,name);
+   PrintFormat("TOOLTIP PROBE: set 100/200/255/400 characters, the platform kept %d/%d/%d/%d",kept[0],kept[1],kept[2],kept[3]);
+   int expected=(kept[3]>=40 && kept[3]<EV_TIP_MAX ? kept[3] : EV_TIP_MAX);
+   Check(view.TipMax()==expected,"tooltips: the view measured the same tooltip limit as this probe and clips to it","view "+IntegerToString(view.TipMax())+", probe "+IntegerToString(expected)+" (kept "+IntegerToString(kept[0])+"/"+IntegerToString(kept[1])+"/"+IntegerToString(kept[2])+"/"+IntegerToString(kept[3])+" of 100/200/255/400)");
+   Check(view.TipMax()>=100,"tooltips: the terminal keeps at least 100 characters (the longest tooltip that carries a test fact is about 110)","view "+IntegerToString(view.TipMax()));
+  }
+
+//--- the SAME view instance sees a SELL snapshot and then a BUY snapshot that has the same time, phase and setup id: the marks must follow the direction; and a level / zone / event that
+//--- changes while every count stays the same must be redrawn (this is the stale-marks case a fresh instance would hide)
+void TestSameInstanceFlip(CEoView &view)
+  {
+   string main=EV_PANEL_PREFIX+"main_";
+   CEoFeed sell,buy;
+   SEoOutcome o1,o2;
+   Build(sell,o1,-1,KIND_WAIT_CONTEXT);
+   Build(buy,o2,1,KIND_WAIT_CONTEXT);
+   view.Update(o1,sell,false,true);
+   g_ctx="flip SELL->BUY :: "+DumpBoxes();
+   bool sell_ok=(ColorOf(EV_PREFIX+"h4fvg_0")==clrDarkOrange && Has(TextOf(EV_PREFIX+"sweep_txt"),"Sweep H4") && ColorOf(main+"s1_a0")==clrDarkOrange);
+   Check(sell_ok,"same instance: the SELL snapshot is drawn orange with a Sweep H4 label and an orange arrow","h4fvg_0 colour="+IntegerToString((int)ColorOf(EV_PREFIX+"h4fvg_0"))+" sweep text='"+TextOf(EV_PREFIX+"sweep_txt")+"'");
+   view.Update(o2,buy,false,true);
+   g_ctx="flip SELL->BUY :: "+DumpBoxes();
+   Check(ColorOf(EV_PREFIX+"h4fvg_0")==clrDodgerBlue,"same instance: after SELL -> BUY (same time, phase, setup id) the H4 zone is BLUE, not the stale orange","h4fvg_0 colour="+IntegerToString((int)ColorOf(EV_PREFIX+"h4fvg_0")));
+   Check(Has(TextOf(EV_PREFIX+"sweep_txt"),"Fitil H4") && !Has(TextOf(EV_PREFIX+"sweep_txt"),"Sweep H4"),"same instance: the sweep label follows the BUY wick setup","sweep text='"+TextOf(EV_PREFIX+"sweep_txt")+"'");
+   Check(ColorOf(main+"s1_a0")==clrDodgerBlue && Has(TextOf(RowName(main,"H4:")),"H4: BUY"),"same instance: the H4 row and its arrow follow the BUY direction",RowInfo(main,"H4:"));
+   view.Update(o1,sell,false,true);
+   g_ctx="flip BUY->SELL :: "+DumpBoxes();
+   Check(ColorOf(EV_PREFIX+"h4fvg_0")==clrDarkOrange && Has(TextOf(EV_PREFIX+"sweep_txt"),"Sweep H4"),"same instance: BUY -> SELL redraws too");
+   // ---- levels / zones / events change, no count changes
+   CEoFeed a;
+   SEoOutcome oa;
+   Build(a,oa,1,KIND_ACCEPTED_2R);
+   view.Update(oa,a,false,true);
+   double z0=ObjectGetDouble(0,EV_PREFIX+"h4fvg_0",OBJPROP_PRICE,0);
+   double m0=ObjectGetDouble(0,EV_PREFIX+"m15fvg_0",OBJPROP_PRICE,0);
+   double b0=ObjectGetDouble(0,EV_PREFIX+"brk_line",OBJPROP_PRICE,0);
+   double l0=ObjectGetDouble(0,EV_PREFIX+"sweep_lvl",OBJPROP_PRICE,0);
+   a.dv_tracks[0].lower+=g_u; a.dv_tracks[0].upper+=g_u;
+   a.f[0].lower+=0.1*g_u; a.f[0].upper+=0.1*g_u;
+   a.broken.price+=0.5*g_u;
+   a.dv_ev.st.snap_price+=0.7*g_u;
+   view.Update(oa,a,false,true);
+   g_ctx="levels changed :: "+DumpBoxes();
+   Check(MathAbs(ObjectGetDouble(0,EV_PREFIX+"h4fvg_0",OBJPROP_PRICE,0)-(z0+g_u))<1e-6*g_mid,"same instance: an H4 zone that moves without a change of count is redrawn","before "+DoubleToString(z0,5)+" after "+DoubleToString(ObjectGetDouble(0,EV_PREFIX+"h4fvg_0",OBJPROP_PRICE,0),5));
+   Check(MathAbs(ObjectGetDouble(0,EV_PREFIX+"m15fvg_0",OBJPROP_PRICE,0)-(m0+0.1*g_u))<1e-6*g_mid,"same instance: an M15 zone that moves is redrawn");
+   Check(MathAbs(ObjectGetDouble(0,EV_PREFIX+"brk_line",OBJPROP_PRICE,0)-(b0+0.5*g_u))<1e-6*g_mid,"same instance: the break level that moves is redrawn");
+   Check(MathAbs(ObjectGetDouble(0,EV_PREFIX+"sweep_lvl",OBJPROP_PRICE,0)-(l0+0.7*g_u))<1e-6*g_mid,"same instance: the wick level that moves is redrawn");
+   // an event that changes (the pivot named by the internal sweep) moves the swept level
+   CEoFeed c;
+   SEoOutcome oc;
+   Build(c,oc,-1,KIND_WAIT_CONTEXT);
+   view.Update(oc,c,false,true);
+   double s0=ObjectGetDouble(0,EV_PREFIX+"sweep_lvl",OBJPROP_PRICE,0);
+   c.dv_events[0].ref="IH"+H4TimeStamp(c.hbars[4].time);
+   c.hbars[4].high=c.hbars[4].high+3.0*g_u;
+   view.Update(oc,c,false,true);
+   Check(MathAbs(ObjectGetDouble(0,EV_PREFIX+"sweep_lvl",OBJPROP_PRICE,0)-s0)>0.5*g_u,
+         "same instance: an event that names another pivot redraws the swept level","before "+DoubleToString(s0,5)+" after "+DoubleToString(ObjectGetDouble(0,EV_PREFIX+"sweep_lvl",OBJPROP_PRICE,0),5));
+  }
+
 //--- the request mode follows the transport: REAL (DEMO) says so everywhere, FAKE says virtual
 void TestRequestMode(CEoView &view)
   {
@@ -423,6 +541,7 @@ void TestSizes(CEoView &view)
             view.TestSize(sizes_w[z],sizes_h[z]);
             view.Update(out,feed,false,true);
             string title=names[z]+(dir==1 ? " BUY " : " SELL ")+kn[q];
+            g_ctx=title+" :: "+DumpBoxes();
             string main=EV_PANEL_PREFIX+"main_",leg=EV_PANEL_PREFIX+"leg_";
             Check(BoxFits(main,sizes_w[z],sizes_h[z],9) && BoxFits(leg,sizes_w[z],sizes_h[z],8),title+": no text is cut and both boxes fit the chart");
             long main_end=ObjectGetInteger(0,main+"bg",OBJPROP_YDISTANCE)+ObjectGetInteger(0,main+"bg",OBJPROP_YSIZE);
@@ -459,7 +578,9 @@ void OnStart()
    RunScenario(view,1,KIND_BLOCKED,"BUY blocked by the gate");
    RunScenario(view,-1,KIND_BLOCKED,"SELL blocked by the gate");
    TestRequestMode(view);
+   TestSameInstanceFlip(view);
    TestSizes(view);
+   TestTooltipLimit(view);
    view.Destroy();
    Check(CountPrefix(EV_PREFIX,-1)==0,"Destroy removes every object of the component");
    Check(Exists("MANUAL_VIEW_TEST_LINE"),"the manual drawing survives Destroy");
