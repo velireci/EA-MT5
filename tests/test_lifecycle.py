@@ -27,7 +27,8 @@ SCENARIOS = ['index_codec_and_damage', 'register_and_save_failure', 'startup_cle
         'managed_closed_position_released_without_management', 'managed_manual_foreign_and_synthetic_untouched', 'managed_failures_block_and_lock_at_the_level', 'managed_slots_released_and_capacity',
              'direction_cancel_only_opposite_records', 'opposite_signal_cancel_per_record', 'direction_unknown_data_proves_nothing', 'direction_cancel_leaves_positions_and_foreign',
              'direction_cancel_uncertain_halts_no_retry', 'notify_pending_placed_then_filled_once', 'notify_unproven_order_send_is_silent', 'notify_removed_pending_once',
-             'notify_partial_modified_closed_are_distinct', 'notify_failure_changes_no_decision', 'notify_manual_foreign_unreadable_silent', 'notify_restart_repeats_nothing']
+             'notify_partial_modified_closed_are_distinct', 'notify_failure_changes_no_decision', 'notify_manual_foreign_unreadable_silent', 'notify_restart_repeats_nothing',
+             'notify_terminal_event_survives_object_removal', 'notify_remainder_close_after_done_observed', 'notify_sixteen_plus_positions_one_process']
 EV_ALL_ENABLED = tp.EV_SESSION_END | tp.EV_NEWS_BLOCK | tp.EV_DAILY_LIMIT
 
 
@@ -715,7 +716,7 @@ class CountingRegistrar:
 class RegWorld:
     """an entry that is FILLED (position id 7) + the T011 world of the same position; the registrar is the lifecycle's fill sink"""
 
-    def __init__(self, tc, direction, tp=None, phrase=ex.AUTH_PHRASE, pos_changes=None):
+    def __init__(self, tc, direction, tp=None, phrase=ex.AUTH_PHRASE, pos_changes=None, pos=7):
         self.dirn = direction
         e, sl, tp0 = (2000.0, 1995.0, 2015.0) if direction == 1 else (2000.0, 2005.0, 1985.0)
         self.sl, self.tp = sl, (tp if tp is not None else tp0)
@@ -728,19 +729,20 @@ class RegWorld:
         res, guard, why = guarded_place(self.w, self.st)
         assert res.final == en.R_PLACED, (res, why)
         self.w.tr.orders[0].state = en.OS_FILLED
-        self.w.tr.orders[0].position_id = 7
+        self.pos = pos
+        self.w.tr.orders[0].position_id = pos
         self.dir = tempfile.TemporaryDirectory()
         tc.addCleanup(self.dir.cleanup)
         self.xstore = t11.FileStore(self.dir.name)
         self.xtr = ex.FakeTransport()
         self.xtr.real = True                      # the registration transport reports IsReal() = true, so the authorisation phrase and the demo-account gates stay in force
-        self.xtr.position = ex.PositionW(found=True, ticket=9, identifier=7, symbol='XAUUSD', magic=777, type=0 if direction == 1 else 1, volume=0.5, price_open=2000.0, sl=sl)
+        self.xtr.position = ex.PositionW(found=True, ticket=9, identifier=pos, symbol='XAUUSD', magic=777, type=0 if direction == 1 else 1, volume=0.5, price_open=2000.0, sl=sl)
         for k, v in (pos_changes or {}).items():
             setattr(self.xtr.position, k, v)
         self.locks = Locks()
         self.phrase = phrase
         self.reg = self.make_registrar()
-        self.name = lc.exit_file_name(self.login, 7)
+        self.name = lc.exit_file_name(self.login, pos)
 
     def make_registrar(self, **kw):
         return CountingRegistrar(self.w.store, self.xtr, self.xstore, self.locks, magic=777, phrase=self.phrase, rpol=ex.RPOL_R_GEOM, **kw)
@@ -1497,6 +1499,146 @@ class Notifications(unittest.TestCase):
             rw.tick()
             self.assertEqual((len(sink.has('PARTIAL')), len(sink.has('POSITION MODIFIED'))), (1, 1), 'delivered once after the throttle')
 
+    def test_a_throttled_or_failed_terminal_event_survives_the_removal_of_its_object(self):
+        """the confirmed cancel removes the pending from the index: the waiting notification must still be delivered by a later tick (a restart is the documented limit: nothing waits across it)"""
+        for d in (1, -1):
+            for mode in (lc.NT_RETRY_LATER, lc.NT_FAILED):
+                w, st = placed(d)
+                sink = FakeSink()
+                n = self.notifier(w, sink)
+                lc.tick(w.cfg, w.tr, w.store, st, 0, 0, obs=n)
+                self.assertEqual(len(sink.has('PENDING PLACED')), 1)
+                sink.mode = mode
+                before = (w.tr.sends, w.tr.cancels)
+                lc.tick(w.cfg, w.tr, w.store, st, tp.EV_SESSION_END, tp.EV_SESSION_END, obs=n)       # the cancel is confirmed, the object leaves the index
+                self.assertEqual((st.ids, w.tr.cancels), ([], before[1] + 1))
+                for _ in range(2):
+                    lc.tick(w.cfg, w.tr, w.store, st, 0, 0, obs=n)                                   # nothing left to observe, the receiver still refuses
+                self.assertEqual(sink.has('PENDING CANCELLED'), [])
+                if mode == lc.NT_RETRY_LATER:
+                    sink.mode = lc.NT_SENT
+                    lc.tick(w.cfg, w.tr, w.store, st, 0, 0, obs=n)
+                    lc.tick(w.cfg, w.tr, w.store, st, 0, 0, obs=n)
+                    self.assertEqual(len(sink.has('PENDING CANCELLED')), 1, 'delivered once, later, after the throttle')
+                else:
+                    self.assertEqual(sink.calls, 1 + lc.Notifier.MAX_TRIES, 'failures consume the existing attempts, then the event is dropped')
+                    sink.mode = lc.NT_SENT
+                    lc.tick(w.cfg, w.tr, w.store, st, 0, 0, obs=n)
+                    self.assertEqual(sink.has('PENDING CANCELLED'), [], 'a dropped event is not resurrected')
+                self.assertEqual(w.tr.sends, 1, 'the notification never touches the trading')
+
+    def test_the_final_close_of_the_remainder_is_announced_after_partial_and_done(self):
+        for d in (1, -1):
+            rw = MgmtWorld(self, d)
+            sink = FakeSink()
+            rw.obs = n = self.notifier(rw.w, sink)
+            rw.reg.inner.obs = n
+            manages = []
+            orig = rw.mgr.manage
+            rw.mgr.manage = lambda rec, ident, name, orig=orig: (manages.append(1), orig(rec, ident, name))[1]
+            rw.tick()
+            rw.tick()
+            bid, ask = rw.level_quote()
+            self.assertEqual([r.final for _, r in rw.mgr.on_quote(bid, ask)], [ex.SENT_MAPPED])
+            rw.xtr.position.volume = 0.1
+            rw.raw_now = raw_full(d)
+            self.assertEqual([f.final for _, f in rw.mgr.on_timer()], [fl.DONE])
+            notes = ' '.join(rw.tick())
+            self.assertIn('MANAGEMENT_DONE', notes)
+            self.assertEqual((rw.st.ids, rw.mgr.slots), ([SIG], {}), 'dir %d: the finished slot is released, the id stays only to observe' % d)
+            count = len(manages)
+            for _ in range(4):
+                rw.tick()
+            self.assertEqual((len(manages), len(rw.xtr.sends), rw.mgr.slots), (count, 1, {}), 'the finished management is not re-armed, no slot is held')
+            self.assertEqual((len(sink.has('PARTIAL')), len(sink.has('POSITION CLOSED'))), (1, 0))
+            rw.xtr.position.found = False
+            rw.closed = True
+            for _ in range(3):
+                rw.tick()
+            self.assertEqual((len(sink.has('POSITION CLOSED')), rw.st.ids, rw.st.halted, n.last), (1, [], '', {}), 'dir %d: the final close is announced once and the index is empty' % d)
+
+    def test_the_observation_after_done_survives_a_restart_without_rearming(self):
+        for d in (1, -1):
+            rw = MgmtWorld(self, d)
+            sink = FakeSink()
+            rw.obs = n = self.notifier(rw.w, sink)
+            rw.reg.inner.obs = n
+            rw.tick()
+            rw.tick()
+            bid, ask = rw.level_quote()
+            rw.mgr.on_quote(bid, ask)
+            rw.xtr.position.volume = 0.1
+            rw.raw_now = raw_full(d)
+            rw.mgr.on_timer()
+            rw.tick()
+            self.assertEqual(rw.st.ids, [SIG])
+            sends = len(rw.xtr.sends)
+            lc.release(rw.w.store, rw.st)
+            rw.w.tr, store = new_process(rw.w, keep_book=True)
+            rw.w.store = store
+            rw.locks = Locks()
+            rw.reg = rw.make_registrar()
+            rw.attach()
+            n2 = lc.Notifier(sink, store, 777, 'XAUUSD', prefix='[FAKE] ')
+            n2.baseline = True
+            rw.obs = n2
+            rw.reg.inner.obs = n2
+            rw.st, notes = lc.startup(rw.w.cfg, rw.w.tr, store, store, False, sink=rw.reg, obs=n2)
+            n2.baseline = False
+            self.assertEqual((rw.st.ids, rw.mgr.slots, len(rw.xtr.sends)), ([SIG], {}, sends), 'recovered as DONE: observed, no slot, no re-arming, no send')
+            rw.xtr.position.found = False
+            rw.closed = True
+            rw.tick()
+            rw.tick()
+            self.assertEqual((len(sink.has('POSITION CLOSED')), rw.st.ids, len(rw.xtr.sends)), (1, [], sends))
+
+    def test_without_an_observer_the_index_is_released_at_done_as_before(self):
+        for d in (1, -1):
+            rw = MgmtWorld(self, d)
+            rw.tick()
+            bid, ask = rw.level_quote()
+            rw.mgr.on_quote(bid, ask)
+            rw.xtr.position.volume = 0.1
+            rw.raw_now = raw_full(d)
+            rw.mgr.on_timer()
+            rw.tick()
+            self.assertEqual((rw.st.ids, rw.mgr.slots), ([], {}))
+
+    def test_more_than_sixteen_different_positions_pass_through_one_notifier_in_one_process(self):
+        sink = FakeSink()
+        n = None
+        for d in (1, -1):
+            for i in range(lc.Notifier.MAX_TRACKED + 4):
+                rw = MgmtWorld(self, d, pos=(100 if d == 1 else 200) + i)
+                if n is None:
+                    n = self.notifier(rw.w, sink)
+                n.store = rw.w.store
+                rw.obs = n
+                rw.reg.inner.obs = n
+                before = len(sink.texts)
+                rw.tick()
+                rw.tick()
+                rw.xtr.position.volume = 0.1
+                rw.tick()
+                rw.xtr.position.found = False
+                rw.closed = True
+                rw.tick()
+                rw.tick()
+                got = sink.texts[before:]
+                self.assertEqual(len(got), 3, 'cycle %d: %s' % (i, got))
+                self.assertTrue('POSITION OPENED' in got[0] and 'PARTIAL CLOSE' in got[1] and 'POSITION CLOSED' in got[2], got)
+                self.assertEqual((len(got), n.last, rw.st.ids), (3, {}, []), 'dir %d position %d: every event announced, the tracking entry released at the close, the index empty' % (d, i))
+        self.assertEqual(len(sink.has('POSITION CLOSED')), 2 * (lc.Notifier.MAX_TRACKED + 4))
+
+    def test_a_new_position_is_never_ignored_when_the_tracking_is_full(self):
+        sink = FakeSink()
+        rw = MgmtWorld(self, 1)
+        n = self.notifier(rw.w, sink)
+        for pid in range(1, lc.Notifier.MAX_TRACKED + 6):
+            n.on_position(rw.login, SIG, pid, 0.5, 1995.0)
+        self.assertEqual((len(n.last), lc.Notifier.MAX_TRACKED + 5 in n.last, 1 in n.last), (lc.Notifier.MAX_TRACKED, True, False), 'the oldest falls out, the newest is followed')
+
+
     def test_manual_trades_and_foreign_records_never_notify(self):
         for d in (1, -1):
             rw = MgmtWorld(self, d)
@@ -1634,7 +1776,7 @@ class Mutants(unittest.TestCase):
                                 ("        if self.provenance != PROV_BROKER:", "        if False:"),
                 ("and o.plan_vol_min == sym.vol_min and o.plan_vol_step == sym.vol_step and o.plan_vol_max == sym.vol_max)", ")"),
                 ("        return (SINK_PENDING if res.reason.startswith(self.TRANSIENT) else SINK_REFUSED), res.reason", "        return SINK_CONFIRMED, res.reason"),
-                ("            if n >= self.MAX_TRIES:", "            if False:"),
+                ("            self.tries[sid] = n\n            if n >= self.MAX_TRIES:", "            self.tries[sid] = n\n            if False:"),
                 ("            if sid in st.unmanaged:\n                continue", "            if False:\n                continue"),
                 ("            if sid in st.unmanaged or verdict(en.reconcile(cfg, tr, store, sid)) == HALT:", "            if verdict(en.reconcile(cfg, tr, store, sid)) == HALT:"),
                 ("        if rec.state != en.ST_FILLED or rec.linked != 1 or rec.position_id <= 0:\n            return SINK_REFUSED, 'FILL_NOT_PROVEN'", "        if False:\n            return SINK_REFUSED, 'FILL_NOT_PROVEN'"),
@@ -1645,20 +1787,24 @@ class Mutants(unittest.TestCase):
                 ("    if age < 0 or age > cfg.quote_max_age:\n        return 0\n", ""),
                 ("    if not dir_enabled or facts is None or not facts.valid:\n        return 0\n", "    if not dir_enabled or facts is None:\n        return 0\n"),
                 # push notifications
-                ("        if key in self.done:\n            return True\n        if self.baseline:", "        if self.baseline:"),
-                ("        if self.baseline:\n            self.done.add(key)\n            return True\n", ""),
+                ("        if key in self.done or any(k == key for k, _ in self.outbox):\n            return\n", ""),
+                ("        if self.baseline:\n            self.done.add(key)\n            return\n", ""),
                 ("        if not ok or rec.magic != self.magic or rec.symbol != self.symbol:\n            return None", "        if not ok:\n            return None"),
-                ("        if n >= self.MAX_TRIES:\n            self.done.add(key)", "        if False:\n            self.done.add(key)"),
-                ("        if status == NT_RETRY_LATER:\n            return False\n", ""),
+                ("                if n >= self.MAX_TRIES:\n                    self.done.add(key)\n                else:\n                    keep.append((key, text))", "                if False:\n                    self.done.add(key)\n                else:\n                    keep.append((key, text))"),
+                ("            elif status == NT_RETRY_LATER:\n                keep.append((key, text))\n                blocked = True", "            elif False:\n                keep.append((key, text))\n                blocked = True"),
                 ("        if volume < prev[0] - 1e-9:", "        if volume != prev[0]:"),
-                ("        if ok:\n            self.last[position_id] = (volume, sl)", "        if True:\n            self.last[position_id] = (volume, sl)"),
+                ("        self.last.pop(position_id, None)                      # the position is gone: its tracking entry is released", "        pass"),
+                ("            if len(self.last) >= self.MAX_TRACKED:\n                self.last.pop(next(iter(self.last)))                # evict the oldest: a new position is never ignored\n", "            if len(self.last) >= self.MAX_TRACKED:\n                return\n"),
+                ("    if obs is not None:\n        obs.on_tick()                                         # waiting notifications are delivered at the end of EVERY tick, also when the layer is halted or the object is gone\n", ""),
+                ("        if pid in self.observing:\n            return SINK_ACTIVE, 'ACTIVE'                      # observe-only: no slot, no driver, no re-arming\n", ""),
+                ("            if self.obs is not None:\n                self.observing.add(pid)\n                return SINK_ACTIVE,", "            if False:\n                return SINK_ACTIVE,"),
                 # management inside the orchestrator
-                ("            self.manager.forget(rec.position_id)       # finished: the slot is released (the T011 record stays; a restart before the index is saved recovers the DONE from it)\n", ""),
+                ("            self.manager.forget(pid)       # finished: the slot is released (the T011 record stays; a restart before the index is saved recovers the DONE from it)\n", ""),
                 ("            if len(self.slots) >= self.MAX_SLOTS:\n                return SINK_REFUSED, 'MANAGEMENT_SLOTS_FULL'\n", ""),
                 ("            if flow.final == fl.DONE:\n                slot.done = True\n                return SINK_CONFIRMED, 'MANAGEMENT_DONE: recovered as DONE'", "            if False:\n                return SINK_CONFIRMED, 'MANAGEMENT_DONE: recovered as DONE'"),
                 ("        if status != SINK_CONFIRMED or self.manager is None:\n            return status, detail\n", "        if self.manager is None:\n            return status, detail\n"),
                 ("            if self.absent(ident.position_id):", "            if True:"),
-                ("        if detail.startswith('POSITION_CLOSED'):\n            self.manager.forget(rec.position_id)\n            return status, detail\n", ""),
+                ("        if detail.startswith('POSITION_CLOSED'):\n            self.manager.forget(pid)\n            self.observing.discard(pid)\n            return status, detail\n", ""),
                 ("            elif status == SINK_ACTIVE:\n                if detail != 'ACTIVE':", "            elif False:\n                if detail != 'ACTIVE':"),
                 # fill -> T011: reported first, forgotten on the next tick; the report states why T011 would refuse
                 ("        elif v == FILLED and sid not in st.noted:", "        elif False:"),

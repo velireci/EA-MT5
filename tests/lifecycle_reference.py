@@ -240,6 +240,7 @@ class Registrar:
         self.entry_store, self.exit_tr, self.exit_store, self.locks = entry_store, exit_tr, exit_store, locks
         self.magic, self.phrase, self.rpol, self.provenance = magic, phrase, rpol, provenance
         self.tries = {}
+        self.observing = set()               # positions whose management is finished and that are only observed until they close (in-process; rebuilt by the recovery after a restart)
         self.obs = None                      # optional Observer: PROVEN facts about the owned position (volume, SL, TP, closed)
         self.manager = None                  # optional Manager: after a registration is confirmed the position is handed to the T011 driver
 
@@ -293,15 +294,23 @@ class Registrar:
         return (SINK_PENDING if res.reason.startswith(self.TRANSIENT) else SINK_REFUSED), res.reason
 
     def _managed(self, status, detail, rec, ident, name):
-        """a confirmed registration is handed to the management (when wired): the id leaves the index only when the management is finished"""
+        """a confirmed registration is handed to the management (when wired): the id leaves the index only when the management is finished. With an observer the id STAYS (observe-only) until the
+        position is closed for good: the finished management is not re-armed and its slot is released, but the later close of the remainder is still observed and announced."""
         if status != SINK_CONFIRMED or self.manager is None:
             return status, detail
+        pid = rec.position_id
         if detail.startswith('POSITION_CLOSED'):
-            self.manager.forget(rec.position_id)
+            self.manager.forget(pid)
+            self.observing.discard(pid)
             return status, detail
+        if pid in self.observing:
+            return SINK_ACTIVE, 'ACTIVE'                      # observe-only: no slot, no driver, no re-arming
         mstatus, mdetail = self.manager.manage(rec, ident, name)
         if mstatus == SINK_CONFIRMED:
-            self.manager.forget(rec.position_id)       # finished: the slot is released (the T011 record stays; a restart before the index is saved recovers the DONE from it)
+            self.manager.forget(pid)       # finished: the slot is released (the T011 record stays; a restart before the index is saved recovers the DONE from it)
+            if self.obs is not None:
+                self.observing.add(pid)
+                return SINK_ACTIVE, detail + ' | ' + mdetail + ' | OBSERVING the remainder until its final close'
             return mstatus, detail + ' | ' + mdetail
         return mstatus, (mdetail if mdetail == 'ACTIVE' or mstatus != SINK_ACTIVE else detail + ' | MANAGEMENT ' + mdetail)
 
@@ -456,6 +465,9 @@ class Observer:
     def on_closed(self, login, sid, position_id):
         pass
 
+    def on_tick(self):
+        pass
+
 
 class Notifier(Observer):
     """PUSH notifications for the PROVEN facts only: a pending order seen ACTIVE in the broker facts (not OrderSend=true), a position that exists because a tracked order is FILLED, a partial close (the owned
@@ -464,13 +476,16 @@ class Notifier(Observer):
     a failed send is retried by the next observation up to MAX_TRIES and then dropped; a failure never changes any decision and never resends an order. While `baseline` is on, the facts are only
     remembered (a restart never repeats an old event; an event that happened while the robot was down is not announced)."""
     MAX_TRIES = 3
+    MAX_TRACKED = 16                         # positions followed at the same time (mirrors NT_MAX_POS); the oldest is evicted, a closed one is released at once
+    MAX_OUTBOX = 32
 
     def __init__(self, sink, store, magic, symbol, prefix=''):
         self.sink, self.store, self.magic, self.symbol, self.prefix = sink, store, magic, symbol, prefix
         self.baseline = False
         self.done = set()
         self.tries = {}
-        self.last = {}                       # position id -> (volume, sl) of the last COMPLETED observation
+        self.outbox = []                     # [(key, text)] events waiting for the receiver: kept even when the lifecycle forgets the object
+        self.last = {}                       # position id -> (volume, sl) of the last observation (insertion ordered)
 
     def _record(self, login, sid):
         ok, text = self.store.read(en.file_name(login, sid))
@@ -480,24 +495,38 @@ class Notifier(Observer):
         return rec
 
     def _emit(self, key, text):
-        """True when the event is settled (sent, dropped or remembered in the baseline); False when it must be tried again by the next observation"""
-        if key in self.done:
-            return True
+        """the event is REMEMBERED: queued for the receiver (sent at the end of the lifecycle tick), or only noted in the baseline. Nothing is lost when the lifecycle removes the object afterwards."""
+        if key in self.done or any(k == key for k, _ in self.outbox):
+            return
         if self.baseline:
             self.done.add(key)
-            return True
-        status = self.sink.send((self.prefix + text)[:250])
-        if status == NT_SENT:
-            self.done.add(key)
-            return True
-        if status == NT_RETRY_LATER:
-            return False
-        n = self.tries.get(key, 0) + 1
-        self.tries[key] = n
-        if n >= self.MAX_TRIES:
-            self.done.add(key)
-            return True
-        return False
+            return
+        if len(self.outbox) >= self.MAX_OUTBOX:
+            self.outbox.pop(0)               # the oldest waiting event falls out (bounded memory)
+        self.outbox.append((key, (self.prefix + text)[:250]))
+
+    def on_tick(self):
+        """deliver the waiting events in order: SENT settles; RETRY_LATER (throttle) keeps the event and stops until the next tick without consuming an attempt; FAILED consumes an attempt and the event is dropped after MAX_TRIES"""
+        keep = []
+        blocked = False
+        for key, text in self.outbox:
+            if blocked:
+                keep.append((key, text))
+                continue
+            status = self.sink.send(text)
+            if status == NT_SENT:
+                self.done.add(key)
+            elif status == NT_RETRY_LATER:
+                keep.append((key, text))
+                blocked = True
+            else:
+                n = self.tries.get(key, 0) + 1
+                self.tries[key] = n
+                if n >= self.MAX_TRIES:
+                    self.done.add(key)
+                else:
+                    keep.append((key, text))
+        self.outbox = keep
 
     def _side(self, rec):
         return 'BUY' if rec.direction == 1 else 'SELL'
@@ -511,7 +540,7 @@ class Notifier(Observer):
         if v == OPEN:
             self._emit(('placed', sid), 'PENDING PLACED %s %s %.2f SL %.2f TP %.2f vol %.2f (%s)' % (rec.symbol, self._side(rec), rec.e, rec.s, rec.tp, rec.volume, sid))
         elif v == FILLED:
-            self._emit(('filled', sid), 'POSITION OPENED %s %s vol %.2f SL %.2f TP %.2f pos %d (%s)' % (rec.symbol, self._side(rec), rec.volume, rec.s, rec.tp, rec.position_id, sid))
+            self._emit(('filled', sid, rec.position_id), 'POSITION OPENED %s %s vol %.2f SL %.2f TP %.2f pos %d (%s)' % (rec.symbol, self._side(rec), rec.volume, rec.s, rec.tp, rec.position_id, sid))
         elif res.final in (en.R_CANCELLED, en.R_EXPIRED) or res.state in (en.ST_CANCELLED, en.ST_EXPIRED):
             self._emit(('removed', sid), 'PENDING %s %s %s (%s)' % ('EXPIRED' if res.state == en.ST_EXPIRED or res.final == en.R_EXPIRED else 'CANCELLED', rec.symbol, self._side(rec), sid))
 
@@ -521,21 +550,22 @@ class Notifier(Observer):
             return
         prev = self.last.get(position_id)
         if prev is None:
+            if len(self.last) >= self.MAX_TRACKED:
+                self.last.pop(next(iter(self.last)))                # evict the oldest: a new position is never ignored
             self.last[position_id] = (volume, sl)             # the first observation is the opening (announced by the FILLED verdict)
             return
-        ok = True
         if volume < prev[0] - 1e-9:
-            ok = self._emit(('partial', position_id, round(volume, 8)), 'POSITION PARTIAL CLOSE %s %s vol %.2f -> %.2f (%s)' % (rec.symbol, self._side(rec), prev[0], volume, sid)) and ok
+            self._emit(('partial', position_id, round(volume, 8)), 'POSITION PARTIAL CLOSE %s %s vol %.2f -> %.2f (%s)' % (rec.symbol, self._side(rec), prev[0], volume, sid))
         if abs(sl - prev[1]) > 1e-9:
-            ok = self._emit(('modified', position_id, round(sl, 8)), 'POSITION MODIFIED %s %s SL %.2f -> %.2f (%s)' % (rec.symbol, self._side(rec), prev[1], sl, sid)) and ok
-        if ok:
-            self.last[position_id] = (volume, sl)
+            self._emit(('modified', position_id, round(sl, 8)), 'POSITION MODIFIED %s %s SL %.2f -> %.2f (%s)' % (rec.symbol, self._side(rec), prev[1], sl, sid))
+        self.last[position_id] = (volume, sl)
 
     def on_closed(self, login, sid, position_id):
         rec = self._record(login, sid)
         if rec is None:
             return
         self._emit(('closed', position_id), 'POSITION CLOSED %s %s (%s)' % (rec.symbol, self._side(rec), sid))
+        self.last.pop(position_id, None)                      # the position is gone: its tracking entry is released
 
 
 def _sweep(cfg, tr, store, st, notes, sink=None, obs=None):
@@ -654,6 +684,13 @@ def record_events(cfg, tr, store, login, sid, facts, dir_enabled):
 
 
 def tick(cfg, tr, store, st, due, enabled, sink=None, facts=None, dir_enabled=0, obs=None):
+    notes = _tick(cfg, tr, store, st, due, enabled, sink, facts, dir_enabled, obs)
+    if obs is not None:
+        obs.on_tick()                                         # waiting notifications are delivered at the end of EVERY tick, also when the layer is halted or the object is gone
+    return notes
+
+
+def _tick(cfg, tr, store, st, due, enabled, sink, facts, dir_enabled, obs):
     """-> notes. Reconcile, then cancel the open pending orders for the events that are due AND enabled (global events) or that THIS record's direction proves (per-record events)."""
     notes = []
     if not st.login:

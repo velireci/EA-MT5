@@ -4,7 +4,7 @@
 // NOT YET COMPILED OR RUN (UNVERIFIED): Codex compiles it, the owner runs it in MT5.
 #property strict
 #property script_show_inputs
-#property version "1.06"
+#property version "1.07"
 #include "../include/EntryLifecycle.mqh"
 #include "../include/EntryTransportFake.mqh"
 #include "../include/ExitTransportFake.mqh"
@@ -748,7 +748,8 @@ void Scenario_fill_report_and_registration_inputs(void)
   }
 
 // ---- automatic fill -> T011 registration (CMhRegistrar through the existing ETD_Register); the exit transport is the FAKE one with real=true (the gates of a real transport stay in force)
-#define REG_POS 7
+ulong g_pos=7;
+#define REG_POS g_pos                                    // the position id of the world under test (7 unless a scenario needs several different positions in one process)
 void RegClean(const long login)
   {
    string n="VELO_T019_SELFTEST_"+ESF_FileName(login,REG_POS);
@@ -1192,6 +1193,8 @@ public:
    CMhManager mgr;
    SLcState st;
    string notes;
+   CLcObserver *obs;
+   CProc(void) {obs=NULL;}
    // a (re)start: the same disks (entry store clone, T011 files, broker facts), no lock held, a new registrar and manager
    void Boot(CRegWorld &r,CEnFakeStore &disk,const SXaRaw &raw)
      {
@@ -1207,12 +1210,12 @@ public:
       r.BindMgr(mgr,EX_AUTH_PHRASE);
       mgr.raw_a=raw;
       mgr.raw_b=raw;
-      LC_Startup(r.w.cfg,GetPointer(r.w.t),GetPointer(s),GetPointer(s),false,st,notes,GetPointer(reg));
+      LC_Startup(r.w.cfg,GetPointer(r.w.t),GetPointer(s),GetPointer(s),false,st,notes,GetPointer(reg),obs);
      }
    string Tick(CRegWorld &r)
      {
       string n;
-      LC_Tick(r.w.cfg,GetPointer(r.w.t),GetPointer(s),st,0,0,n,GetPointer(reg));
+      LC_Tick(r.w.cfg,GetPointer(r.w.t),GetPointer(s),st,0,0,n,GetPointer(reg),obs);
       return(n);
      }
    void Stop(void) {LC_Release(GetPointer(s),st);}
@@ -1902,6 +1905,165 @@ void Scenario_notify_restart_repeats_nothing(void)
      }
   }
 
+void Scenario_notify_terminal_event_survives_object_removal(void)
+  {
+   int modes[2]={NT_RETRY_LATER,NT_FAILED};
+   for(int k=0;k<2;k++)
+      for(int d=0;d<2;d++)
+        {
+         int dir=(d==0 ? 1 : -1);
+         CWorld w;
+         bool placed=w.Placed(dir);
+         CNtFakeSink sink;
+         CNtNotifier nf;
+         NtBind(nf,sink,GetPointer(w.s),777);
+         NtTick(w,GetPointer(nf));
+         sink.mode=modes[k];
+         string n;
+         LC_Tick(w.cfg,GetPointer(w.t),GetPointer(w.s),w.g.st,TP_EV_SESSION_END,TP_EV_SESSION_END,n,NULL,GetPointer(nf));   // the cancel is confirmed, the object leaves the index
+         bool gone=(w.g.st.n==0 && w.t.cancels==1);
+         for(int i=0;i<2;i++) NtTick(w,GetPointer(nf));                    // nothing left to observe, the receiver still refuses
+         bool none=(sink.Count("PENDING CANCELLED")==0);
+         bool ok=true;
+         if(modes[k]==NT_RETRY_LATER)
+           {
+            sink.mode=NT_SENT;
+            NtTick(w,GetPointer(nf));
+            NtTick(w,GetPointer(nf));
+            ok=(sink.Count("PENDING CANCELLED")==1);
+           }
+         else
+           {
+            ok=(sink.calls==1+NT_MAX_TRIES);
+            sink.mode=NT_SENT;
+            NtTick(w,GetPointer(nf));
+            ok=(ok && sink.Count("PENDING CANCELLED")==0);                   // a dropped event is not resurrected
+           }
+         Check(placed && gone && none && ok && w.t.sends==1,StringFormat("mode %d dir %d: a waiting terminal event survives the removal of its object; failures use the existing attempts; trading untouched",modes[k],dir));
+        }
+  }
+
+void Scenario_notify_remainder_close_after_done_observed(void)
+  {
+   for(int d=0;d<2;d++)
+     {
+      int dir=(d==0 ? 1 : -1);
+      g_pos=7;
+      CRegWorld r;
+      r.Build(dir,(d==0 ? 2005.0 : 1995.0),EX_AUTH_PHRASE);
+      SXaRaw full,nyet;
+      BuildRawFacts(full,dir,true);
+      BuildRawFacts(nyet,dir,false);
+      CNtFakeSink sink;
+      CNtNotifier nf;
+      NtBind(nf,sink,GetPointer(r.w.s),777);
+      r.obs=GetPointer(nf);
+      r.reg.obs=GetPointer(nf);
+      r.reg.manager=GetPointer(r.mgr);
+      r.mgr.raw_a=nyet;
+      r.mgr.raw_b=nyet;
+      r.Tick();
+      r.Tick();
+      double bid,ask;
+      LevelQuote(dir,bid,ask);
+      bool sent=(r.mgr.OnQuote(bid,ask)==1);
+      r.m.position.volume=0.02;
+      r.x.position.volume=0.02;
+      r.mgr.raw_a=full;
+      r.mgr.raw_b=full;
+      bool timer=(r.mgr.OnTimer()==1);
+      string done=r.Tick();
+      bool kept=(Has(done,"MANAGEMENT_DONE") && r.w.g.st.n==1 && r.mgr.n==0);
+      for(int i=0;i<4;i++) r.Tick();
+      bool quiet=(r.m.sends==1 && r.mgr.n==0 && sink.Count("PARTIAL")==1 && sink.Count("POSITION CLOSED")==0);
+      r.x.position.found=false;
+      r.reg.closed=true;
+      for(int i=0;i<3;i++) r.Tick();
+      Check(r.ok && sent && timer && kept && quiet && sink.Count("POSITION CLOSED")==1 && r.w.g.st.n==0 && r.w.g.st.halted=="" && nf.n_last==0,
+            StringFormat("dir %d: after the partial and DONE the id stays only to observe (no slot, no re-arming); the final close is announced once and the index is empty",dir));
+      RegClean(r.login);
+      // the same after a restart: the DONE is recovered, the remainder is only observed
+      CRegWorld q;
+      q.Build(dir,(d==0 ? 2005.0 : 1995.0),EX_AUTH_PHRASE);
+      LC_Release(GetPointer(q.w.s),q.w.g.st);
+      CProc p1;
+      p1.Boot(q,q.w.s,nyet);
+      bool sent2=(p1.mgr.OnQuote(bid,ask)==1);
+      q.m.position.volume=0.02;
+      q.x.position.volume=0.02;
+      p1.mgr.raw_a=full;
+      p1.mgr.raw_b=full;
+      bool timer2=(p1.mgr.OnTimer()==1);
+      CNtFakeSink sink2;
+      CNtNotifier n1;
+      NtBind(n1,sink2,GetPointer(p1.s),777);
+      p1.reg.obs=GetPointer(n1);
+      p1.obs=GetPointer(n1);
+      p1.Tick(q);
+      p1.Stop();
+      CProc p2;
+      CNtNotifier n2;
+      NtBind(n2,sink2,GetPointer(p2.s),777,true);
+      p2.reg.obs=GetPointer(n2);
+      p2.obs=GetPointer(n2);
+      p2.Boot(q,p1.s,full);
+      n2.baseline=false;
+      bool rec=(p2.st.n==1 && p2.mgr.n==0 && q.m.sends==1);
+      q.x.position.found=false;
+      p2.reg.closed=true;
+      p2.Tick(q);
+      Check(sent2 && timer2 && rec && sink2.Count("POSITION CLOSED")==1 && p2.st.n==0 && q.m.sends==1,StringFormat("dir %d: after a restart the DONE is recovered, nothing is re-armed or sent, and the final close is announced",dir));
+      RegClean(q.login);
+     }
+  }
+
+void Scenario_notify_sixteen_plus_positions_one_process(void)
+  {
+   CNtFakeSink sink;
+   CNtNotifier nf;
+   bool all_ok=true;
+   int total=0;
+   for(int d=0;d<2;d++)
+      for(int i=0;i<NT_MAX_POS+4;i++)
+        {
+         int dir=(d==0 ? 1 : -1);
+         g_pos=(d==0 ? 100 : 200)+i;
+         CRegWorld r;
+         r.Build(dir,(d==0 ? 2005.0 : 1995.0),EX_AUTH_PHRASE);
+         NtBind(nf,sink,GetPointer(r.w.s),777);
+         r.obs=GetPointer(nf);
+         r.reg.obs=GetPointer(nf);
+         r.reg.manager=GetPointer(r.mgr);
+         int before=sink.n;
+         r.Tick();
+         r.Tick();
+         r.x.position.volume=0.02;
+         r.Tick();
+         r.x.position.found=false;
+         r.reg.closed=true;
+         r.Tick();
+         r.Tick();
+         bool one=(r.ok && sink.n-before==3 && Has(sink.texts[before],"POSITION OPENED") && Has(sink.texts[before+1],"PARTIAL CLOSE") && Has(sink.texts[before+2],"POSITION CLOSED") && nf.n_last==0 && r.w.g.st.n==0);
+         if(!one) {all_ok=false; PrintFormat("dir %d position %I64u: events %d tracked %d index %d",dir,g_pos,sink.n-before,nf.n_last,r.w.g.st.n);}
+         total++;
+         RegClean(r.login);
+         if(!all_ok) break;
+        }
+   g_pos=7;
+   Check(all_ok && sink.Count("POSITION CLOSED")==total && total==2*(NT_MAX_POS+4),StringFormat("%d different positions in one process: every event announced, the tracking entry released at the close, the index empty",total));
+   // the tracking itself: a new position is never ignored when it is full
+   CNtFakeSink s2;
+   CNtNotifier n2;
+   CRegWorld w;
+   w.Build(1,2005.0,EX_AUTH_PHRASE);
+   NtBind(n2,s2,GetPointer(w.w.s),777);
+   for(int pid=1;pid<=NT_MAX_POS+5;pid++) n2.OnPosition(w.login,SIG,(ulong)pid,0.1,1985.0);
+   bool newest=(n2.LastIndex((ulong)(NT_MAX_POS+5))>=0);
+   bool oldest=(n2.LastIndex(1)<0);
+   Check(n2.n_last==NT_MAX_POS && newest && oldest,"a full tracking evicts the oldest and follows the newest");
+   RegClean(w.login);
+  }
+
 void OnStart()
   {
    Print("T019 ENTRY LIFECYCLE TEST: fake transport and fake store only; no terminal read, no order, no file.");
@@ -1949,6 +2111,9 @@ void OnStart()
    Scenario_notify_failure_changes_no_decision();
    Scenario_notify_manual_foreign_unreadable_silent();
    Scenario_notify_restart_repeats_nothing();
+   Scenario_notify_terminal_event_survives_object_removal();
+   Scenario_notify_remainder_close_after_done_observed();
+   Scenario_notify_sixteen_plus_positions_one_process();
    PrintFormat("T019 ENTRY LIFECYCLE TEST finished: %d passed, %d failed",g_pass,g_fail);
   }
 

@@ -31,15 +31,18 @@ assert sorted(re.findall(r'#include "([^"]+)"', t)) == ['EntryGate.mqh'], 'inclu
 assert not re.search(r'(?<![A-Za-z_])store\.(Lock|Unlock)\(', t), 'the per-signal lock belongs to the executor'
 assert t.count('lockstore.Lock(') == 1 and t.count('lockstore.Unlock(') == 1, 'one acquire and one release of the index lock'
 assert t.count('EN_Reconcile(') == 2 and t.count('EN_Cancel(') == 1 and t.count('TP_CancelDecision(') == 1 and t.count('LC_RecordEvents(') == 2, 'call sites (one definition, one use)'
+assert t.count('LC_TickCore(') == 2 and t.count('obs.OnTick()') == 1, 'one core, one wrapper'
 sweep = t[t.index('void LC_Sweep('):t.index('bool LC_Startup(')]
 assert 'EN_Reconcile(' in sweep and 'EN_Cancel(' not in sweep, 'the sweep only reconciles'
-tick = t[t.index('void LC_TickEx('):t.index('void LC_Tick(')]
+tick = t[t.index('void LC_TickCore('):t.index('void LC_TickEx(')]
+wrap = t[t.index('void LC_TickEx('):t.index('void LC_Tick(')]
+assert 'LC_TickCore(cfg,tr,store,s,due,enabled,facts,dir_enabled,notes,sink,obs);' in wrap and wrap.index('LC_TickCore(') < wrap.index('obs.OnTick()'), 'the waiting notifications are delivered at the end of EVERY tick'
 assert 'int events=(due & enabled);' in tick, 'cancel events must be due AND enabled'
 assert tick.index('LC_Sweep(') < tick.index('if(events!=0 || (dir_enabled!=0 && facts.valid))') < tick.index('TP_CancelDecision(') < tick.index('EN_Cancel('), 'order'
 assert 'dec.status!=TP_CANCEL_REQUEST) continue;' in tick, 'cancel without a request'
 assert 'EN_RuntimeInit(rt)' in tick and tick.index('EN_RuntimeInit(rt)') < tick.index('EN_Cancel('), 'fresh runtime per cancel'
 assert 'TP_CancelDecision(true,open_ids[i],false,events|LC_RecordEvents(cfg,tr,store,s.login,open_ids[i],facts,dir_enabled),dec)' in tick, 'cancel decision inputs: the global events plus the events of THIS record'
-rec = t[t.index('int LC_RecordEvents('):t.index('void LC_TickEx(')]
+rec = t[t.index('int LC_RecordEvents('):t.index('void LC_TickCore(')]
 for need in ('if(dir_enabled==0 || !facts.valid) return(0);', 'age<0 || age>cfg.quote_max_age', 'EN_Load(store,EN_FileName(login,sid),rec,why)!=1', 'rec.magic!=cfg.ea_magic', 'facts.ctx_direction==-rec.direction',
              'facts.signal_direction==-rec.direction', 'facts.signal_id!=sid'):
     assert need in rec, 'the per-record judgement lacks: ' + need
@@ -166,7 +169,8 @@ cmp_ = rg[rg.index('int Compare('):rg.index('int Attempt(')]
 for need in ('phrase!=EX_AUTH_PHRASE', '!acct.demo', 'acct.margin_mode!=2', 'rec.magic==magic', 'pos.magic!=magic', 'EX_Geometry(', 'o.plan_e_src==pos.price_open', 'st.level==geo.level_2r', 'o.plan_vol_step==sym.vol_step'):
     assert need in cmp_, 'the comparison of an existing record lacks: ' + need
 assert 'ESF_Save' not in cmp_ and 'ETD_Register' not in cmp_, 'the comparison never writes'
-assert 'if(ms==LC_SINK_CONFIRMED) manager.Forget(rec.position_id);' in rg and 'if(n>=MH_MAX_SLOTS) {detail="MANAGEMENT_SLOTS_FULL"' in t, 'a finished management releases its slot; the capacity is enforced'
+assert rg.count('manager.Forget(rec.position_id);') == 2 and 'ObservingIndex(rec.position_id)>=0' in rg and 'if(obs!=NULL && n_observing<LC_MAX)' in rg and 'ObservingRemove(rec.position_id);' in rg, 'a finished management releases its slot; with an observer the id stays only to observe, never re-armed'
+assert 'if(n>=MH_MAX_SLOTS) {detail="MANAGEMENT_SLOTS_FULL"' in t, 'a finished management releases its slot; the capacity is enforced'
 assert 'q.level_2r=0.0;' in rg, 'the 2R level is computed by T011 itself from the real open price (R_GEOM), never supplied'
 assert 'TP_EQUALS_2R' not in t and 'tp_equals' not in t.lower(), 'the TP / 2R rule is T011 own and is not touched or interpreted here'
 PYEOF
@@ -224,12 +228,15 @@ assert 'SendNotification(' in push and 'n>=8' in push and 'now-stamps[n-1]<1000'
 nf = t[t.index('class CNtNotifier'):]
 assert 'rec.magic==magic && rec.symbol==symbol' in nf, 'ownership by magic and symbol'
 assert nf.count('Load(login,sid,rec)') == 3, 'every observation loads and filters the record first'
-assert 'if(IsDone(key)) return(true);' in nf and 'if(baseline) {MarkDone(key); return(true);}' in nf, 'once per key; the baseline only remembers'
-assert nf.index('if(IsDone(key)) return(true);') < nf.index('sink.Send('), 'dedupe before the send'
-assert 'NT_MAX_TRIES' in nf and 'if(st==NT_RETRY_LATER) return(false);' in nf, 'bounded retries; a throttled send does not consume attempts'
+assert 'if(IsDone(key) || InOutbox(key)) return;' in nf and 'if(baseline) {MarkDone(key); return;}' in nf, 'once per key; the baseline only remembers'
+assert nf.index('if(IsDone(key) || InOutbox(key)) return;') < nf.index('okey[n_out]=key;') and nf.count('sink.Send(') == 1, 'dedupe before the event is queued; the one send is in OnTick'
+assert 'virtual void OnTick(void)' in nf and 'if(st==NT_RETRY_LATER) return;' in nf and 'OutboxRemove(0)' in nf, 'the outbox: delivered at the end of every tick, a throttled send keeps the event, bounded'
+assert 'NT_MAX_TRIES' in nf and 'if(st==NT_RETRY_LATER) return;' in nf, 'bounded retries; a throttled send does not consume attempts'
 assert 'verdict==LC_V_OPEN' in nf and 'verdict==LC_V_FILLED' in nf and 'removed_kind==1 || removed_kind==2' in nf, 'pending placed / filled / removed come from the reconcile verdict'
 assert 'volume<lvol[k]-1e-9' in nf and 'MathAbs(sl-lsl[k])>1e-9' in nf and 'POSITION PARTIAL CLOSE' in nf and 'POSITION MODIFIED' in nf and 'POSITION CLOSED' in nf, 'partial, modification and final close are distinct events'
-assert 'if(ok) {lvol[k]=volume; lsl[k]=sl;}' in nf, 'a position observation is completed only when its events are settled'
+assert 'lvol[k]=volume;' in nf and 'if(n_last>=NT_MAX_POS) LastRemove(0);' in nf, 'a new position evicts the oldest and is never ignored'
+closed = nf[nf.index('virtual void OnClosed('):]
+assert 'if(k>=0) LastRemove(k);' in closed, 'the tracking entry is released at the close'
 # the observer is told about facts; it never receives a way to act
 obs = hd[hd.index('class CLcObserver'):hd.index('class CLcFillSink')]
 assert 'virtual void OnVerdict(' in obs and 'virtual void OnPosition(' in obs and 'virtual void OnClosed(' in obs and 'CEnTransport' not in obs and 'CEnStore' not in obs, 'the observer interface has no handle to act'
@@ -367,7 +374,7 @@ expect_assert "$NEG/l3.py" "$NEG/ZJ.mqh" "a registrar that never hands over to t
 mut ZK.mqh $MH 's/         if(ETD_Tick(slots\[i\].cfg,tr,slots\[i\].rt,slots\[i\].name,slots\[i\].id,q,slots\[i\].st,res)) sent++;/         if(EX_Process(slots[i].cfg,tr,slots[i].rt,slots[i].name,slots[i].id,q,res)) sent++;/'
 expect_assert "$NEG/l6.py" "$NEG/ZK.mqh" "a request path that bypasses the driver" "forbidden: EX_Process"
 
-mut ZL.mqh $MH 's/      if(ms==LC_SINK_CONFIRMED) manager.Forget(rec.position_id);.*$/      \/\/ none/'
+mut ZL.mqh $MH 's/         manager.Forget(rec.position_id);   .*finished: the slot is released.*$/         \/\/ none/'
 expect_assert "$NEG/l6.py" "$NEG/ZL.mqh" "a slot that outlives its finished management" "releases its slot"
 
 mut ZM.mqh $HD 's/ \&\& facts.ctx_direction==-rec.direction) ev|=TP_EV_DIRECTION_CHANGE;/) ev|=TP_EV_DIRECTION_CHANGE;/'
@@ -379,7 +386,7 @@ expect_assert "$NEG/l2.py" "$NEG/ZO.mqh" "a direction event from stale facts" "a
 mut ZP.mqh $EA 's/^input bool InpCancelOnDirectionChange=false;/input bool InpCancelOnDirectionChange=true;/'
 expect_assert "$NEG/l3.py" "$NEG/ZP.mqh" "direction cancel on by default" "off by default"
 
-mut N1.mqh $NT 's/      if(IsDone(key)) return(true);/      if(false) return(true);/'
+mut N1.mqh $NT 's/      if(IsDone(key) || InOutbox(key)) return;/      if(false) return;/'
 expect_assert "$NEG/l7.py" "$NEG/N1.mqh $EA $HD $MH" "a notification repeated at every poll" "once per key"
 mut N2.mqh $NT 's/      return(rec.magic==magic \&\& rec.symbol==symbol);/      return(true);/'
 expect_assert "$NEG/l7.py" "$NEG/N2.mqh $EA $HD $MH" "a manual or foreign trade notified" "ownership by magic"
@@ -393,6 +400,15 @@ mut N6.mqh $MH 's/      if(obs!=NULL) obs.OnPosition(rec.login,rec.signal_id,idn
 expect_assert "$NEG/l7.py" "$NT $EA $HD $NEG/N6.mqh" "positions never reported" "OWNED position once"
 mut N7.mqh $EA 's/^input bool InpPushNotifications=false;/input bool InpPushNotifications=true;/'
 expect_assert "$NEG/l7.py" "$NT $NEG/N7.mqh $HD $MH" "notifications on by default" "off by default"
+
+mut Z1B.mqh $NT 's/      if(k>=0) LastRemove(k); .*$/      \/\/ none/'
+expect_assert "$NEG/l7.py" "$NEG/Z1B.mqh $EA $HD $MH" "a tracking entry that outlives the close" "released at the close"
+mut Z2B.mqh $NT 's/         if(n_last>=NT_MAX_POS) LastRemove(0); .*$/         if(n_last>=NT_MAX_POS) return;/'
+expect_assert "$NEG/l7.py" "$NEG/Z2B.mqh $EA $HD $MH" "a new position ignored when the tracking is full" "evicts the oldest"
+mut Z3B.mqh $HD 's/   if(obs!=NULL) obs.OnTick(); .*$/   \/\/ none/'
+expect_assert "$NEG/l2.py" "$NEG/Z3B.mqh" "notifications that are not delivered at the end of the tick" "one core, one wrapper"
+mut Z4B.mqh $MH 's/      if(ObservingIndex(rec.position_id)>=0)/      if(false)/'
+expect_assert "$NEG/l6.py" "$NEG/Z4B.mqh" "a finished management that is re-armed at every sweep" "never re-armed"
 
 [ $FAIL -eq 0 ] && echo "LIFECYCLE STATIC CHECKS: ALL PASS (static only; MetaEditor compile and MT5 run UNVERIFIED)" || echo "LIFECYCLE STATIC CHECKS: FAILURES"
 exit $FAIL

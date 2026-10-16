@@ -275,13 +275,28 @@ public:
    string phrase;               // the standing authorisation phrase (EX_AUTH_PHRASE) given as an EA input
    int rpol;                    // EX_RPOL_R_GEOM
    CLcObserver *obs;            // optional: PROVEN facts about the owned position (volume, SL, closed)
+   ulong observing[LC_MAX];     // positions whose management is finished and that are only observed until they close (in-process; rebuilt by the recovery after a restart)
+   int n_observing;
+   int ObservingIndex(const ulong pid)
+     {
+      for(int i=0;i<n_observing;i++)
+         if(observing[i]==pid) return(i);
+      return(-1);
+     }
+   void ObservingRemove(const ulong pid)
+     {
+      int k=ObservingIndex(pid);
+      if(k<0) return;
+      for(int i=k;i<n_observing-1;i++) observing[i]=observing[i+1];
+      n_observing--;
+     }
    CMhManager *manager;         // optional: after a confirmed registration the position is handed to the T011 driver (management inside the orchestrator)
    int provenance;              // MH_PROV_*; anything but BROKER refuses before any terminal read
    bool selftest;               // test file names only (a prefix); the production name is ESF_FileName
    string tries_id[LC_MAX];
    int tries[LC_MAX];
    int n_tries;
-   CMhRegistrar(void) {entry_store=NULL; exit_tr=NULL; magic=0; phrase=""; rpol=EX_RPOL_UNSET; obs=NULL; manager=NULL; provenance=MH_PROV_UNSET; selftest=false; n_tries=0;}
+   CMhRegistrar(void) {entry_store=NULL; exit_tr=NULL; magic=0; phrase=""; rpol=EX_RPOL_UNSET; obs=NULL; n_observing=0; manager=NULL; provenance=MH_PROV_UNSET; selftest=false; n_tries=0;}
    string Name(const long login,const ulong position_id) {return((selftest ? "VELO_T019_SELFTEST_" : "")+ESF_FileName(login,position_id));}
    // true only when the position list was readable, stable (two scans, the count unchanged) and holds no such position: the position is CLOSED, not merely unreadable. Tests override it.
    virtual bool Absent(const ulong position_id)
@@ -309,12 +324,28 @@ public:
       if(StringFind(detail_in,"POSITION_CLOSED")==0)
         {
          manager.Forget(rec.position_id);
+         ObservingRemove(rec.position_id);
          return(status);
+        }
+      if(ObservingIndex(rec.position_id)>=0)
+        {
+         detail="ACTIVE";                                      // observe-only: no slot, no driver, no re-arming
+         return(LC_SINK_ACTIVE);
         }
       string md;
       int ms=manager.Manage(rec,idn,name,md);
-      if(ms==LC_SINK_CONFIRMED) manager.Forget(rec.position_id);     // finished: the slot is released (the T011 record stays; a restart before the index is saved recovers the DONE from it)
-      if(ms==LC_SINK_CONFIRMED) detail=detail_in+" | "+md;
+      if(ms==LC_SINK_CONFIRMED)
+        {
+         manager.Forget(rec.position_id);                      // finished: the slot is released (the T011 record stays; a restart before the index is saved recovers the DONE from it)
+         if(obs!=NULL && n_observing<LC_MAX)
+           {
+            observing[n_observing]=rec.position_id;
+            n_observing++;
+            detail=detail_in+" | "+md+" | OBSERVING the remainder until its final close";
+            return(LC_SINK_ACTIVE);
+           }
+         detail=detail_in+" | "+md;
+        }
       else
          if(ms==LC_SINK_ACTIVE) detail=(md=="ACTIVE" ? md : detail_in+" | MANAGEMENT "+md);
          else detail=md;

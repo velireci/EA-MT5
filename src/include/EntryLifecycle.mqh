@@ -30,6 +30,7 @@ public:
    virtual void OnVerdict(const long login,const string sid,const int verdict,const int removed_kind) {}
    virtual void OnPosition(const long login,const string sid,const ulong position_id,const double volume,const double sl) {}
    virtual void OnClosed(const long login,const string sid,const ulong position_id) {}
+   virtual void OnTick(void) {}        // end of every lifecycle tick: waiting notifications are delivered (also when the layer is halted or the object is gone)
   };
 
 class CLcFillSink
@@ -449,7 +450,7 @@ int LC_RecordEvents(const SEnConfig &cfg,CEnTransport *tr,CEnStore *store,const 
    return(ev);
   }
 
-void LC_TickEx(const SEnConfig &cfg,CEnTransport *tr,CEnStore *store,SLcState &s,const int due,const int enabled,const SLcFacts &facts,const int dir_enabled,string &notes,CLcFillSink *sink=NULL,CLcObserver *obs=NULL)
+void LC_TickCore(const SEnConfig &cfg,CEnTransport *tr,CEnStore *store,SLcState &s,const int due,const int enabled,const SLcFacts &facts,const int dir_enabled,string &notes,CLcFillSink *sink,CLcObserver *obs)
   {
    notes="";
    if(s.login<=0) return;
@@ -497,6 +498,12 @@ void LC_TickEx(const SEnConfig &cfg,CEnTransport *tr,CEnStore *store,SLcState &s
         }
      }
    if(changed) LC_Persist(store,s,notes);
+  }
+
+void LC_TickEx(const SEnConfig &cfg,CEnTransport *tr,CEnStore *store,SLcState &s,const int due,const int enabled,const SLcFacts &facts,const int dir_enabled,string &notes,CLcFillSink *sink=NULL,CLcObserver *obs=NULL)
+  {
+   LC_TickCore(cfg,tr,store,s,due,enabled,facts,dir_enabled,notes,sink,obs);
+   if(obs!=NULL) obs.OnTick();                              // waiting notifications are delivered at the end of EVERY tick
   }
 
 void LC_Tick(const SEnConfig &cfg,CEnTransport *tr,CEnStore *store,SLcState &s,const int due,const int enabled,string &notes,CLcFillSink *sink=NULL,CLcObserver *obs=NULL)
